@@ -15,6 +15,14 @@ struct EvalTally
     lines: i64
     unshared: i64
 
+struct SharedEngine
+    name: [64]u8
+    name_len: int
+    lines: i64
+
+    fn name_text() -> str
+        return str(name[0..name_len])
+
 var eval_recorder: *EvalRecorder = null
 
 struct EvalRecorder
@@ -34,6 +42,7 @@ struct EvalRecorder
     tallied: bool
     tallied_for: u64
     tallied_marks: u64
+    shared_by: [..]SharedEngine
     lib: *EngineLibrary
     registry: *Registry
     ratings: *CcrlRatings
@@ -50,6 +59,7 @@ struct EvalRecorder
         if open: db.close()
         open = false
         rated.free()
+        shared_by.free()
 
     fn keep(board: *Board, name: str, multipv: int, depth: int, seldepth: int, kind: ScoreKind, score: int, nodes: i64, time_ms: i64, moves: []Move, offered: bool = true, wdl: u32 = 0, has_wdl: bool = false)
         if not open or kind == NoScore or moves.len == 0 or name.len == 0: return
@@ -197,10 +207,29 @@ struct EvalRecorder
         tallied_marks = marked
         var t = EvalTally()
         var last: u64 = 0
+        var by: [..]i64
+        defer by.free()
         let lichess = db.store.known_id(db.engines, DbCloudName) as u16
-        db.store.each(db.evals, |r| db_tally_line(r as *DbEval, &t, &last, lichess))
+        db.store.each(db.evals, |r| db_tally_line(r as *DbEval, &t, &last, lichess, &by))
+        rank_shared(&by)
         tally = t
         return t
+
+    fn rank_shared(by: *[..]i64)
+        shared_by.clear()
+        var name: [..]u8
+        defer name.free()
+        loop
+            var best = -1
+            for i in 0..by.len
+                if by[i] > 0 and (best < 0 or by[i] > by[best]): best = i as int
+            if best < 0: break
+            db.engine_name(best as u16, &name)
+            var s = SharedEngine(lines: by[best], name_len: min(name.len, 64) as int)
+            for k in 0..s.name_len
+                s.name[k] = name[k]
+            shared_by.push(s)
+            by[best] = 0
 
     fn tick(now: i64)
         if not waiting or now - committed_ns < RecorderCommitNs: return
@@ -279,11 +308,14 @@ fn db_sync_pick(e: *DbEval, into: *[..]DbEval, lichess: u16)
 fn db_marked_pick(e: *DbEval, into: *[..]DbEval)
     if (e.flags & DbShared) != 0: into.push(*e)
 
-fn db_tally_line(e: *DbEval, t: *EvalTally, last: *u64, lichess: u16)
+fn db_tally_line(e: *DbEval, t: *EvalTally, last: *u64, lichess: u16, by: *[..]i64)
     if t.lines == 0 or e.key != *last: t.positions += 1
     *last = e.key
     t.lines += 1
     if e.depth >= CloudMinDepth and e.pv_len > 0 and (e.flags & DbShared) == 0 and e.engine != lichess: t.unshared += 1
+    if (e.flags & DbShared) != 0
+        while by.len <= e.engine as int: by.push(0)
+        by[e.engine] += 1
 
 fn db_fen_side(fen: str) -> Side
     for i in 0..fen.len

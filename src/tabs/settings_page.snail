@@ -853,7 +853,31 @@ struct SettingsPage
                     if ui.button("Stop sharing")
                         s.cloud_share = false
                         changed = true
+        if r and r.shared_by.len > 0
+            with kit.card(88, "Shared by engine")
+                shared_engines(r.shared_by[0..r.shared_by.len], theme, fonts)
         return changed
+
+    fn shared_engines(engines: []SharedEngine, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = kit.ui
+        var total: i64 = 0
+        for e in engines: total += e.lines
+        let top = max(engines[0].lines, 1) as f64
+        let name_w: f32 = kit.narrow() ? 120.0 : 180.0
+        var n: [48]u8
+        var p: [16]u8
+        with ui.open(UiNode(name: "sharedengines", width: UiSize.grow(), padding: Vec4(18.0, 14.0, 18.0, 14.0), gap: 9.0))
+            for i, e in engines
+                let first = i == 0
+                with ui.open(UiNode(key: i as int, name: "sharedengine", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5)))
+                    ui.label(format(&p, "{i + 1}"), UiTextStyle(face: fonts.mono, size: 12.0, color: theme.muted), UiNode(width: UiSize.fixed(20.0), align: Vec2(1.0, 0.5)))
+                    ui.label(e.name_text(), UiTextStyle(face: first ? fonts.strong : fonts.text, size: 13.0, color: theme.ink), UiNode(width: UiSize.fixed(name_w), clip: true))
+                    with ui.open(UiNode(name: "sharedbar", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(8.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(4.0))))
+                        let part = max((e.lines as f64 / top) as f32, 0.01)
+                        ui.leaf(UiNode(width: UiSize.part(part), height: UiSize.grow(), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(first ? 1.0 : 0.75)), radius: Vec4.splat(4.0))))
+                    ui.label(group_digits(e.lines, &n), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink), UiNode(width: UiSize.fixed(82.0), align: Vec2(1.0, 0.5)))
+                    let pct = e.lines as f64 * 100.0 / max(total, 1) as f64
+                    ui.label(format(&p, "{pct:.1}%"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(width: UiSize.fixed(48.0), align: Vec2(1.0, 0.5)))
 
     fn cloud_state(c: *CloudDb) -> str
         if not c or not c.on(): return "Set a server to share with."
