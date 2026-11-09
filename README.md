@@ -6,6 +6,11 @@ Open source chess GUI written in Snail. Find out more at
 
 ![The same position on the 2D board, with the engine's best moves drawn as arrows](docs/screenshot-2d.png)
 
+## Download
+
+For Windows, download the zip from [Releases](https://github.com/CodeAdopter/Snail-Chess-Gui/releases), unzip it
+and open `Snail Chess GUI.exe`. It is in alpha, and needs 64-bit Windows 10 or 11 with a DirectX 12 graphics card.
+
 ## Features
 
 - **Analyze games and positions.** Paste a PGN or FEN, or set up the board, and follow an engine's best lines as
@@ -27,7 +32,7 @@ Open source chess GUI written in Snail. Find out more at
 - **A position database** keeps every evaluation your engines make, along with games from PGN files and Lichess.
   See what each engine said about a position, ranked by CCRL rating.
 - **Cloud evaluations.** See other people's engine evaluations beside your analysis, and share your own if you like.
-- **2D and 3D boards.** In 2D, 12 piece sets, some of them animated, on 19 board colours. In 3D, wood, marble, glass
+- **2D and 3D boards.** In 2D, 12 piece sets, some of them animated, on 17 board colours. In 3D, wood, marble, glass
   or metal pieces on a table in a library, a park, a bedroom or on Mars.
 - **Effects** you can turn on: embers from captured pieces, flames on check, dust where pieces land, moss on pieces
   left standing idle, and a glow on sacrifices that turns gold when the engine confirms them. Pieces can even dress
