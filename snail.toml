@@ -1,5 +1,5 @@
 main = "main.snail"
 output = "build/snail_chess_gui.exe"
 libs = ["src"]
-copy = ["engines/snailchess.exe", "tools/build/snailfast.exe"]
+copy = ["engines/snailchess.exe", "snailfast/build/snailfast.exe"]
 debug_info = true

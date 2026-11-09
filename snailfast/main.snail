@@ -1,0 +1,289 @@
+use engine/core/text
+use src/fastchess/fast_win32
+use src/fastchess/fast_place
+use src/fastchess/fast_live
+use src/fastchess/fast_args
+
+const FastLogCut: i64 = 4194304
+const FastChunk = 65536
+const FastTickMs = 50
+const FastLiveMs: i64 = 100
+const FastStopGraceMs = 3000
+
+struct FastShim
+    log: *void
+    log_path: [720]u8
+    log_len: int
+    own_log: bool
+    at: i64
+    live: FastLive
+    live_path: [720]u8
+    live_len: int
+    live_text: [..]u8
+    output_dirty: int
+    quit: int
+    forced: int
+    tick: *void
+    stop: *void
+
+fn main()
+    var tail: [32768]u8
+    let typed = str(tail[0..sn_fc_command_tail(&tail[0], 32768)])
+    var place: FastPlace
+    if not place.find_for_shim()
+        fast_print("snailfast: the Snail Chess GUI data folder was not found.\n")
+        exit(1)
+    var program: [720]u8
+    var tag: [64]u8
+    let (exe, version, ok) = place.installed(&program, &tag)
+    if not ok
+        fast_print("snailfast: fastchess is not installed. In Snail Chess GUI, open Settings > FastChess and choose Install.\n")
+        exit(1)
+    var command: [..]u8
+    defer command.free()
+    command.push('"')
+    push_text(&command, exe)
+    push_text(&command, "\" ")
+    push_text(&command, typed)
+    if not fast_has_word(typed, "-engine")
+        var here: [1024]u8
+        var file: [1100]u8
+        var name: [64]u8
+        let id = fast_run_of(&place, fast_option_file(typed, "-config", str(here[0..sn_fc_folder(&here[0], 1024)]), &file), &name)
+        if id.len > 0: exit(fast_continue(&place, str(command[0..command.len]), id))
+        exit(fast_run(str(command[0..command.len]), null, ""))
+    exit(fast_match(&place, &command, typed, version))
+
+fn fast_match(place: *FastPlace, command: *[..]u8, typed: str, version: str) -> int
+    let pid = sn_fc_pid()
+    let started = sn_fc_now_ms()
+    var name: [64]u8
+    let id = format(&name, "{started / 1000}-{pid}")
+    var buf: [720]u8
+    fast_make_folder(place.path("fastchess", &buf))
+    fast_make_folder(place.path("fastchess\\runs", &buf))
+    var folder_buf: [720]u8
+    var inside: [96]u8
+    let folder = place.path(format(&inside, "fastchess\\runs\\{id}"), &folder_buf)
+    if not fast_make_folder(folder)
+        fast_print("snailfast: the run's folder could not be made, so fastchess runs without the app.\n")
+        return fast_run(str(command[0..command.len]), null, "")
+    var lock_buf: [740]u8
+    let lock_path = format(&lock_buf, "{folder}\\lock")
+    let lock = sn_fc_hold(lock_path.ptr, lock_path.len as int)
+    var here: [1024]u8
+    let cwd = str(here[0..sn_fc_folder(&here[0], 1024)])
+    var shim: FastShim
+    var pgn_buf: [1100]u8
+    var pgn = fast_option_file(typed, "-pgnout", cwd, &pgn_buf)
+    if pgn.len == 0
+        pgn = format(&pgn_buf, "{folder}\\games.pgn")
+        var extra: [800]u8
+        push_text(command, format(&extra, " -pgnout \"file={pgn}\""))
+    var log_buf: [1100]u8
+    var log = fast_option_file(typed, "-log", cwd, &log_buf)
+    if log.len == 0
+        log = format(&log_buf, "{folder}\\engine.log")
+        var extra: [800]u8
+        push_text(command, format(&extra, " -log \"file={log}\" level=warn engine=true realtime=true"))
+    if not fast_has_word(typed, "-config")
+        var extra: [800]u8
+        push_text(command, format(&extra, " -config \"outname={folder}\\config.json\""))
+    var stop_buf: [96]u8
+    let stop = format(&stop_buf, "Local\\SnailFastStop-{id}")
+    var run: [..]u8
+    defer run.free()
+    var line: [1200]u8
+    push_text(&run, format(&line, "started {started}\nversion {version}\nfolder {cwd}\npgn {pgn}\nlog {log}\nstop {stop}\n"))
+    push_text(&run, "typed ")
+    push_text(&run, typed)
+    run.push('\n')
+    var path: [740]u8
+    fast_save_whole(format(&path, "{folder}\\run.txt"), str(run[0..run.len]))
+    let code = fast_follow(place, &shim, str(command[0..command.len]), folder, stop, log)
+    sn_fc_close(lock)
+    fast_signal("")
+    return code
+
+fn fast_continue(place: *FastPlace, command: str, id: str) -> int
+    var folder_buf: [720]u8
+    var inside: [96]u8
+    let folder = place.path(format(&inside, "fastchess\\runs\\{id}"), &folder_buf)
+    var path: [740]u8
+    var run: [..]u8
+    defer run.free()
+    if not fast_read_whole(format(&path, "{folder}\\run.txt"), &run)
+        fast_print("snailfast: that run's run.txt was not found, so fastchess runs without the app.\n")
+        return fast_run(command, null, "")
+    let lock_path = format(&path, "{folder}\\lock")
+    let lock = sn_fc_hold(lock_path.ptr, lock_path.len as int)
+    if not lock
+        fast_print("snailfast: that run is going already.\n")
+        return 1
+    let text = str(run[0..run.len])
+    var stop = ""
+    var log = ""
+    var from = 0
+    for i in 0..text.len
+        if text[i] != '\n': continue
+        let line = text[from..i]
+        from = i as int + 1
+        if starts_with(line, "stop "): stop = line[5..line.len]
+        elif starts_with(line, "log "): log = line[4..line.len]
+    var shim: FastShim
+    var end: [740]u8
+    let end_path = format(&end, "{folder}\\end.txt")
+    sn_fc_remove(end_path.ptr, end_path.len as int)
+    var note: [96]u8
+    fast_add(format(&path, "{folder}\\run.txt"), format(&note, "resumed {sn_fc_now_ms()}\n"))
+    var wake: [740]u8
+    let wake_path = format(&wake, "{folder}.wake")
+    fast_save_whole(wake_path, "")
+    sn_fc_remove(wake_path.ptr, wake_path.len as int)
+    let code = fast_follow(place, &shim, command, folder, stop, log)
+    sn_fc_close(lock)
+    fast_signal("")
+    return code
+
+fn fast_follow(place: *FastPlace, shim: *FastShim, command: str, folder: str, stop: str, log: str) -> int
+    var path: [740]u8
+    shim.log_len = min(log.len, 719) as int
+    for i in 0..shim.log_len
+        shim.log_path[i] = log[i]
+    shim.own_log = fast_folded(log, format(&path, "{folder}\\engine.log"))
+    let live = format(&path, "{folder}\\live.txt")
+    shim.live_len = live.len as int
+    for i in 0..shim.live_len
+        shim.live_path[i] = live[i]
+    shim.stop = sn_fc_event(stop.ptr, stop.len as int)
+    shim.tick = sn_fc_event("".ptr, 0)
+    sn_fc_stop_with(shim.stop)
+    if shim.own_log
+        shim.log = sn_fc_open_shared(log.ptr, log.len as int)
+        if shim.log: sn_fc_cut(shim.log)
+    if not fast_signal("") and fast_wants_app(place): fast_start_app(place)
+    let reader = spawn(fast_log_loop, shim)
+    let stopper = spawn(fast_stop_loop, shim)
+    let code = fast_run(command, shim, folder)
+    atomic_store(&shim.quit, 1)
+    sn_fc_set(shim.tick)
+    sn_fc_set(shim.stop)
+    join(reader)
+    join(stopper)
+    sn_fc_stop_with(null)
+    sn_fc_drop_child()
+    if atomic_load(&shim.forced) != 0
+        var line: [200]u8
+        let words = format(&line, "snailfast: fastchess had not stopped {FastStopGraceMs / 1000} s after it was asked to, so it was ended with its engines.\n")
+        fast_print(words)
+        fast_add(format(&path, "{folder}\\output.txt"), words)
+    var end: [96]u8
+    fast_save_whole(format(&path, "{folder}\\end.txt"), format(&end, "code {code}\nended {sn_fc_now_ms()}\n"))
+    sn_fc_close(shim.log)
+    if shim.own_log: sn_fc_remove(log.ptr, log.len as int)
+    sn_fc_close(shim.stop)
+    sn_fc_close(shim.tick)
+    shim.live.release()
+    shim.live_text.free()
+    return code
+
+fn fast_run_of(place: *FastPlace, config: str, buf: *[64]u8) -> str
+    var runs_buf: [720]u8
+    let runs = place.path("fastchess\\runs\\", &runs_buf)
+    if config.len <= runs.len or not fast_folded(config[0..runs.len], runs): return ""
+    let rest = config[runs.len..config.len]
+    let cut = find(rest, "\\")
+    if cut <= 0 or cut > 63 or not fast_folded(rest[cut..rest.len], "\\config.json"): return ""
+    for i in 0..cut
+        buf[i] = rest[i]
+    return str(buf[0..cut])
+
+fn fast_run(command: str, shim: *FastShim, folder: str) -> int
+    var process: *void = null
+    var from_child: *void = null
+    var job: *void = null
+    if sn_fc_start(command.ptr, command.len as int, &process, &from_child, &job) == 0
+        var why: [1200]u8
+        fast_print(format(&why, "snailfast: fastchess could not be started (Windows error {sn_fc_why()}): {command}\nReinstall it from Snail Chess GUI's FastChess settings.\n"))
+        return 1
+    var out: *void = null
+    if shim
+        var path: [740]u8
+        let p = format(&path, "{folder}\\output.txt")
+        out = sn_fc_open_add(p.ptr, p.len as int)
+    let chunk = alloc[u8](FastChunk)
+    defer free(chunk)
+    loop
+        let n = sn_fc_read(from_child, chunk, FastChunk)
+        if n <= 0: break
+        sn_fc_print(chunk, n)
+        if out: sn_fc_write(out, chunk, n)
+        if shim: atomic_store(&shim.output_dirty, 1)
+    let code = sn_fc_finish(process)
+    sn_fc_close(out)
+    sn_fc_close(from_child)
+    if not shim: sn_fc_drop_child()
+    return code
+
+fn fast_log_loop(s: *FastShim)
+    let chunk = alloc[u8](FastChunk)
+    defer free(chunk)
+    var carry: [..]u8
+    defer carry.free()
+    var written: i64 = 0
+    let log = str(s.log_path[0..s.log_len])
+    loop
+        let ending = atomic_load(&s.quit) != 0
+        if s.log == null: s.log = sn_fc_open_read(log.ptr, log.len as int)
+        if s.log
+            let size = sn_fc_size(s.log)
+            if size < s.at: s.at = 0
+            while s.at < size
+                let n = sn_fc_read_at(s.log, s.at, chunk, min(size - s.at, FastChunk as i64) as int)
+                if n <= 0: break
+                s.at += n
+                let now = sn_fc_now_ms()
+                for i in 0..n
+                    let c = chunk[i]
+                    if c == '\n'
+                        s.live.feed(str(carry[0..carry.len]), now)
+                        carry.clear()
+                    elif c != '\r' and c != 0 and carry.len < 16384: carry.push(c)
+            if s.own_log and s.at >= FastLogCut and carry.len == 0 and sn_fc_cut(s.log) != 0: s.at = 0
+        let now = sn_fc_now_ms()
+        var tell = atomic_load(&s.output_dirty) != 0
+        if s.live.changed and (now - written >= FastLiveMs or ending)
+            s.live.write(&s.live_text, now)
+            fast_save_whole(str(s.live_path[0..s.live_len]), str(s.live_text[0..s.live_text.len]))
+            s.live.changed = false
+            written = now
+            tell = true
+        if tell
+            atomic_store(&s.output_dirty, 0)
+            fast_signal("")
+        if ending: break
+        sn_fc_wait(s.tick, FastTickMs)
+
+fn fast_stop_loop(s: *FastShim)
+    loop
+        sn_fc_wait(s.stop, -1)
+        if atomic_load(&s.quit) != 0: return
+        sn_fc_break_child()
+        if sn_fc_end_child(FastStopGraceMs) != 0: atomic_store(&s.forced, 1)
+
+fn fast_wants_app(place: *FastPlace) -> bool
+    var buf: [720]u8
+    var text: [..]u8
+    defer text.free()
+    return not fast_read_whole(place.path("fastchess\\no_app", &buf), &text)
+
+fn fast_start_app(place: *FastPlace)
+    var buf: [720]u8
+    var text: [..]u8
+    defer text.free()
+    if not fast_read_whole(place.path("fastchess\\app.txt", &buf), &text): return
+    let exe = trim(str(text[0..text.len]))
+    if exe.len == 0: return
+    var line: [800]u8
+    let command = format(&line, "\"{exe}\"")
+    sn_fc_launch(command.ptr, command.len as int, "".ptr, 0, 0)
