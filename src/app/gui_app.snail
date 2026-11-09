@@ -64,12 +64,6 @@ struct GuiApp
     quick: QuickMatch
     quick_tab: int
     session_seen: u64
-    fast_back: [..]u8
-    fast_back_run: FastRun
-    fast_back_open: bool
-    fast_probe: EngineProbe
-    fast_probing: bool
-    fast_probe_for: *FastRun
     session_saver: BackgroundSave
     played: PlayedIndex
     sounds: GuiSounds

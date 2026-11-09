@@ -91,10 +91,6 @@ struct FastRun
     typed: [..]u8
     cwd: [..]u8
     pgn: [..]u8
-    evals_at: i64 = -1
-    uci_names: [..]u8
-    names_read: bool
-    names_ready: bool
     stop_name: [..]u8
     version: [64]u8
     version_len: int
