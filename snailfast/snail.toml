@@ -1,3 +1,4 @@
 main = "main.snail"
 output = "build/snailfast.exe"
+march = "x86-64-v2"
 libs = ["../src"]

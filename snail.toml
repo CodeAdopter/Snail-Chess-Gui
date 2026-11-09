@@ -1,6 +1,7 @@
 main = "main.snail"
 version = "0.1.0-alpha"
 output = "build/snail_chess_gui.exe"
+march = "x86-64-v2"
 libs = ["src"]
 copy = ["engines/snailchess.exe", "snailfast/build/snailfast.exe"]
 debug_info = true

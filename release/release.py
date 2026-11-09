@@ -8,9 +8,11 @@ The version is snail.toml's `version`. The release is tagged v<version> and its 
 docs/releases/<version>.md. A version with a hyphen, such as 0.1.0-alpha, is a pre-release.
 
 HEAD must be clean, and pushed to origin/main before publishing. The commit is built in a fresh
-worktree: snailfast first, then the app with snailc's release build. The app is marked a Windows
-GUI program, so no console opens beside it, its imports are checked to be SDL3.dll and Windows'
-own, and it is run once against an empty data folder. The bundled engine must answer UCI.
+worktree: snailfast first, then the app with snailc's release build. Both snail.toml files must
+name a `march` other than native, which would build for this PC's CPU and leave the release
+crashing on older ones (x86-64-v2 runs on any x86-64 CPU since about 2009). The app is marked
+a Windows GUI program, so no console opens beside it, its imports are checked to be SDL3.dll and
+Windows' own, and it is run once against an empty data folder. The bundled engine must answer UCI.
 
 The zip holds one folder, "Snail Chess GUI", with the app, SDL3.dll, snailchess.exe,
 snailfast.exe, release/README.txt, the license and the licenses of what the app includes. The
@@ -80,6 +82,13 @@ def version_of_tree(tree):
     return found[1]
 
 
+def portable_cpu(tree):
+    for toml in [tree / "snail.toml", tree / "snailfast" / "snail.toml"]:
+        march = re.search(r'^march\s*=\s*"([^"]+)"', toml.read_text(encoding="utf-8"), re.M)
+        if not march or march[1] == "native":
+            fail(f"{toml.relative_to(tree)} builds for this PC's CPU; set march = \"x86-64-v2\" so the release runs on others")
+
+
 def head_checked(publishing):
     if run("git", "status", "--porcelain", "--untracked-files=no"):
         fail("the work tree has uncommitted changes; commit them first")
@@ -95,6 +104,7 @@ def build(sha, work):
     tree = work / "tree"
     run("git", "worktree", "add", "--detach", tree, sha)
     try:
+        portable_cpu(tree)
         run(SNAILC, "build", "-c", "release", cwd=tree / "snailfast")
         run(SNAILC, "build", "-c", "release", cwd=tree)
         built = work / "built"
