@@ -9,7 +9,9 @@ Open source chess GUI written in Snail. Find out more at
 ## Download
 
 For Windows, download the zip from [Releases](https://github.com/CodeAdopter/Snail-Chess-Gui/releases), unzip it
-and open `Snail Chess GUI.exe`. It is in alpha, and needs 64-bit Windows 10 or 11 with a DirectX 12 graphics card.
+and open `Snail Chess GUI.exe`. It is in alpha, and needs 64-bit Windows 10 or 11 with DirectX 12. No separate
+graphics card is needed: the graphics built into most PCs from about 2015 onward support DirectX 12, as long as the
+graphics driver is up to date.
 
 ## Features
 

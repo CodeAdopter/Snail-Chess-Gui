@@ -7,7 +7,9 @@ Running it
 - Unzip this folder anywhere you like and open "Snail Chess GUI.exe".
 - Windows may say "Windows protected your PC", because this build is not code-signed yet. Choose
   "More info", then "Run anyway".
-- It needs 64-bit Windows 10 or 11 and a graphics card with DirectX 12.
+- It needs 64-bit Windows 10 or 11 with DirectX 12. No separate graphics card is needed: the
+  graphics built into most PCs from about 2015 onward support DirectX 12, as long as the graphics
+  driver is up to date.
 
 In this folder
 - Snail Chess GUI.exe   the app
