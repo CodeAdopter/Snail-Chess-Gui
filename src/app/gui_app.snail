@@ -92,7 +92,8 @@ struct GuiApp
     fn run()
         let folder_made = data.open()
         var crashes: [600]u8
-        start_crash_reports(data.path("crashes", &crashes), "Snail Chess GUI")
+        var named: [64]u8
+        start_crash_reports(data.path("crashes", &crashes), format(&named, "Snail Chess GUI {version()}"))
         let settings_read = settings.load(&data)
         let known = settings.window_known
         app.open("Snail Chess", known ? max(settings.window_w, 640) : 1440, known ? max(settings.window_h, 480) : 900)

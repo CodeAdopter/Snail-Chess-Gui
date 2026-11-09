@@ -1,4 +1,5 @@
 main = "main.snail"
+version = "0.1.0-alpha"
 output = "build/snail_chess_gui.exe"
 libs = ["src"]
 copy = ["engines/snailchess.exe", "snailfast/build/snailfast.exe"]

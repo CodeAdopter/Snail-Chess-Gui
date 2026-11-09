@@ -176,6 +176,10 @@ struct SettingsPage
                 let last = g + 1 < SettingsGroups.len ? SettingsGroupStarts[g + 1] : SettingsSections.len as int
                 for i in SettingsGroupStarts[g]..last
                     if rail_icon_place(ui, theme, fonts, &icons, "profilesection", i as int, SettingsIcons[i], SettingsSections[i], "", i == section, folded): section = i
+            if not folded
+                ui.spacer()
+                var v: [64]u8
+                ui.label(format(&v, "Snail Chess GUI {version()}"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted), UiNode(name: "railversion", padding: Vec4(12.0, 12.0, 0.0, 2.0)))
 
     fn appearance(s: *Settings, look: *BoardLook) -> bool
         let ui = kit.ui
