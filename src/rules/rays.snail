@@ -1,4 +1,4 @@
-use chess/attacks
+use rules/attacks
 
 var intercept_table: [64 * 64]Bitboard
 
@@ -12,7 +12,7 @@ fn trace_rays(target: Square, files: []int, ranks: []int)
         var file = target.file + files[i]
         var rank = target.rank + ranks[i]
         while file >= 0 and file < 8 and rank >= 0 and rank < 8
-            let attacker = Square(file, rank)
+            let attacker = Square.at(file, rank)
             intercept_table[target << 6 | attacker] = between | attacker.bit
             between |= attacker.bit
             file += files[i]

@@ -49,7 +49,7 @@ struct BoardEditor
             let rank = 7 - row
             var empty = 0
             for file in 0..8
-                let p = squares[Square(file, rank)]
+                let p = squares[Square.at(file, rank)]
                 if p == NoPiece
                     empty += 1
                     continue
@@ -133,8 +133,8 @@ struct BoardEditor
         let skipped = them == Black ? 5 : 2
         let start = them == Black ? 6 : 1
         for file in 0..8
-            if squares[Square(file, pawn_rank)] == Piece.of(them, Pawn) and squares[Square(file, skipped)] == NoPiece and squares[Square(file, start)] == NoPiece
-                out[n] = Square(file, skipped)
+            if squares[Square.at(file, pawn_rank)] == Piece.of(them, Pawn) and squares[Square.at(file, skipped)] == NoPiece and squares[Square.at(file, start)] == NoPiece
+                out[n] = Square.at(file, skipped)
                 n += 1
         return n
 
@@ -159,7 +159,7 @@ struct BoardEditor
             else
                 let p = piece_from_letter(c)
                 if p == NoPiece or file > 7: return false
-                placement[Square(file, rank)] = p
+                placement[Square.at(file, rank)] = p
                 file += 1
         if rank != 0 or file != 8: return false
         squares = placement
@@ -173,7 +173,7 @@ struct BoardEditor
             elif c == 'k': castling |= BlackKingside as u8
             elif c == 'q': castling |= BlackQueenside as u8
         en_passant = Square.none
-        if square_text(passed): en_passant = Square(passed[0] as int - 'a', passed[1] as int - '1')
+        if square_text(passed): en_passant = Square.at(passed[0] as int - 'a', passed[1] as int - '1')
         let (c, c_ok) = fen_number(clock_word, 0)
         let (f, f_ok) = fen_number(move_word, 1)
         clock = c_ok ? clamp(c, 0, 999) : 0

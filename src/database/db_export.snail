@@ -1,5 +1,5 @@
 use src/database/db_games
-use src/chess/notation
+use src/rules/notation
 use src/database/db_logs
 
 const DbAnyKind = -1

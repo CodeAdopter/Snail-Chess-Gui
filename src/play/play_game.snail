@@ -2,7 +2,7 @@ use src/play/game_clock
 use src/play/play_strength
 use src/play/quick_match
 use src/play/speed_pool
-use src/chess/status
+use src/rules/status
 use src/database/eval_recorder
 
 enum PlayState: u8

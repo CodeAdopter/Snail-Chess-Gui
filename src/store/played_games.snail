@@ -2,7 +2,7 @@ use src/store/review_store
 use src/game/pgn_read
 use src/uci/uci_engine
 use src/play/speed_pool
-use src/chess/status
+use src/rules/status
 
 struct PlayedGame
     at: int

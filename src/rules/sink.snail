@@ -1,4 +1,5 @@
-use chess/primitives
+use chess/bitboard
+use rules/primitives
 
 enum GenMode: u8
     WriteAll

@@ -1,5 +1,5 @@
-use chess/primitives
-use chess/polyglot_keys
+use rules/primitives
+use rules/polyglot_keys
 
 var key_white_to_move: u64
 var key_piece_square: [16 * 64]u64

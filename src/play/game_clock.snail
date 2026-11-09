@@ -1,4 +1,4 @@
-use src/chess/primitives
+use src/rules/primitives
 use src/play/time_control
 
 const NsPerMs: i64 = 1000000

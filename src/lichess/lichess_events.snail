@@ -1,5 +1,5 @@
 use engine/core/json
-use src/chess/short_text
+use src/rules/short_text
 
 enum LichessEventKind: u8
     LichessOtherEvent

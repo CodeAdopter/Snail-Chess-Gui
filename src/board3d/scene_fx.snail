@@ -1,5 +1,5 @@
 use engine/desktop/desktop_app
-use src/chess/primitives
+use src/rules/primitives
 use src/board3d/wood_look
 
 const MossShells = 8

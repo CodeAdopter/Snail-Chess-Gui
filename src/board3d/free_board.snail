@@ -1,5 +1,5 @@
-use src/chess/make
-use src/chess/moves
+use src/rules/make
+use src/rules/moves
 use src/board3d/board_shapes
 
 const MaxMen = 48

@@ -1,5 +1,5 @@
-use chess/board
-use chess/rays
+use rules/board
+use rules/rays
 
 struct Threats
     checkers: Bitboard

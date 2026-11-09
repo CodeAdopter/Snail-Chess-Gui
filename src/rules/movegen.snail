@@ -1,6 +1,6 @@
-use chess/sink
-use chess/threats
-use chess/castling
+use rules/sink
+use rules/threats
+use rules/castling
 
 @inline
 fn generate[us: Side, mode: GenMode](board: *Board, ref sink: MoveSink)

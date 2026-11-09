@@ -1,5 +1,5 @@
-use chess/attacks
-use chess/pawns
+use rules/attacks
+use rules/pawns
 
 struct Board
     bb: [PieceLimit]Bitboard

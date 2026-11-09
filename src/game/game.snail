@@ -1,4 +1,4 @@
-use src/chess/notation
+use src/rules/notation
 use src/uci/uci_text
 
 const NoNode = -1

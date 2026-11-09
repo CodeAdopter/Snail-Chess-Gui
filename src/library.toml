@@ -1,2 +1,2 @@
-libs = ["C:/Snail/Snail Engine/engine", "C:/Snail Db/snaildb"]
+libs = ["C:/Snail/Snail Engine/engine", "C:/Snail Db/snaildb", "C:/Snail/Snail/lib/chess"]
 include = ["fastchess/c"]

@@ -42,8 +42,8 @@ struct PolyglotBook
 
 fn polyglot_move(board: *Board, raw: u16) -> (Move, bool)
     let code = raw as int
-    let to = Square(code & 7, code >> 3 & 7)
-    let from = Square(code >> 6 & 7, code >> 9 & 7)
+    let to = Square.at(code & 7, code >> 3 & 7)
+    let from = Square.at(code >> 6 & 7, code >> 9 & 7)
     let promoted = code >> 12 & 7
     var list: MoveList = undefined
     list.fill(board)
@@ -51,7 +51,7 @@ fn polyglot_move(board: *Board, raw: u16) -> (Move, bool)
         let m = list.items[i]
         if m.from != from: continue
         if m.is_castle
-            let rook = Square(m.kind == CastleKingside ? 7 : 0, from.rank)
+            let rook = Square.at(m.kind == CastleKingside ? 7 : 0, from.rank)
             if to == rook or to == m.to: return m, true
             continue
         if m.to != to: continue

@@ -1,4 +1,5 @@
-use chess/random
+use chess/bitboard
+use rules/random
 
 struct SliderEntry
     mask: Bitboard
@@ -69,7 +70,7 @@ fn leap(from: Square, files: []int, ranks: []int) -> Bitboard
         let file = from.file + files[i]
         let rank = from.rank + ranks[i]
         if file >= 0 and file < 8 and rank >= 0 and rank < 8
-            targets |= Square(file, rank).bit
+            targets |= Square.at(file, rank).bit
     return targets
 
 fn walk(from: Square, occupied: Bitboard, files: []int, ranks: []int) -> Bitboard
@@ -78,7 +79,7 @@ fn walk(from: Square, occupied: Bitboard, files: []int, ranks: []int) -> Bitboar
         var file = from.file + files[i]
         var rank = from.rank + ranks[i]
         while file >= 0 and file < 8 and rank >= 0 and rank < 8
-            let square = Square(file, rank).bit
+            let square = Square.at(file, rank).bit
             attacked |= square
             if occupied & square: break
             file += files[i]
@@ -91,7 +92,7 @@ fn blocker_mask(from: Square, files: []int, ranks: []int) -> Bitboard
         var file = from.file + files[i]
         var rank = from.rank + ranks[i]
         while file + files[i] >= 0 and file + files[i] < 8 and rank + ranks[i] >= 0 and rank + ranks[i] < 8
-            mask |= Square(file, rank).bit
+            mask |= Square.at(file, rank).bit
             file += files[i]
             rank += ranks[i]
     return mask

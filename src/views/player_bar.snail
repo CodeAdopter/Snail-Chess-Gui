@@ -1,7 +1,7 @@
 use engine/ui/ui_layout
 use src/theme/theme
 use src/theme/fonts
-use src/chess/primitives
+use src/rules/primitives
 
 const PlayerBarHeight: f32 = 36.0
 const ClockWidth: f32 = 96.0

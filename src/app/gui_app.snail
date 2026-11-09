@@ -140,7 +140,7 @@ struct GuiApp
             step_in_ns = now_ns() + step_in as i64 * 1000000
         if has_arg("--review"): start_review(first)
         let chosen = arg_word("--select")
-        if chosen.len == 2 and chosen[0] >= 'a' and chosen[0] <= 'h' and chosen[1] >= '1' and chosen[1] <= '8': first.board.select(first.game.board(), Square(chosen[0] as int - 'a', chosen[1] as int - '1'))
+        if chosen.len == 2 and chosen[0] >= 'a' and chosen[0] <= 'h' and chosen[1] >= '1' and chosen[1] <= '8': first.board.select(first.game.board(), Square.at(chosen[0] as int - 'a', chosen[1] as int - '1'))
         if has_arg("--edit")
             first.editor.load(first.game.board())
             first.editing = true
@@ -1374,7 +1374,7 @@ struct GuiApp
             tab.board.follow(p.game.board(), true)
             for k in 0..(pre.len + 1) / 5
                 let w = pre[k * 5..k * 5 + 4]
-                tab.board.queue(Square(w[0] as int - 'a', w[1] as int - '1'), Square(w[2] as int - 'a', w[3] as int - '1'), NoKind)
+                tab.board.queue(Square.at(w[0] as int - 'a', w[1] as int - '1'), Square.at(w[2] as int - 'a', w[3] as int - '1'), NoKind)
 
     fn run_engines(front: *GuiTab)
         let minimised = SDL_GetWindowFlags(app.window.handle) & SDL_WINDOW_MINIMIZED != 0

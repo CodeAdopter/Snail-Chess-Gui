@@ -1,5 +1,5 @@
 use engine/ui/ui_fill_path
-use src/chess/primitives
+use src/rules/primitives
 
 enum PieceMood: u8
     Calm

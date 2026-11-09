@@ -1,3 +1,4 @@
+use chess/square
 use engine/math/vec2
 
 struct ArrowBends
@@ -21,8 +22,8 @@ struct ArrowBends
             let b = to[i]
             if not knight_step(a, b): continue
             let df = b.file as int - a.file as int
-            let long = df * df == 4 ? Square(b.file, a.rank) : Square(a.file, b.rank)
-            let short = df * df == 4 ? Square(a.file, b.rank) : Square(b.file, a.rank)
+            let long = df * df == 4 ? Square.at(b.file, a.rank) : Square.at(a.file, b.rank)
+            let short = df * df == 4 ? Square.at(a.file, b.rank) : Square.at(b.file, a.rank)
             bend[i] = meets(i, short) < meets(i, long) ? short : long
 
     fn meets(i: int, knee: Square) -> f32

@@ -1,6 +1,6 @@
 use engine/ui/ui_input
 use src/theme/fonts
-use src/chess/board
+use src/rules/board
 use src/looks/surfaces
 use src/views/piece_catalog
 
@@ -82,7 +82,7 @@ fn board_nodes(ui: *UiCanvas, c: BoardColors, surfaces: *Surfaces, pieces: Piece
         for row in 0..8
             with ui.open(UiNode(key: row as int, flow: FlowRow))
                 for col in 0..8
-                    let s = flipped ? Square(7 - col, row) : Square(col, 7 - row)
+                    let s = flipped ? Square.at(7 - col, row) : Square.at(col, 7 - row)
                     let light = (col + 7 - row) % 2 == 1
                     let moved = last != NoMove and (s == last.from or s == last.to)
                     var fill = clear

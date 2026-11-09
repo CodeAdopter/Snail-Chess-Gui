@@ -425,7 +425,7 @@ struct BoardView
         if col < 0 or col > 7 or row < 0 or row > 7: return Square.none
         let file = flipped ? 7 - col : col
         let rank = flipped ? row : 7 - row
-        return Square(file, rank)
+        return Square.at(file, rank)
 
     fn corner(sq: Square) -> Vec2
         let cell = place.size / 8.0
@@ -697,12 +697,12 @@ struct BoardView
         let style = UiTextStyle(face: look.fonts.strong, size: size)
         for i in 0..8
             let rank = flipped ? 7 - i : i
-            let s = Square(flipped ? 7 : 0, rank)
+            let s = Square.at(flipped ? 7 : 0, rank)
             let p = corner(s)
             let light = (s.file + s.rank) % 2 == 1
             ui.text(p.x + 3.0, p.y + 2.0, RankDigits[rank..rank + 1], UiTextStyle(color: light ? look.colors.light_ink : look.colors.dark_ink, ..style))
             let file = flipped ? 7 - i : i
-            let f = Square(file, flipped ? 7 : 0)
+            let f = Square.at(file, flipped ? 7 : 0)
             let q = corner(f)
             let lit = (f.file + f.rank) % 2 == 1
             ui.text(q.x + cell - size * 0.62 - 3.0, q.y + cell - size * 1.32, FileLetters[file..file + 1], UiTextStyle(color: lit ? look.colors.light_ink : look.colors.dark_ink, ..style))
@@ -768,8 +768,8 @@ fn play_ahead(b: *Board, p: Premove)
     let step = p.to.file as int - p.from.file as int
     if piece.kind == King and (step == 2 or step == -2)
         let rank = p.from.rank as int
-        let rook_from = Square(step > 0 ? 7 : 0, rank)
-        let rook_to = Square(step > 0 ? 5 : 3, rank)
+        let rook_from = Square.at(step > 0 ? 7 : 0, rank)
+        let rook_to = Square.at(step > 0 ? 5 : 3, rank)
         b.squares[rook_to] = b.squares[rook_from]
         b.squares[rook_from] = NoPiece
 
@@ -798,8 +798,8 @@ fn premove_targets(b: *Board, from: Square) -> u64
             let back = side == White ? 0 : 7
             if f == 4 and r == back
                 let rook = Piece.of(side, Rook)
-                if b.castling & kingside_right(side) != 0 and b.squares[Square(7, back)] == rook: bits |= square_bit(6, back)
-                if b.castling & queenside_right(side) != 0 and b.squares[Square(0, back)] == rook: bits |= square_bit(2, back)
+                if b.castling & kingside_right(side) != 0 and b.squares[Square.at(7, back)] == rook: bits |= square_bit(6, back)
+                if b.castling & queenside_right(side) != 0 and b.squares[Square.at(0, back)] == rook: bits |= square_bit(2, back)
         else
             let kind = piece.kind
             for d in [[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [1, -1]]
@@ -811,7 +811,7 @@ fn premove_targets(b: *Board, from: Square) -> u64
 
 fn square_bit(f: int, r: int) -> u64
     if f < 0 or f > 7 or r < 0 or r > 7: return 0
-    return (1 as u64) << (Square(f, r) as u64)
+    return (1 as u64) << (Square.at(f, r) as u64)
 
 fn king_moods(look: *BoardLook, board: *Board) -> (Square, PieceMood)
     if not look.sheet.moods or not board.in_check: return (Square.none, Calm)

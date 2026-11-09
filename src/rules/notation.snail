@@ -1,5 +1,5 @@
-use chess/moves
-use chess/fen
+use rules/moves
+use rules/fen
 
 fn write_san(board: *Board, move: Move, out: *ShortText)
     if move.kind == CastleKingside
@@ -79,8 +79,8 @@ fn is_uci_text(t: str) -> bool
     return t.len == 4 or promotion_kind(t[4]) != NoKind
 
 fn find_uci(list: *MoveList, t: str) -> (Move, bool)
-    let from = Square(t[0] - 'a', t[1] - '1')
-    let to = Square(t[2] - 'a', t[3] - '1')
+    let from = Square.at(t[0] - 'a', t[1] - '1')
+    let to = Square.at(t[2] - 'a', t[3] - '1')
     let promotion = t.len == 5 ? promotion_kind(t[4]) : NoKind
     for i in 0..list.count
         let m = list.items[i]
@@ -110,7 +110,7 @@ fn find_san(board: *Board, list: *MoveList, t: str) -> (Move, bool)
         rest = rest[0..rest.len - 1]
         if rest.len > 0 and rest[rest.len - 1] == '=': rest = rest[0..rest.len - 1]
     if rest.len < 2 or not square_text(rest[rest.len - 2..rest.len]): return NoMove, false
-    let to = Square(rest[rest.len - 2] - 'a', rest[rest.len - 1] - '1')
+    let to = Square.at(rest[rest.len - 2] - 'a', rest[rest.len - 1] - '1')
 
     var from_file = -1
     var from_rank = -1

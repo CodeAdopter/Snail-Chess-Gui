@@ -1,7 +1,7 @@
 use engine/ui/ui_layout
 use src/theme/theme
 use src/theme/fonts
-use src/chess/primitives
+use src/rules/primitives
 
 const EngineCardHeight: f32 = 56.0
 const CardClockWidth: f32 = 96.0

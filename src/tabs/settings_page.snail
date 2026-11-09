@@ -247,7 +247,7 @@ struct SettingsPage
         var changed = false
         var b: Board
         b.load_fen(PreviewFen)
-        let last = Move(from: Square(1, 7), to: Square(2, 5), kind: Quiet)
+        let last = Move(from: Square.at(1, 7), to: Square.at(2, 5), kind: Quiet)
         sheet.prepare(&app.gpu, &app.ui_gpu, s.pieces, max(floor(ShelfBoard * app.scale / 8.0) as int, 1), s.costume)
         with ui.open(UiNode(name: "boardshelfhead", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5), padding: Vec4(kit.inset, 10.0, kit.inset, 0.0)))
             kit.segments("boardgroup", ["Standard", "Theme"], ref board_group)
@@ -307,11 +307,11 @@ struct SettingsPage
         shown.arrows = true
         shown.sheet = &sheet
         sheet.prepare(&app.gpu, &app.ui_gpu, look.set, max(floor(size * app.scale / 8.0) as int, 1), look.costume)
-        let froms = [Square(6, 0), Square(2, 6), Square(6, 7), Square(4, 1), Square(3, 1)]
-        let tos = [Square(5, 2), Square(2, 4), Square(5, 5), Square(4, 3), Square(3, 3)]
+        let froms = [Square.at(6, 0), Square.at(2, 6), Square.at(6, 7), Square.at(4, 1), Square.at(3, 1)]
+        let tos = [Square.at(5, 2), Square.at(2, 4), Square.at(5, 5), Square.at(4, 3), Square.at(3, 3)]
         if s.engine_arrows.on
             for k in 0..ArrowKinds: preview.arrow(froms[k], tos[k], shown.arrow_colors[k], s.engine_arrows.width)
-        if s.note_arrows.on: preview.arrow(Square(1, 0), Square(2, 2), look.note_arrow, look.note_width)
+        if s.note_arrows.on: preview.arrow(Square.at(1, 0), Square.at(2, 2), look.note_arrow, look.note_width)
         preview.draw(app, &shown, &b, NoMove, board_place(x, y, size, app.scale), false, false)
         let theme = look.theme
         let note = muted_style(look)
@@ -389,7 +389,7 @@ struct SettingsPage
         catalog.prepare(&app.gpu, &app.ui_gpu, max(floor(ShelfBoard * app.scale / 8.0) as int, 1))
         var b: Board
         b.load_fen(PreviewFen)
-        let last = Move(from: Square(1, 7), to: Square(2, 5), kind: Quiet)
+        let last = Move(from: Square.at(1, 7), to: Square.at(2, 5), kind: Quiet)
         with ui.open(UiNode(name: "pieceshelfhead", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5), padding: Vec4(kit.inset, 10.0, kit.inset, 0.0)))
             kit.segments("piecegroup", ["Standard", "Theme"], ref finish_group)
             ui.label(finish_group == 0 ? "Use the piece set's own colours." :"Apply a theme finish to your selected piece set.", muted_style(look), UiNode(width: UiSize.grow(), clip: true))
@@ -590,7 +590,7 @@ struct SettingsPage
         b.load_fen(close ? CostumeFen : PreviewFen)
         var show: BoardShow
         show.board = &b
-        show.last = close ? NoMove : Move(from: Square(1, 7), to: Square(2, 5), kind: Quiet)
+        show.last = close ? NoMove : Move(from: Square.at(1, 7), to: Square.at(2, 5), kind: Quiet)
         show.selected = Square.none
         show.hover = Square.none
         show.check = Square.none
@@ -602,9 +602,9 @@ struct SettingsPage
         show.page = look.theme.page
         show.fonts = look.fonts
         if k == StillBoard and s.engine_arrows.on
-            show.arrow(Square(5, 0), Square(1, 4), look.arrow_colors[WhiteMove as int], look.engine_width)
-            show.arrow(Square(6, 7), Square(5, 5), look.arrow_colors[WhiteLine as int], look.engine_width)
-        if k == StillQuality: show.arrow(Square(4, 1), Square(4, 3), look.arrow_colors[WhiteMove as int], look.engine_width)
+            show.arrow(Square.at(5, 0), Square.at(1, 4), look.arrow_colors[WhiteMove as int], look.engine_width)
+            show.arrow(Square.at(6, 7), Square.at(5, 5), look.arrow_colors[WhiteLine as int], look.engine_width)
+        if k == StillQuality: show.arrow(Square.at(4, 1), Square.at(4, 3), look.arrow_colors[WhiteMove as int], look.engine_width)
         if desk
             for (side, name, time) in [(White, s.person_name(), "4:52"), (Black, "An engine", "5:00")]
                 var c: CardText

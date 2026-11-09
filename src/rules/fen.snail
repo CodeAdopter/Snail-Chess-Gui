@@ -1,5 +1,5 @@
-use chess/make
-use chess/short_text
+use rules/make
+use rules/short_text
 
 const StartFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
@@ -31,7 +31,7 @@ extend Board
             else
                 let piece = piece_from_letter(symbol)
                 if piece == NoPiece or file > 7: return false
-                placement[Square(file, rank)] = piece
+                placement[Square.at(file, rank)] = piece
                 if piece == Piece.of(White, King): white_kings += 1
                 if piece == Piece.of(Black, King): black_kings += 1
                 file += 1
@@ -80,7 +80,7 @@ extend Board
         let rank = field[1] - '1'
         let white = side == White
         if rank != (white ? 5 : 2): return Square.none
-        let target = Square(file, rank)
+        let target = Square.at(file, rank)
         if squares[target] != NoPiece: return Square.none
         let victim = target + (white ? -8 : 8)
         if squares[victim] != Piece.of(side.other, Pawn): return Square.none
@@ -92,7 +92,7 @@ extend Board
             let rank = 7 - r
             var empty = 0
             for file in 0..8
-                let piece = squares[Square(file, rank)]
+                let piece = squares[Square.at(file, rank)]
                 if piece == NoPiece
                     empty += 1
                     continue

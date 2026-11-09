@@ -1,5 +1,5 @@
 use src/uci/uci_engine
-use src/chess/random
+use src/rules/random
 
 const StyleNames = ["Balanced", "Aggressive", "Passive"]
 const StyleWords = ["Balanced", "Aggressive", "Passive"]

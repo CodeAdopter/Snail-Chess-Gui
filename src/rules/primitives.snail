@@ -1,3 +1,5 @@
+use chess/square
+
 enum Side: u8
     White
     Black

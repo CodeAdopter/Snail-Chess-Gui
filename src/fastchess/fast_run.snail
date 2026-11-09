@@ -1,5 +1,5 @@
 use engine/platform/files
-use src/chess/notation
+use src/rules/notation
 use src/fastchess/fast_place
 use src/fastchess/fast_output
 use src/fastchess/fast_live

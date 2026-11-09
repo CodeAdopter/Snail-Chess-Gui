@@ -1,6 +1,6 @@
 use engine/core/json
 use engine/desktop/http_stream
-use src/chess/short_text
+use src/rules/short_text
 
 const LichessSite = "https://lichess.org"
 const LichessAgent = "SnailChessGui/1"

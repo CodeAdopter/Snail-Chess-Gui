@@ -1,4 +1,4 @@
-use src/chess/primitives
+use src/rules/primitives
 use src/board3d/piece_shapes
 use src/board3d/scene_style
 
@@ -30,7 +30,7 @@ fn square_under(x: f32, z: f32) -> Square
     let file = floor(x + 4.0) as int
     let rank = floor(4.0 - z) as int
     if file < 0 or file > 7 or rank < 0 or rank > 7: return Square.none
-    return Square(file, rank)
+    return Square.at(file, rank)
 
 fn foot_width(kind: Kind) -> f32
     if kind == Pawn: return 0.27

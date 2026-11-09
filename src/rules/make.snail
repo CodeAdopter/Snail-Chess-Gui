@@ -1,6 +1,6 @@
-use chess/board
-use chess/castling
-use chess/keys
+use rules/board
+use rules/castling
+use rules/keys
 
 extend Board
     fn play(move: Move)
