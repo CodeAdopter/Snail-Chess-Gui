@@ -1,5 +1,6 @@
 # Snail-Chess-Gui
-Open source chess GUI written in Snail
+Open source chess GUI written in Snail. Find out more at
+[snail-chess-gui-web.vercel.app](https://snail-chess-gui-web.vercel.app/).
 
 ![Snail Chess GUI analysing a Ruy Lopez on the 3D board, with Stockfish 19's lines, the moves and a game review](docs/screenshot-3d.png)
 
