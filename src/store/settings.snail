@@ -134,7 +134,7 @@ struct Settings
         let a = doc.get(root, "appearance")
         if doc.is(a, JsonObject)
             let t = json_text(&doc, a, "theme")
-            theme = t == "porcelain" ? Porcelain : t == "after-hours" ? AfterHours : t == "goo" ? Goo : t == "paper" or t == "ink" ? Paper : t == "circuit" or t == "neon" ? Neon : Charcoal
+            theme = t == "porcelain" ? Porcelain : t == "after-hours" ? AfterHours : t == "paper" or t == "ink" ? Paper : Charcoal
             accent = clamp(doc.num_at(a, "accent", 0.0) as int, 0, AccentLabels.len as int - 1) as AccentName
             still = json_flag(&doc, a, "reduced_motion")
             zoom = clamp(doc.num_at(a, "zoom", 1.0) as f32, 0.5, 3.0)
@@ -251,7 +251,7 @@ struct Settings
         defer doc.free_all()
         let root = doc.object()
         let a = doc.object()
-        doc.set(a, "theme", doc.text(theme == Porcelain ? "porcelain" : theme == AfterHours ? "after-hours" : theme == Goo ? "goo" : theme == Paper ? "paper" : theme == Neon ? "circuit" : "charcoal"))
+        doc.set(a, "theme", doc.text(theme == Porcelain ? "porcelain" : theme == AfterHours ? "after-hours" : theme == Paper ? "paper" : "charcoal"))
         doc.set(a, "accent", doc.number(accent as f64))
         doc.set(a, "reduced_motion", doc.boolean(still))
         doc.set(a, "zoom", doc.number(zoom as f64))

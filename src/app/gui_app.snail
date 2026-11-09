@@ -361,7 +361,6 @@ struct GuiApp
             theme.material = surfaces.theme_material(name, PanelPart)
             look.sheet_material = surfaces.theme_material(name, SheetPart)
             look.page_material = surfaces.theme_material(name, PagePart)
-            if name == Neon: look.page_reach = NeonSpill
         app.background = theme.page
         app.edge = theme.line.lerp(theme.muted, 0.35)
         app.redraw()
@@ -377,11 +376,10 @@ struct GuiApp
         sheet.finish_values = surfaces.finish_values()
         let animated = piece_art(sheet.set).motions.len > 0
         sheet.clock = ui.still ? 0.0 : ui.time
-        if not ui.still and (animated or finish_moves(finish) or surface_moves(BoardColors.of(palette).surface)): ui.wake_in(0.0)
+        if not ui.still and animated: ui.wake_in(0.0)
         if theme.material == 0: return
         look.sheet_values = Vec4(theme.motion.x, theme.motion.y, theme.motion.z, packed)
         look.page_values = look.sheet_values
-        if theme.moving(): ui.wake_in(0.0)
 
     fn step()
         if app.holding()
@@ -1596,9 +1594,7 @@ fn gui_live_step(data: *void)
 fn theme_named(word: str) -> ThemeName
     if word == "porcelain": return Porcelain
     if word == "after-hours": return AfterHours
-    if word == "goo": return Goo
     if word == "paper": return Paper
-    if word == "circuit": return Neon
     return Charcoal
 
 

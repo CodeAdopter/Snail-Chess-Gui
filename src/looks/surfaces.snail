@@ -29,7 +29,7 @@ const PanelPart = 0
 const SheetPart = 1
 const PagePart = 2
 const ThemeParts = 3
-const ThemedSlots = 12
+const ThemedSlots = 3
 const FrontCode = 16
 
 fn backdrop_named(word: str) -> Backdrop
@@ -62,7 +62,7 @@ struct Surfaces
     glass: u32
     shaders: [BackdropShaders]u32
     themed: [ThemedSlots]u32
-    themed_boards: [3]u32
+    paper_board: u32
     finishes: [FinishCount]u32
     fold: u32
     accent: f32
@@ -103,18 +103,9 @@ struct Surfaces
         if k < 0 or k >= ThemedSlots: return 0
         if themed[k] != 0 or not renderer: return themed[k]
         var m: u32 = 0
-        if name == Goo
-            if part == PanelPart: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_panel_ps"))
-            elif part == SheetPart: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_sheet_ps"))
-            else: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_page_ps"))
-        elif name == Paper
-            if part == PanelPart: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_panel_ps"))
-            elif part == SheetPart: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_sheet_ps"))
-            else: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_page_ps"))
-        elif name == Neon
-            if part == PanelPart: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_panel_ps"))
-            elif part == SheetPart: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_sheet_ps"))
-            else: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_page_ps"))
+        if part == PanelPart: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_panel_ps"))
+        elif part == SheetPart: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_sheet_ps"))
+        else: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_page_ps"))
         themed[k] = m
         return m
 
@@ -123,26 +114,15 @@ struct Surfaces
         seconds = now_seconds
 
     fn themed_board(surface: BoardSurface) -> u32
-        let k = surface as int - CircuitSurface as int
-        if k < 0 or k > 2 or not renderer: return 0
-        if themed_boards[k] != 0: return themed_boards[k]
-        var m: u32 = 0
-        if surface == CircuitSurface: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_board_ps"))
-        elif surface == GooSurface: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_board_ps"))
-        else: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_board_ps"))
-        themed_boards[k] = m
-        return m
+        if surface != PaperSurface or not renderer: return 0
+        if paper_board == 0: paper_board = aside_material(shader("shaders/paper.hlsl", fragment: "paper_board_ps"))
+        return paper_board
 
     fn finish_material(f: PieceFinish) -> u32
         let k = f as int
         if k <= 0 or k >= FinishCount or not renderer: return 0
-        if finishes[k] != 0: return finishes[k]
-        var m: u32 = 0
-        if f == CircuitFinish: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_piece_ps"))
-        elif f == GooFinish: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_piece_ps"))
-        else: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_piece_ps"))
-        finishes[k] = m
-        return m
+        if finishes[k] == 0: finishes[k] = aside_material(shader("shaders/paper.hlsl", fragment: "paper_piece_ps"))
+        return finishes[k]
 
     fn fold_material() -> u32
         if fold == 0 and renderer: fold = aside_material(shader("shaders/paper.hlsl", fragment: "fold_piece_ps"))
@@ -153,7 +133,7 @@ struct Surfaces
 
     fn board_box(c: BoardColors) -> (UiBox, bool)
         if c.surface == FlatSurface: return UiBox(), false
-        if c.surface as int >= CircuitSurface as int
+        if c.surface == PaperSurface
             let t = themed_board(c.surface)
             if t == 0: return UiBox(), false
             return UiBox(fill: UiFill.solid(c.dark), material: t, values: Vec4(c.light_rgb as f32, c.dark_rgb as f32, accent, seconds)), true

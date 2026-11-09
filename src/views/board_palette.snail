@@ -17,28 +17,24 @@ enum BoardPalette: u8
     OnyxStone
     LightGlass
     DarkGlass
-    CircuitBoard
-    GooBoard
     PaperBoard
 
 const BasicPalettes = 8
 const ThemePalettes = 16
 
-const PaletteShelfStarts = [0, 8, 16, 19]
+const PaletteShelfStarts = [0, 8, 16, 17]
 const PaletteShelfNames = ["Basic", "Detailed", "Theme"]
-const PaletteShelfNotes = ["Solid colours with low graphics usage", "Wood, polished stone and glass", "Match your detailed theme and accent colour"]
+const PaletteShelfNotes = ["Solid colours with low graphics usage", "Wood, polished stone and glass", "Match your detailed theme"]
 const MovedTint = Color(0.776, 0.804, 0.478, 0.42)
 const TargetRim = Color(0.02, 0.06, 0.1, 0.6)
-const PaletteWords = ["sage", "walnut", "slate", "sand", "brown", "blue", "green", "plum", "maple", "ebony", "cherry", "marble", "lapis", "onyx", "light-glass", "dark-glass", "circuit", "goo", "paper"]
-const PaletteLabels = ["Sage", "Walnut", "Slate", "Sand", "Brown", "Blue", "Green", "Plum", "Maple and walnut", "Ebony and box", "Cherry", "Marble", "Lapis", "Onyx", "Light glass", "Dark glass", "Circuit", "Goo", "Paper"]
+const PaletteWords = ["sage", "walnut", "slate", "sand", "brown", "blue", "green", "plum", "maple", "ebony", "cherry", "marble", "lapis", "onyx", "light-glass", "dark-glass", "paper"]
+const PaletteLabels = ["Sage", "Walnut", "Slate", "Sand", "Brown", "Blue", "Green", "Plum", "Maple and walnut", "Ebony and box", "Cherry", "Marble", "Lapis", "Onyx", "Light glass", "Dark glass", "Paper"]
 
 enum BoardSurface: u8
     FlatSurface
     WoodSurface
     StoneSurface
     GlassSurface
-    CircuitSurface
-    GooSurface
     PaperSurface
 
 struct BoardColors
@@ -70,8 +66,6 @@ struct BoardColors
             OnyxStone: return board_surface(0xEBDDC0, 0x1A1A1E, StoneSurface, 3.0)
             LightGlass: return board_surface(0xE2EEEB, 0x7DB3AB, GlassSurface, 1.0)
             DarkGlass: return board_surface(0xE6B46C, 0x3A3050, GlassSurface, 2.0)
-            CircuitBoard: return board_surface(0x8A9BB0, 0x26344A, CircuitSurface, 0.0)
-            GooBoard: return board_surface(0xD6ECCB, 0x5E9A55, GooSurface, 0.0)
             PaperBoard: return board_surface(0xEFE7D6, 0x9C9385, PaperSurface, 0.0)
         return board_colors(0xEEF0E3, 0xA2B5A5)
 
@@ -86,9 +80,6 @@ fn board_surface(light: u32, dark: u32, surface: BoardSurface, style: f32) -> Bo
     c.surface = surface
     c.style = style
     return c
-
-fn surface_moves(s: BoardSurface) -> bool
-    return s == CircuitSurface or s == GooSurface
 
 fn palette_label(p: BoardPalette) -> str
     return PaletteLabels[p as int]

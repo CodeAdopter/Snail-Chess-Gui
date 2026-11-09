@@ -196,7 +196,6 @@ struct SettingsPage
                         if t.detailed()
                             t.material = look.surfaces.theme_material(t.name, PanelPart)
                             t.motion = theme.motion
-                            if t.moving(): ui.wake_in(0.0)
                         let o = ui.open(UiNode(key: i as int, name: "themecard", width: UiSize.fixed(150.0), padding: Vec4.splat(10.0), gap: 8.0, hit: true, box: UiBox(fill: UiFill.solid(t.page), radius: Vec4.splat(8.0), border: s.theme as int == i ? 2.0 : 1.0, border_color: s.theme as int == i ? theme.accent : theme.line)))
                         let hv = ui.interact(o.id)
                         with ui.open(UiNode(width: UiSize.grow(), height: UiSize.fixed(36.0), padding: Vec4.splat(8.0), flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5), box: t.wear(UiBox(fill: UiFill.solid(t.surface), radius: Vec4.splat(5.0), border: 1.0, border_color: t.line), false)))
@@ -252,8 +251,7 @@ struct SettingsPage
         sheet.prepare(&app.gpu, &app.ui_gpu, s.pieces, max(floor(ShelfBoard * app.scale / 8.0) as int, 1), s.costume)
         with ui.open(UiNode(name: "boardshelfhead", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5), padding: Vec4(kit.inset, 10.0, kit.inset, 0.0)))
             kit.segments("boardgroup", ["Standard", "Theme"], ref board_group)
-            ui.label(board_group == 0 ? "Solid colours, wood, stone and glass." : "Animated boards using your accent colour.", muted_style(look), UiNode(width: UiSize.grow(), clip: true))
-        if board_group == 1 and not ui.still: ui.wake_in(0.0)
+            ui.label(board_group == 0 ? "Solid colours, wood, stone and glass." : "Boards to match your detailed theme.", muted_style(look), UiNode(width: UiSize.grow(), clip: true))
         let shelves = board_group == 0 ? 2 : 1
         for g in 0..shelves
             let k = board_group == 0 ? g as int : 2
@@ -396,7 +394,6 @@ struct SettingsPage
             kit.segments("piecegroup", ["Standard", "Theme"], ref finish_group)
             ui.label(finish_group == 0 ? "Use the piece set's own colours." :"Apply a theme finish to your selected piece set.", muted_style(look), UiNode(width: UiSize.grow(), clip: true))
         if finish_group == 1
-            if not ui.still: ui.wake_in(0.0)
             with kit.heading(0, "Finishes", "Visual finishes for any piece set")
                 shelf_turns(ui, look.theme, look.fonts, shelf_ids[0])
             with sh = shelf(ui, "finishshelf", 0)
