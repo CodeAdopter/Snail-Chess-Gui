@@ -1,0 +1,303 @@
+use src/database/db_lichess
+use src/uci/engine_analysis
+use src/uci/engine_player
+use src/engines/engine_library
+use src/engines/ccrl_ratings
+use src/database/cloud_db
+
+const RecorderCommitNs: i64 = 1000000000
+const SyncSlices = 4096
+const SyncSliceBits: u64 = 52
+const SyncFrameNs: i64 = 2000000
+
+struct EvalTally
+    positions: i64
+    lines: i64
+    unshared: i64
+
+var eval_recorder: *EvalRecorder = null
+
+struct EvalRecorder
+    db: PositionDb
+    open: bool
+    waiting: bool
+    committed_ns: i64
+    version: u64
+    sync_slice: int
+    sync_done: bool
+    sync_on: bool
+    sync_again: bool
+    unmarking: bool
+    unmark_slice: int
+    marked: u64
+    tally: EvalTally
+    tallied: bool
+    tallied_for: u64
+    tallied_marks: u64
+    lib: *EngineLibrary
+    registry: *Registry
+    ratings: *CcrlRatings
+    rated_for: int = -1
+    rated: [..]int
+
+    fn start(path: str) -> bool
+        open = db.open(path)
+        if open: eval_recorder = self
+        return open
+
+    fn stop()
+        if eval_recorder == self: eval_recorder = null
+        if open: db.close()
+        open = false
+        rated.free()
+
+    fn keep(board: *Board, name: str, multipv: int, depth: int, seldepth: int, kind: ScoreKind, score: int, nodes: i64, time_ms: i64, moves: []Move, offered: bool = true, wdl: u32 = 0, has_wdl: bool = false)
+        if not open or kind == NoScore or moves.len == 0 or name.len == 0: return
+        var e = DbEval(engine: db.engine(name), multipv: clamp(multipv, 1, 255) as u8, depth: clamp(depth, 0, 255) as u8, seldepth: clamp(seldepth, 0, 255) as u8)
+        var s = score
+        if kind == MateIn: s = score > 0 ? DbMateScore - score : -DbMateScore - score
+        e.score = s as i32
+        e.nodes = max(nodes, 0) as u64
+        e.time_ms = clamp(time_ms, 0, 4000000000) as u32
+        e.stamp = (sn_db_unix_ms() / 1000) as u32
+        if has_wdl
+            e.wdl = wdl
+            e.flags |= DbHasWdl
+        e.pv_len = min(moves.len, DbPvMost) as u8
+        for i in 0..e.pv_len
+            e.pv[i] = db_move(moves[i])
+        db.put_eval(board, e)
+        if offered and cloud_db: cloud_db.offer(board, name, e)
+        if not offered: sync_again = true
+        waiting = true
+        version += 1
+
+    fn keep_analysis(a: *EngineAnalysis, name: str)
+        if not open or not a.lines_fresh() or db_weakened(&a.engine, &a.sent): return
+        if a.kept_key != a.search_key
+            a.kept_key = a.search_key
+            for i in 0..MaxAnalysisLines
+                a.kept_depth[i] = 0
+        let ms = (now_ns() - a.started_ns) / 1000000
+        for slot in 0..MaxAnalysisLines
+            let l = &a.lines[slot]
+            if not l.filled or l.bound != ExactScore or l.depth <= a.kept_depth[slot]: continue
+            a.kept_depth[slot] = l.depth
+            keep(&a.searching, name, slot as int + 1, l.depth, l.seldepth, l.kind, l.score, l.nodes, ms, l.moves[0..l.count], wdl: db_wdl(l.wdl[0], l.wdl[1], l.wdl[2]), has_wdl: l.has_wdl)
+
+    fn keep_player(p: *EnginePlayer)
+        if not open or db_weakened(&p.engine, &p.sent): return
+        let h = &p.heard
+        if p.pv_count > 0 and p.pv[0] == p.best
+            keep(&p.board, p.engine.display_name(), 1, h.depth, h.seldepth, h.kind, h.score, h.nodes, h.time_ms, p.pv[0..p.pv_count])
+            return
+        var played: [1]Move
+        played[0] = p.best
+        keep(&p.board, p.engine.display_name(), 1, h.depth, h.seldepth, h.kind, h.score, h.nodes, h.time_ms, played[0..1])
+
+    fn keep_game(text: str, engines: bool, source: u8 = DbFromApp)
+        if not open: return
+        var imp = DbPgnImport(db: &db, source: source, all_engines: engines, keep_evals: false)
+        imp.run(text)
+        imp.release()
+        waiting = true
+        version += 1
+
+    fn sync(c: *CloudDb)
+        if not open: return
+        if c.shared.len > 0
+            for i in 0..c.shared.len
+                var e = c.shared[i]
+                e.flags |= DbShared
+                db.put_eval_key(&e)
+            c.shared.clear()
+            marked += 1
+            version += 1
+            waiting = true
+        if not c.sharing()
+            sync_on = false
+            unmarking = false
+            return
+        if c.marks_elsewhere()
+            unmark(c)
+            return
+        if not sync_on
+            sync_on = true
+            sync_slice = 0
+            sync_done = false
+            sync_again = false
+        if sync_done and sync_again
+            sync_done = false
+            sync_again = false
+            sync_slice = 0
+        if sync_done or c.offers.len >= CloudBatch: return
+        let lichess = db.store.known_id(db.engines, DbCloudName) as u16
+        var picked: [..]DbEval
+        defer picked.free()
+        let began = now_ns()
+        while picked.len < CloudBatch and sync_slice < SyncSlices and now_ns() - began < SyncFrameNs
+            let from = (sync_slice as u64) << SyncSliceBits
+            let to = sync_slice == SyncSlices - 1 ? 0xFFFFFFFFFFFFFFFF : from + ((1 as u64) << SyncSliceBits) - 1
+            db.store.range(db.evals, from, to, |r| db_sync_pick(r as *DbEval, &picked, lichess))
+            sync_slice += 1
+        if sync_slice >= SyncSlices
+            sync_done = true
+            if sync_again
+                sync_done = false
+                sync_again = false
+                sync_slice = 0
+        var pos: DbPos
+        var fen: [..]u8
+        defer fen.free()
+        var name: [..]u8
+        defer name.free()
+        for e in picked
+            if not db.position_of(e.key, &pos): continue
+            fen.clear()
+            db_add_fen(&fen, &pos)
+            db.engine_name(e.engine, &name)
+            let text = str(fen[0..fen.len])
+            c.offer_fen(e.key, db_fen_side(text), text, str(name[0..name.len]), e)
+
+    fn unmark(c: *CloudDb)
+        if not unmarking
+            unmarking = true
+            unmark_slice = 0
+        var marked_lines: [..]DbEval
+        defer marked_lines.free()
+        let began = now_ns()
+        while unmark_slice < SyncSlices and now_ns() - began < SyncFrameNs
+            let from = (unmark_slice as u64) << SyncSliceBits
+            let to = unmark_slice == SyncSlices - 1 ? 0xFFFFFFFFFFFFFFFF : from + ((1 as u64) << SyncSliceBits) - 1
+            db.store.range(db.evals, from, to, |r| db_marked_pick(r as *DbEval, &marked_lines))
+            unmark_slice += 1
+        for i in 0..marked_lines.len
+            var e = marked_lines[i]
+            e.flags &= ~DbShared
+            e.stamp += 1
+            db.put_eval_key(&e)
+        if marked_lines.len > 0
+            marked += 1
+            version += 1
+            waiting = true
+        if unmark_slice < SyncSlices: return
+        unmarking = false
+        c.adopt_marks()
+        sync_on = false
+
+    fn syncing(c: *CloudDb) -> bool
+        if open and unmarking and c.sharing(): return true
+        return open and sync_on and (not sync_done or sync_again) and c.sharing() and c.offers.len < CloudBatch
+
+    fn counts() -> EvalTally
+        if not open: return EvalTally()
+        if tallied and tallied_for == version and tallied_marks == marked: return tally
+        tallied = true
+        tallied_for = version
+        tallied_marks = marked
+        var t = EvalTally()
+        var last: u64 = 0
+        let lichess = db.store.known_id(db.engines, DbCloudName) as u16
+        db.store.each(db.evals, |r| db_tally_line(r as *DbEval, &t, &last, lichess))
+        tally = t
+        return t
+
+    fn tick(now: i64)
+        if not waiting or now - committed_ns < RecorderCommitNs: return
+        db.commit()
+        waiting = false
+        committed_ns = now
+
+    fn rating_of(engine: u16) -> int
+        if not ratings: return -1
+        if ratings.version != rated_for
+            rated.clear()
+            rated_for = ratings.version
+        while rated.len <= engine as int
+            rated.push(-2)
+        if rated[engine] == -2
+            var name: [..]u8
+            db.engine_name(engine, &name)
+            rated[engine] = rating_named(str(name[0..name.len]))
+            name.free()
+        return rated[engine]
+
+    fn rating_named(name: str) -> int
+        if name.len == 0: return -1
+        var id = ""
+        if lib
+            for i in 0..lib.entries.len
+                let e = &lib.entries[i]
+                if e.origin.registry_id.len > 0 and e.display_name() == name: id = e.origin.text(e.origin.registry_id)
+        if id.len == 0 and registry
+            let c = &registry.catalog
+            var best = 0
+            for i in 0..c.engines.len
+                let r = &c.engines[i]
+                var n = rating_name_prefix(name, c.text(r.name))
+                let aliases = c.text(r.aliases)
+                var at = 0
+                while at < aliases.len
+                    var end = at
+                    while end < aliases.len and aliases[end] != ',': end += 1
+                    var from = at
+                    while from < end and aliases[from] == ' ': from += 1
+                    n = max(n, rating_name_prefix(name, aliases[from..end]))
+                    at = end + 1
+                if n > best
+                    best = n
+                    id = c.text(r.id)
+        if id.len == 0: return -1
+        let at = ratings.table.find(id)
+        if at < 0: return -1
+        let entry = &ratings.table.entries[at]
+        return entry.long.rating >= 0 ? entry.long.rating as int : entry.blitz.rating as int
+
+fn db_weakened(e: *UciEngine, told: *EngineProfile) -> bool
+    for v in told.values
+        let name = v.name_text()
+        let value = v.value_text()
+        if name == "UCI_LimitStrength" and (value == "true" or value == "True"): return true
+        if not db_says_skill(name): continue
+        let i = e.option(name)
+        if i >= 0 and parse_int(value) < e.options[i].most: return true
+    return false
+
+fn db_says_skill(name: str) -> bool
+    if name.len < 5: return false
+    for at in 0..name.len - 4
+        var same = true
+        for k in 0..5
+            if rating_folded(name[at + k]) != "skill"[k]: same = false
+        if same: return true
+    return false
+
+fn db_sync_pick(e: *DbEval, into: *[..]DbEval, lichess: u16)
+    if e.depth < CloudMinDepth or e.pv_len == 0 or (e.flags & DbShared) != 0 or e.engine == lichess: return
+    into.push(*e)
+
+fn db_marked_pick(e: *DbEval, into: *[..]DbEval)
+    if (e.flags & DbShared) != 0: into.push(*e)
+
+fn db_tally_line(e: *DbEval, t: *EvalTally, last: *u64, lichess: u16)
+    if t.lines == 0 or e.key != *last: t.positions += 1
+    *last = e.key
+    t.lines += 1
+    if e.depth >= CloudMinDepth and e.pv_len > 0 and (e.flags & DbShared) == 0 and e.engine != lichess: t.unshared += 1
+
+fn db_fen_side(fen: str) -> Side
+    for i in 0..fen.len
+        if fen[i] == ' ': return i + 1 < fen.len and fen[i + 1] == 'b' ? Black : White
+    return White
+
+fn rating_name_prefix(name: str, prefix: str) -> int
+    if prefix.len == 0 or prefix.len > name.len: return 0
+    for i in 0..prefix.len
+        if rating_folded(name[i]) != rating_folded(prefix[i]): return 0
+    if prefix.len < name.len
+        let next = rating_folded(name[prefix.len])
+        if next >= 'a' and next <= 'z': return 0
+    return prefix.len as int
+
+fn rating_folded(c: u8) -> u8
+    return c >= 'A' and c <= 'Z' ? c + 32 : c

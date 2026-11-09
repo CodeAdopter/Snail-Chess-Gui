@@ -1,0 +1,102 @@
+use engine/ui/ui_input
+use src/theme/fonts
+use src/chess/board
+use src/looks/surfaces
+use src/views/piece_catalog
+
+const ShelfInset: f32 = 24.0
+
+fn shelf(ui: *UiCanvas, name: str, key: int) -> UiOpen
+    return ui.scroll_area(name, fade: ShelfInset, node: UiNode(key: key, scroll_x: true, flow: FlowRow, gap: 14.0, width: UiSize.grow(), padding: Vec4(ShelfInset, 6.0, ShelfInset, 14.0)))
+
+fn shelf_turns(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, id: u32)
+    if id == 0: return
+    let m = ui.memory(id)
+    let span = max(m.content.x - m.view.x, 0.0)
+    if span < 1.0: return
+    let at = m.target.x
+    let page = m.view.x * 0.8
+    var turn: f32 = 0.0
+    with ui.open(UiNode(name: "shelfturns", flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5)))
+        for k in 0..2
+            let can = k == 0 ? at > 0.5 : at < span - 0.5
+            let o = ui.open(UiNode(key: k, name: "turn", width: UiSize.fixed(30.0), height: UiSize.fixed(30.0), align: Vec2(0.5, 0.5), hit: can))
+            let h = ui.interact(o.id)
+            let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 22.0)
+            ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.5 * lit)), radius: Vec4.splat(15.0), border: 1.0, border_color: theme.line))
+            ui.label(k == 0 ? "‹" : "›", UiTextStyle(face: fonts.strong, size: 18.0, color: can ? theme.ink : theme.muted.with_alpha(0.4)))
+            ui.close()
+            if h.clicked and can: turn = k == 0 ? -page : page
+    if turn != 0.0
+        let n = ui.memory(id)
+        n.target.x = clamp(at + turn, 0.0, span)
+
+struct PieceSource
+    sheet: *PieceSheet
+    catalog: *PieceCatalog
+    set: PieceSet
+    finish: u32
+    finish_values: Vec4
+
+    fn finish_of() -> (u32, Vec4)
+        if finish != 0 or not sheet: return finish, finish_values
+        return sheet.finish, sheet.finish_values
+
+    fn ready() -> bool
+        return sheet ? sheet.ready : catalog.ready
+
+    fn texture() -> *Texture
+        return sheet ? &sheet.layer.texture : &catalog.layer.texture
+
+    fn uv(piece: Piece) -> Vec4
+        return sheet ? sheet.uv(piece) : catalog.uv(set, piece)
+
+struct ShelfCard
+    ui: *UiCanvas
+    theme: *GuiTheme
+    fonts: *GuiFonts
+    clicked: bool
+    chosen: bool
+
+    fn done(label: str) -> bool
+        with ui.open(UiNode(name: "cardname", flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5), padding: Vec4(2.0, 0.0, 2.0, 0.0)))
+            ui.label(label, UiTextStyle(face: chosen ? fonts.strong : fonts.text, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+            if chosen: ui.leaf(UiNode(width: UiSize.fixed(8.0), height: UiSize.fixed(8.0), box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(4.0))))
+        ui.close()
+        return clicked
+
+fn shelf_card(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name: str, key: int, chosen: bool) -> ShelfCard
+    let o = ui.open(UiNode(key: key, name: name, padding: Vec4(10.0, 10.0, 10.0, 12.0), gap: 10.0, hit: true))
+    let h = ui.interact(o.id)
+    let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 22.0)
+    ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.4 * lit)), radius: Vec4.splat(12.0), border: chosen ? 2.0 : 1.0, border_color: chosen ? theme.accent : theme.line))
+    return ShelfCard(ui, theme, fonts, h.clicked, chosen)
+
+fn board_nodes(ui: *UiCanvas, c: BoardColors, surfaces: *Surfaces, pieces: PieceSource, board: *Board, last: Move, size: f32, key: int, flipped: bool = false)
+    let cell = size / 8.0
+    let (surface, detailed) = board_surface_box(surfaces, c)
+    var box = detailed ? surface : UiBox(fill: UiFill.solid(c.dark))
+    box.radius = Vec4.splat(4.0)
+    let clear = Color(0.0, 0.0, 0.0, 0.0)
+    with ui.open(UiNode(key: key, name: "boardnodes", width: UiSize.fixed(size), height: UiSize.fixed(size), clip: true, box: box))
+        for row in 0..8
+            with ui.open(UiNode(key: row as int, flow: FlowRow))
+                for col in 0..8
+                    let s = flipped ? Square(7 - col, row) : Square(col, 7 - row)
+                    let light = (col + 7 - row) % 2 == 1
+                    let moved = last != NoMove and (s == last.from or s == last.to)
+                    var fill = clear
+                    if detailed and moved: fill = MovedTint
+                    elif not detailed and moved: fill = light ? c.light_moved : c.dark_moved
+                    elif not detailed and light: fill = c.light
+                    let piece = board.squares[s]
+                    let (finish, finish_values) = pieces.finish_of()
+                    if piece != NoPiece and pieces.ready() and finish != 0
+                        with ui.open(UiNode(key: col as int, width: UiSize.fixed(cell), height: UiSize.fixed(cell), box: UiBox(fill: UiFill.solid(fill))))
+                            let held = ui.material
+                            let held_values = ui.material_values
+                            ui.shade(finish, finish_values)
+                            ui.texture_view(pieces.texture(), pieces.uv(piece), cell, cell)
+                            ui.shade(held, held_values)
+                    elif piece != NoPiece and pieces.ready(): ui.texture_view(pieces.texture(), pieces.uv(piece), cell, cell, node: UiNode(key: col as int, box: UiBox(fill: UiFill.solid(fill))))
+                    else: ui.leaf(UiNode(key: col as int, width: UiSize.fixed(cell), height: UiSize.fixed(cell), box: UiBox(fill: UiFill.solid(fill))))

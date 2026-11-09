@@ -1,0 +1,148 @@
+use chess/random
+
+struct SliderEntry
+    mask: Bitboard
+    attacks: *Bitboard
+    magic: u64
+    shift: int
+
+var knight_table: [64]Bitboard
+var king_table: [64]Bitboard
+var bishop_reach_table: [64]Bitboard
+var rook_reach_table: [64]Bitboard
+var bishop_entries: [64]SliderEntry
+var rook_entries: [64]SliderEntry
+var bishop_attack_table: [5248]Bitboard
+var rook_attack_table: [102400]Bitboard
+
+const KnightFiles = [1, 2, 2, 1, -1, -2, -2, -1]
+const KnightRanks = [2, 1, -1, -2, -2, -1, 1, 2]
+const KingFiles = [1, 1, 0, -1, -1, -1, 0, 1]
+const KingRanks = [0, 1, 1, 1, 0, -1, -1, -1]
+const DiagonalFiles = [1, 1, -1, -1]
+const DiagonalRanks = [1, -1, 1, -1]
+const StraightFiles = [1, -1, 0, 0]
+const StraightRanks = [0, 0, 1, -1]
+
+@inline
+fn knight_attacks(sq: Square) -> Bitboard
+    return knight_table[sq]
+
+@inline
+fn king_attacks(sq: Square) -> Bitboard
+    return king_table[sq]
+
+@inline
+fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard
+    return slide(&bishop_entries[sq], occupied)
+
+@inline
+fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard
+    return slide(&rook_entries[sq], occupied)
+
+@inline
+fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard
+    return bishop_attacks(sq, occupied) | rook_attacks(sq, occupied)
+
+@inline
+fn bishop_reach(sq: Square) -> Bitboard
+    return bishop_reach_table[sq]
+
+@inline
+fn rook_reach(sq: Square) -> Bitboard
+    return rook_reach_table[sq]
+
+@inline
+fn knight_spread(knights: Bitboard) -> Bitboard
+    let one = (knights >> 1 & ~FileH) | (knights << 1 & ~FileA)
+    let two = (knights >> 2 & ~(FileG | FileH)) | (knights << 2 & ~(FileA | FileB))
+    return one << 16 | one >> 16 | two << 8 | two >> 8
+
+@inline
+fn slide(entry: *SliderEntry, occupied: Bitboard) -> Bitboard
+    if has_pext(): return entry.attacks[pext(occupied, entry.mask)]
+    return entry.attacks[(occupied & entry.mask) * entry.magic >> entry.shift]
+
+fn leap(from: Square, files: []int, ranks: []int) -> Bitboard
+    var targets: Bitboard = 0
+    for i in 0..8
+        let file = from.file + files[i]
+        let rank = from.rank + ranks[i]
+        if file >= 0 and file < 8 and rank >= 0 and rank < 8
+            targets |= Square(file, rank).bit
+    return targets
+
+fn walk(from: Square, occupied: Bitboard, files: []int, ranks: []int) -> Bitboard
+    var attacked: Bitboard = 0
+    for i in 0..4
+        var file = from.file + files[i]
+        var rank = from.rank + ranks[i]
+        while file >= 0 and file < 8 and rank >= 0 and rank < 8
+            let square = Square(file, rank).bit
+            attacked |= square
+            if occupied & square: break
+            file += files[i]
+            rank += ranks[i]
+    return attacked
+
+fn blocker_mask(from: Square, files: []int, ranks: []int) -> Bitboard
+    var mask: Bitboard = 0
+    for i in 0..4
+        var file = from.file + files[i]
+        var rank = from.rank + ranks[i]
+        while file + files[i] >= 0 and file + files[i] < 8 and rank + ranks[i] >= 0 and rank + ranks[i] < 8
+            mask |= Square(file, rank).bit
+            file += files[i]
+            rank += ranks[i]
+    return mask
+
+fn find_magic(mask: Bitboard, shift: int, occupancies: *Bitboard, attacks: *Bitboard, arrangements: int, ref random: SplitMix64) -> u64
+    var stored: [4096]Bitboard = undefined
+    var stored_by: [4096]int = undefined
+    zero(&stored_by)
+    var attempt = 1
+    loop
+        let magic = random.next() & random.next() & random.next()
+        attempt += 1
+        if (mask * magic >> 56).count < 6: continue
+        var collides = false
+        for i in 0..arrangements
+            let index = occupancies[i] * magic >> shift
+            if stored_by[index] != attempt
+                stored_by[index] = attempt
+                stored[index] = attacks[i]
+            elif stored[index] != attacks[i]
+                collides = true
+                break
+        if not collides: return magic
+
+fn build_sliders(entries: []SliderEntry, table: []Bitboard, files: []int, ranks: []int)
+    var random = SplitMix64(0x5A6F_6F6D_6965_7321)
+    var occupancies: [4096]Bitboard = undefined
+    var attacks: [4096]Bitboard = undefined
+    var offset = 0
+    for sq in 0..64
+        let e = &entries[sq]
+        e.mask = blocker_mask(sq, files, ranks)
+        e.shift = 64 - e.mask.count
+        e.attacks = &table[offset]
+        let arrangements = 1 << e.mask.count
+        offset += arrangements
+        for i in 0..arrangements
+            occupancies[i] = pdep(i, e.mask)
+            attacks[i] = walk(sq, occupancies[i], files, ranks)
+        if has_pext()
+            copy(e.attacks, &attacks[0], arrangements)
+        else
+            e.magic = find_magic(e.mask, e.shift, &occupancies[0], &attacks[0], arrangements, ref random)
+            for i in 0..arrangements
+                e.attacks[occupancies[i] * e.magic >> e.shift] = attacks[i]
+
+init
+    for sq in 0..64
+        knight_table[sq] = leap(sq, KnightFiles, KnightRanks)
+        king_table[sq] = leap(sq, KingFiles, KingRanks)
+        bishop_reach_table[sq] = walk(sq, 0, DiagonalFiles, DiagonalRanks)
+        rook_reach_table[sq] = walk(sq, 0, StraightFiles, StraightRanks)
+    build_sliders(bishop_entries, bishop_attack_table, DiagonalFiles, DiagonalRanks)
+    build_sliders(rook_entries, rook_attack_table, StraightFiles, StraightRanks)

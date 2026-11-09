@@ -1,0 +1,158 @@
+use engine/desktop/desktop_look
+use src/views/settings_kit
+use src/views/line_icons
+
+const RailWide: f32 = 288.0
+const RailPlaceTall: f32 = 32.0
+const RailEntryTall: f32 = 46.0
+const PageTop: f32 = 28.0
+const PageFoot: f32 = 40.0
+const SheetHead: f32 = 56.0
+const RailFoldBelow: f32 = 940.0
+const RailFolded: f32 = 64.0
+const RailNarrowest: f32 = 220.0
+
+fn places_width(ui: *UiCanvas, wide: f32) -> f32
+    return ui.width < RailFoldBelow ? RailFolded : wide
+
+fn list_rail_width(ui: *UiCanvas) -> f32
+    return clamp(ui.width * 0.3, RailNarrowest, RailWide)
+
+fn rail_room(ui: *UiCanvas, name: str, width: f32, gap: f32 = 1.0) -> UiOpen
+    let top = TabRowHeight + CommandBarHeight
+    return ui.open(UiNode(name: name, floating: true, offset: Vec2(0.0, top), width: UiSize.fixed(width), height: UiSize.fixed(max(ui.height - top, 1.0)), padding: Vec4(12.0, 14.0, 12.0, 14.0), gap: gap, clip: true))
+
+fn rail_group(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, key: int, text: str, first: bool, folded: bool = false)
+    if not folded
+        ui.label(text, UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8), UiNode(key: key, name: "railgroup", padding: Vec4(12.0, first ? 4.0 : 18.0, 0.0, 6.0)))
+        return
+    if first: return
+    with ui.open(UiNode(key: key, name: "railgroup", width: UiSize.grow(), padding: Vec4(0.0, 10.0, 0.0, 10.0), align: Vec2(0.5, 0.5)))
+        ui.leaf(UiNode(width: UiSize.fixed(20.0), height: UiSize.fixed(1.0), box: UiBox(fill: UiFill.solid(theme.line))))
+
+fn open_place(ui: *UiCanvas, theme: *GuiTheme, name: str, key: int, tall: f32, chosen: bool, centred: bool = false) -> bool
+    let o = ui.open(UiNode(key: key, name: name, flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(tall), padding: centred ? Vec4.splat(0.0) : Vec4(12.0, 0.0, 10.0, 0.0), gap: 10.0, align: Vec2(centred ? 0.5 : 0.0, 0.5), hit: true, focusable: true))
+    let h = ui.interact(o.id)
+    let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 22.0)
+    let fill = chosen ? theme.accent.with_alpha(0.12) : theme.ink.with_alpha(0.07 * lit)
+    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(6.0))
+    if chosen: ui.leaf(UiNode(floating: true, anchor: Vec2(0.0, 0.5), pivot: Vec2(0.0, 0.5), width: UiSize.fixed(3.0), height: UiSize.fixed(16.0), box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(1.5))))
+    return h.clicked
+
+fn rail_place(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name: str, key: int, label: str, aside: str, chosen: bool) -> bool
+    let clicked = open_place(ui, theme, name, key, RailPlaceTall, chosen)
+    ui.label(label, UiTextStyle(face: chosen ? fonts.strong : fonts.text, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+    if aside.len > 0: ui.label(aside, UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+    ui.close()
+    return clicked
+
+fn rail_icon_place(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, icons: *LineIcons, name: str, key: int, icon: LineIcon, label: str, aside: str, chosen: bool, folded: bool) -> bool
+    let clicked = open_place(ui, theme, name, key, folded ? 40.0 : RailPlaceTall, chosen, folded)
+    icons.show(ui, icon, 17.0, chosen ? theme.accent : theme.muted.lerp(theme.ink, 0.35))
+    if folded: ui.tooltip(label)
+    else
+        ui.label(label, UiTextStyle(face: chosen ? fonts.strong : fonts.text, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+        if aside.len > 0: ui.label(aside, UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+    ui.close()
+    return clicked
+
+fn rail_entry(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name: str, key: int, label: str, about: str, aside: str, chosen: bool, dot: Color = Color(0.0, 0.0, 0.0, 0.0)) -> bool
+    let clicked = open_place(ui, theme, name, key, RailEntryTall, chosen)
+    with ui.open(UiNode(name: "entrywords", width: UiSize.grow(), gap: 2.0, clip: true))
+        with ui.open(UiNode(flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5)))
+            ui.label(label, UiTextStyle(face: chosen ? fonts.strong : fonts.text, size: 13.0, color: theme.ink), UiNode(clip: true))
+            if dot.a > 0.0: ui.leaf(UiNode(width: UiSize.fixed(6.0), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(dot), radius: Vec4.splat(3.0))))
+        if about.len > 0: ui.label(about, UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted), UiNode(clip: true))
+    if aside.len > 0: ui.label(aside, UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+    ui.close()
+    return clicked
+
+fn page_side(w: f32) -> f32
+    return w < 640.0 ? 20.0 : 40.0
+
+fn page_column(ui: *UiCanvas, x: f32, most: f32 = KitColumn) -> f32
+    let w = max(ui.width - x, 1.0)
+    return max(min(w - page_side(w) * 2.0, most), 1.0)
+
+fn page_room(ui: *UiCanvas, name: str, key: int, x: f32, most: f32 = KitColumn) -> UiOpen
+    let top = TabRowHeight + CommandBarHeight
+    let w = max(ui.width - x, 1.0)
+    let side = page_side(w)
+    ui.open(UiNode(name: name, floating: true, offset: Vec2(x, top), width: UiSize.fixed(w), height: UiSize.fixed(max(ui.height - top, 1.0)), clip: true))
+    ui.scroll_area("pagescroll", node: UiNode(key: key, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(side, PageTop, side, PageFoot)))
+    let c = ui.open(UiNode(name: "pagecolumn", width: UiSize.fixed(page_column(ui, x, most)), gap: 8.0))
+    return UiOpen(ui, c.id, c.index, 3)
+
+fn page_actions(ui: *UiCanvas, key: int, inset: f32 = 0.0) -> UiOpen
+    return ui.open(UiNode(key: key, name: "pageactions", flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5), padding: Vec4(inset, 10.0, inset, 4.0)))
+
+fn fact_row(kit: *SettingsKit, key: int, name: str, value: str)
+    let ui = kit.ui
+    with kit.row(key, name, "")
+        ui.label(value, UiTextStyle(face: kit.fonts.text, size: 13.0, color: kit.theme.ink), UiNode(clip: true, width: kit.narrow() ? UiSize.grow() : UiSize.fit(0.0, kit.width * 0.64)))
+
+fn tag(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, text: str)
+    with ui.open(UiNode(name: "tag", flow: FlowRow, height: UiSize.fixed(28.0), padding: Vec4(12.0, 0.0, 12.0, 0.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.12)), radius: Vec4.splat(14.0))))
+        ui.label(text, UiTextStyle(face: fonts.strong, size: 12.0, color: theme.accent))
+
+fn kit_pick(kit: *SettingsKit, name: str, words: []str, ref chosen: int) -> bool
+    var need: f32 = 8.0
+    for w in words
+        need += w.len as f32 * 7.2 + 34.0
+    if need <= kit.width - 36.0: return kit.segments(name, words, ref chosen)
+    return kit.ui.dropdown(name, ref chosen, words, UiNode(width: UiSize.grow(1.0, 0.0, KitControl)))
+
+fn cross_button(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name: str, key: int) -> bool
+    let o = ui.open(UiNode(key: key, name: name, width: UiSize.fixed(30.0), height: UiSize.fixed(30.0), align: Vec2(0.5, 0.5), hit: true, focusable: true))
+    let h = ui.interact(o.id)
+    let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 22.0)
+    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.ink.with_alpha(0.08 * lit)), radius: Vec4.splat(15.0))
+    ui.label("×", UiTextStyle(face: fonts.text, size: 19.0, color: theme.muted.lerp(theme.ink, lit)))
+    ui.close()
+    return h.clicked
+
+struct SheetPopup
+    ui: *UiCanvas
+    theme: *GuiTheme
+    fonts: *GuiFonts
+    modal: UiOpen
+    fade: f32
+    rail_w: f32
+    tall: f32
+    row_open: bool
+    closed: bool
+
+    fn header(title: str, note: str) -> UiOpen
+        let o = ui.open(UiNode(name: "sheethead", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(SheetHead), padding: Vec4(22.0, 0.0, 58.0, 0.0), gap: 12.0, align: Vec2(0.0, 0.5)))
+        with ui.open(UiNode(name: "sheetclose", floating: true, anchor: Vec2(1.0, 0.5), pivot: Vec2(1.0, 0.5), offset: Vec2(-14.0, 0.0)))
+            if cross_button(ui, theme, fonts, "close", 0): closed = true
+        ui.label(title, UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink))
+        ui.label(note, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(width: UiSize.grow(), clip: true))
+        return o
+
+    fn open_row()
+        if row_open: return
+        row_open = true
+        ui.open(UiNode(name: "sheetrow", flow: FlowRow, width: UiSize.grow(), height: tall > 0.0 ? UiSize.fixed(tall) : UiSize.fit()))
+
+    fn rail() -> UiOpen
+        open_row()
+        return ui.open(UiNode(name: "sheetrail", width: UiSize.fixed(rail_w), height: UiSize.grow(), padding: Vec4(14.0, 0.0, 14.0, 16.0), gap: 8.0, clip: true))
+
+    fn body(padding: Vec4 = Vec4(24.0, 20.0, 24.0, 20.0), gap: f32 = 10.0) -> UiOpen
+        open_row()
+        let r = ui.theme.radius * 1.6
+        let corner = rail_w > 0.0 ? PageCurve : 0.0
+        let o = ui.open(UiNode(name: "sheetbody", width: UiSize.grow(), height: tall > 0.0 ? UiSize.grow() : UiSize.fit(), padding: padding, gap: gap, clip: true, box: UiBox(fill: UiFill.solid(theme.page.with_alpha(fade)), radius: Vec4(corner, 0.0, r, rail_w > 0.0 ? 0.0 : r), border: 1.0, border_color: theme.line.with_alpha(fade))))
+        return UiOpen(ui, o.id, o.index, 2)
+
+    fn end()
+        modal.end()
+
+fn sheet_popup(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name: str, ref show: bool, w: f32, tall: f32, rail: f32) -> SheetPopup
+    let m = ui.modal(name, ref show, w)
+    let e = &ui.elements[m.index]
+    e.node.padding = Vec4.splat(0.0)
+    e.node.gap = 0.0
+    e.node.clip = true
+    return SheetPopup(ui, theme, fonts, m, e.node.box.fill.a.a, rail, tall, false, false)

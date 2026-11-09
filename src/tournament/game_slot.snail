@@ -1,0 +1,242 @@
+use src/tournament/adjudication
+use src/tournament/schedule
+use src/tournament/telemetry
+use src/tournament/event_openings
+
+const UntimedMoveNs: i64 = 600000000000
+
+struct SlotSeat
+    player: EnginePlayer
+    entrant: int = -1
+    engine_id: int
+
+struct GameSlot
+    seats: [2]SlotSeat
+    index: int = -1
+    white_seat: int
+    game: Game
+    live: int
+    clock: GameClock
+    adjudicator: Adjudicator
+    end: PlayEnd
+    eval_kind: ScoreKind
+    eval_white: int
+    telemetry: [..]TelemetryRecord
+    version: u64
+    told: [..]u8
+    fault: [240]u8
+    fault_len: int
+    fault_side: Side
+    fault_move: int
+    early: bool
+    begun_ns: i64
+
+    fn busy() -> bool
+        return index >= 0
+
+    fn starting_engines() -> int
+        var n = 0
+        for k in 0..2
+            let state = seats[k].player.engine.state
+            if state == EngineOff or state == EngineStarting or state == EngineReadying: n += 1
+        return n
+
+    fn seat_of(side: Side) -> *SlotSeat
+        return &seats[side == White ? white_seat : 1 - white_seat]
+
+    fn begin(index: int, sg: ScheduledGame, c: *EventConfig, lib: *EngineLibrary, start: *Board, openings: *EventOpenings, now: i64)
+        self.index = index
+        white_seat = 0
+        if seats[1].entrant == sg.white or seats[0].entrant == sg.black and seats[0].entrant != sg.white: white_seat = 1
+        take_seat(white_seat, sg.white, c, lib)
+        take_seat(1 - white_seat, sg.black, c, lib)
+        for k in 0..2
+            seats[k].player.engine.told = &told
+            seats[k].player.engine.told_tag = k == white_seat ? 'W' : 'B'
+        fault_len = 0
+        early = false
+        begun_ns = now
+        game.reset(start)
+        live = 0
+        if openings.count() > 0
+            let k = sg.opening % openings.count()
+            game.reset(&openings.starts[k])
+            for m in openings.moves_of(k)
+                live = game.add_move(live, m)
+            if live > 0: game.set_comment(live, "book")
+            game.go(live)
+        clock.start(c.control, game.nodes[live].board.side, now)
+        clock.margin_ns = c.margin_ms * NsPerMs
+        adjudicator.rules = c.adjudication
+        adjudicator.reset()
+        end = NotEnded
+        eval_kind = NoScore
+        telemetry.clear()
+        var date: [16]u8
+        var n: [16]u8
+        var tc: [32]u8
+        game.set_tag("Event", c.name_text())
+        game.set_tag("Site", "Snail Chess GUI")
+        game.set_tag("Date", today_text(&date))
+        game.set_tag("Round", format(&n, "{sg.round}"))
+        game.set_tag("White", c.entrants[sg.white].name_text())
+        game.set_tag("Black", c.entrants[sg.black].name_text())
+        game.set_tag("TimeControl", c.control.pgn_text(&tc))
+        ask(now)
+        version += 1
+
+    fn take_seat(k: int, entrant: int, c: *EventConfig, lib: *EngineLibrary)
+        let seat = &seats[k]
+        let e = &c.entrants[entrant]
+        if seat.entrant != entrant or seat.engine_id != e.engine_id: seat.player.engine.quit()
+        if seat.player.engine.state == EngineFailed: seat.player.engine.state = EngineOff
+        seat.entrant = entrant
+        seat.engine_id = e.engine_id
+        let p = &seat.player
+        p.wanted.clear_values()
+        let entry = lib.find(e.engine_id)
+        let profile = entry ? entry.profile(e.profile_id) : null
+        if profile: p.wanted.copy_values(profile)
+        var over: EngineProfile
+        defer over.release()
+        c.overrides(entrant, entry, &over)
+        for v in over.values
+            p.wanted.put(v.name_text(), v.value_text())
+        p.new_game()
+        p.on = true
+
+    fn update(app: *DesktopApp, lib: *EngineLibrary)
+        if index < 0 or end != NotEnded: return
+        var path: [600]u8
+        for k in 0..2
+            let s = &seats[k]
+            let exe = lib.exe_path(s.engine_id, &path)
+            s.player.update(app, exe, folder_of(exe))
+        for side in [White, Black]
+            let p = &seat_of(side).player
+            if p.engine.state == EngineFailed
+                early = p.go_ns < begun_ns
+                var why: [240]u8
+                lose(side, ByEngineFailure, format(&why, "{name_of(side)}: {p.engine.failure_text()}"))
+                return
+        let mover = clock.side
+        let p = &seat_of(mover).player
+        if p.asking: clock.turn_ns = now_ns()
+        elif p.go_ns > clock.turn_ns: clock.turn_ns = p.go_ns
+        if p.has_best: moved(mover)
+        if end != NotEnded: return
+        let now = now_ns()
+        if clock.flagged(now)
+            p.take_now()
+            if p.has_best: moved(mover)
+            if end == NotEnded and clock.flagged(now): flag_fell()
+            return
+        if not clock.timed() and p.engine.state == EngineSearching and now - p.go_ns > UntimedMoveNs
+            var why: [160]u8
+            lose(mover, ByEngineFailure, format(&why, "{name_of(mover)} did not return a move within 10 minutes."))
+            return
+        if clock.running: app.wake_in((clock.left_ns(mover, now) + clock.margin_ns) as f64 / 1.0e9 + 0.001)
+
+    fn moved(mover: Side)
+        let p = &seat_of(mover).player
+        p.has_best = false
+        if not clock.in_time(p.best_ns)
+            flag_fell()
+            return
+        if p.illegal
+            var why: [160]u8
+            lose(mover, ByIllegalMove, format(&why, "{name_of(mover)} returned an illegal move: {p.best_text()}."))
+            return
+        let note = p.heard
+        if eval_recorder: eval_recorder.keep_player(p)
+        let fullmove = game.nodes[live].board.fullmove
+        clock.press(p.best_ns)
+        let following = game.at == live
+        live = game.add_move(live, p.best)
+        if following: game.go(live)
+        note_move(&note, mover, p.best_ns - p.go_ns)
+        eval_kind = note.kind
+        eval_white = mover == White ? note.score : -note.score
+        telemetry.push(telemetry_of(&note, index, live, mover, (p.best_ns - p.go_ns) / NsPerMs, p.best_cpu_ms - p.go_cpu_ms))
+        let why = rule_end(&game, live)
+        if why == ByCheckmate
+            finish(why, win_for(mover))
+            return
+        if why != NotEnded
+            finish(why, Drawn)
+            return
+        let (judged, winner) = adjudicator.take(&note, mover, fullmove)
+        if judged == ByWinAdjudication: finish(judged, win_for(winner))
+        elif judged == ByDrawAdjudication: finish(judged, Drawn)
+        else: ask(now_ns())
+
+    fn ask(now: i64)
+        let s = game.nodes[live].board.side
+        var go: [160]u8
+        var clocks: [120]u8
+        seat_of(s).player.ask(&game, live, format(&go, "go{clock_go(&clock, s, now, &clocks)}"))
+
+    fn flag_fell()
+        let out = clock.side
+        if cannot_mate(&game.nodes[live].board, out.other()): finish(ByTimeNoMate, Drawn)
+        else
+            var why: [120]u8
+            lose(out, ByTime, format(&why, "{name_of(out)} lost on time"))
+
+    fn lose(side: Side, why: PlayEnd, reason: str)
+        game.append_comment(live, reason)
+        if why == ByEngineFailure or why == ByIllegalMove
+            fault_side = side
+            fault_move = game.nodes[live].board.fullmove as int
+            fault_len = keep_text(reason, fault[0..240])
+        finish(why, win_for(side.other()))
+
+    fn fault_text() -> str
+        return str(fault[0..fault_len])
+
+    fn finish(why: PlayEnd, result: GameResult)
+        end = why
+        clock.stop(now_ns())
+        seats[0].player.cancel()
+        seats[1].player.cancel()
+        game.result = result
+        game.set_tag("Termination", termination_of(why))
+        version += 1
+
+    fn abandon()
+        if index < 0: return
+        seats[0].player.cancel()
+        seats[1].player.cancel()
+        clock.stop(now_ns())
+        index = -1
+        version += 1
+
+    fn name_of(side: Side) -> str
+        return game.tag(side == White ? "White" : "Black")
+
+    fn note_move(note: *SearchNote, mover: Side, took_ns: i64)
+        var text: [96]u8
+        var eval: [32]u8
+        var time: [32]u8
+        var t: [24]u8
+        var shown_eval = ""
+        if note.kind != NoScore
+            let white = mover == White ? note.score : -note.score
+            let a = abs(white)
+            let sign = white < 0 ? "-" : ""
+            if note.kind == MateIn: shown_eval = format(&eval, "[%eval #{sign}{a}] ")
+            else: shown_eval = format(&eval, "[%eval {sign}{a / 100}.{a % 100:02}] ")
+        let k = clock.control.kind
+        var shown_time = ""
+        if k == BaseIncrement or k == MovesInTime: shown_time = format(&time, "[%clk {pgn_clock(clock.left_ns(mover, now_ns()), &t)}]")
+        else: shown_time = format(&time, "[%emt {pgn_clock(took_ns, &t)}]")
+        game.set_comment(live, format(&text, "{shown_eval}{shown_time}"))
+
+    fn release()
+        seats[0].player.engine.told = null
+        seats[1].player.engine.told = null
+        seats[0].player.release()
+        seats[1].player.release()
+        telemetry.free()
+        told.free()
+

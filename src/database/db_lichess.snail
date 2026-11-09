@@ -1,0 +1,273 @@
+use src/database/db_pgn_import
+use engine/desktop/http_get
+
+const DbLichessAgent = "SnailChessGui-db/1"
+const DbCloudName = "Lichess cloud"
+
+fn db_lichess_pgn(db: *PositionDb, url: str, source: u8, error: *[..]u8) -> int
+    var imp = DbPgnImport(db: db, source: source)
+    defer imp.release()
+    var status = 0
+    var length: i64 = -1
+    var code = 0
+    let headers = "Accept: application/x-chess-pgn"
+    let request = sn_http_open(url.ptr, url.len as int, DbLichessAgent.ptr, DbLichessAgent.len as int, headers.ptr, headers.len as int, &status, &length, &code)
+    if not request
+        var line: [240]u8
+        db_add(error, http_error_text(code, &line))
+        return -1
+    defer sn_http_close(request)
+    if status < 200 or status >= 300
+        db_add(error, "The server answered ")
+        db_add_int(error, status)
+        return -1
+    var chunk: [..]u8
+    defer chunk.free()
+    chunk.resize(HttpReadSize)
+    loop
+        var failed = 0
+        let got = sn_http_read(request, chunk.ptr, HttpReadSize, &failed)
+        if got <= 0 or failed != 0: break
+        imp.feed(str(chunk[0..got]))
+    imp.feed_done()
+    return imp.games
+
+fn db_lichess_user(db: *PositionDb, name: str, most: int, error: *[..]u8) -> int
+    var url: [..]u8
+    defer url.free()
+    db_add(&url, "https://lichess.org/api/games/user/")
+    db_add(&url, name)
+    db_add(&url, "?evals=true&clocks=false&opening=false")
+    if most > 0
+        db_add(&url, "&max=")
+        db_add_int(&url, most)
+    return db_lichess_pgn(db, str(url[0..url.len]), DbFromLichess, error)
+
+fn db_lichess_broadcast(db: *PositionDb, id: str, error: *[..]u8) -> int
+    var url: [..]u8
+    defer url.free()
+    db_add(&url, "https://lichess.org/api/broadcast/")
+    db_add(&url, id)
+    db_add(&url, ".pgn")
+    return db_lichess_pgn(db, str(url[0..url.len]), DbFromBroadcast, error)
+
+fn db_lichess_cloud(db: *PositionDb, fen: str, error: *[..]u8) -> int
+    var url: [..]u8
+    defer url.free()
+    db_add(&url, "https://lichess.org/api/cloud-eval?multiPv=5&fen=")
+    for c in fen as []u8
+        if c == ' ': db_add(&url, "%20")
+        elif c == '/': db_add(&url, "%2F")
+        else: url.push(c)
+    var status = 0
+    var length: i64 = -1
+    var code = 0
+    let request = sn_http_open(url.ptr, url.len as int, DbLichessAgent.ptr, DbLichessAgent.len as int, null, 0, &status, &length, &code)
+    if not request
+        var line: [240]u8
+        db_add(error, http_error_text(code, &line))
+        return -1
+    defer sn_http_close(request)
+    if status == 404
+        db_add(error, "Lichess has no cloud evaluation of this position.")
+        return 0
+    if status < 200 or status >= 300
+        db_add(error, "The server answered ")
+        db_add_int(error, status)
+        return -1
+    var body: [..]u8
+    defer body.free()
+    var chunk: [4096]u8
+    loop
+        var failed = 0
+        let got = sn_http_read(request, &chunk[0], 4096, &failed)
+        if got <= 0 or failed != 0: break
+        db_add(&body, str(chunk[0..got]))
+    let engine = db.engine(DbCloudName)
+    return db_lichess_eval_json(db, str(body[0..body.len]), engine, fen)
+
+fn db_lichess_eval_file(db: *PositionDb, path: str, most: i64) -> i64
+    var f: DbFile
+    if not f.open(path, DbRead): return -1
+    defer f.close()
+    let engine = db.engine(DbCloudName)
+    var chunk: [..]u8
+    defer chunk.free()
+    var at: i64 = 0
+    var done: i64 = 0
+    var carry = 0
+    let size = 8388608
+    loop
+        chunk.resize(carry + size)
+        let want = min(size as i64, f.size - at)
+        if want <= 0 and carry == 0: break
+        if want > 0 and not f.read_at(at, &chunk[carry], want): break
+        at += max(want, 0)
+        let have = carry + max(want, 0) as int
+        var start = 0
+        for i in 0..have
+            if chunk[i] != '\n': continue
+            db_lichess_eval_json(db, str(chunk[start..i]), engine, "")
+            start = i + 1
+            done += 1
+            if done % 100000 == 0: db.commit()
+            if most > 0 and done >= most: break
+        if most > 0 and done >= most: break
+        carry = have - start
+        if want <= 0
+            if carry > 0: db_lichess_eval_json(db, str(chunk[start..have]), engine, "")
+            break
+        db_memmove(chunk.ptr, &chunk[start], carry as u64)
+    db.commit()
+    return done
+
+fn db_lichess_eval_json(db: *PositionDb, text: str, engine: u16, fen_given: str) -> int
+    var j = DbJson(text: text)
+    var board: Board
+    var fen = fen_given
+    var kept = 0
+    var top = DbEvalRead()
+    if not j.enter('{'): return 0
+    loop
+        let (key, more) = j.key()
+        if not more: break
+        if key == "fen": fen = j.string()
+        elif key == "evals"
+            if fen.len == 0 or not board.load_fen(fen): return kept
+            if not j.enter('['): return kept
+            while j.item(']')
+                var one = DbEvalRead()
+                if not j.enter('{'): return kept
+                loop
+                    let (k, again) = j.key()
+                    if not again: break
+                    one.read_field(&j, k)
+                kept += one.keep(db, &board, engine)
+        else
+            top.read_field(&j, key)
+    if top.lines.len > 0 and fen.len > 0 and board.load_fen(fen): kept += top.keep(db, &board, engine)
+    return kept
+
+struct DbEvalRead
+    depth: int
+    knodes: i64
+    lines: [..]DbEval
+
+    fn read_field(j: *DbJson, key: str)
+        if key == "depth": depth = j.number() as int
+        elif key == "knodes": knodes = j.number() as i64
+        elif key == "pvs"
+            if not j.enter('['): return
+            while j.item(']')
+                var e = DbEval(multipv: (lines.len + 1) as u8)
+                var mate = 0
+                var is_mate = false
+                if not j.enter('{'): return
+                loop
+                    let (k, again) = j.key()
+                    if not again: break
+                    if k == "cp": e.score = j.number() as i32
+                    elif k == "mate"
+                        mate = j.number() as int
+                        is_mate = true
+                    elif k == "line" or k == "moves"
+                        let pv = j.string()
+                        var w = DbWords(text: pv)
+                        loop
+                            let mv = w.next()
+                            if mv.len == 0 or e.pv_len >= DbPvMost: break
+                            let (code, ok) = db_move_of_uci(mv)
+                            if not ok: break
+                            e.pv[e.pv_len] = code
+                            e.pv_len += 1
+                    else
+                        j.skip()
+                if is_mate: e.score = mate > 0 ? DbMateScore - mate : -DbMateScore - mate
+                lines.push(e)
+        else
+            j.skip()
+
+    fn keep(db: *PositionDb, board: *Board, engine: u16) -> int
+        let stamp = (sn_db_unix_ms() / 1000) as u32
+        for i in 0..lines.len
+            var e = lines[i]
+            e.engine = engine
+            e.depth = clamp(depth, 0, 255) as u8
+            e.nodes = (knodes * 1000) as u64
+            e.stamp = stamp
+            if board.side == Black: e.score = -e.score
+            db.put_eval(board, e)
+        let n = lines.len
+        lines.free()
+        return n
+
+struct DbJson
+    text: str
+    at: int
+
+    fn space()
+        while at < text.len and (text[at] == ' ' or text[at] == '\n' or text[at] == '\r' or text[at] == '\t'): at += 1
+
+    fn enter(open: u8) -> bool
+        space()
+        if at >= text.len or text[at] != open: return false
+        at += 1
+        return true
+
+    fn item(close: u8) -> bool
+        space()
+        if at < text.len and text[at] == ',': at += 1
+        space()
+        if at >= text.len: return false
+        if text[at] == close
+            at += 1
+            return false
+        return true
+
+    fn key() -> (str, bool)
+        if not item('}'): return "", false
+        let k = string()
+        space()
+        if at < text.len and text[at] == ':': at += 1
+        return k, true
+
+    fn string() -> str
+        space()
+        if at >= text.len or text[at] != '"': return ""
+        at += 1
+        let start = at
+        while at < text.len and text[at] != '"'
+            if text[at] == '\\': at += 1
+            at += 1
+        let s = text[start..min(at, text.len)]
+        at += 1
+        return s
+
+    fn number() -> f64
+        space()
+        let start = at
+        while at < text.len and (text[at] == '-' or text[at] == '+' or text[at] == '.' or text[at] == 'e' or text[at] == 'E' or (text[at] >= '0' and text[at] <= '9')): at += 1
+        return parse_float(text[start..at])
+
+    fn skip()
+        space()
+        if at >= text.len: return
+        let c = text[at]
+        if c == '"'
+            string()
+        elif c == '{' or c == '['
+            var level = 0
+            while at < text.len
+                let d = text[at]
+                if d == '"'
+                    string()
+                    continue
+                if d == '{' or d == '[': level += 1
+                if d == '}' or d == ']'
+                    level -= 1
+                    if level == 0
+                        at += 1
+                        return
+                at += 1
+        else
+            while at < text.len and text[at] != ',' and text[at] != '}' and text[at] != ']': at += 1

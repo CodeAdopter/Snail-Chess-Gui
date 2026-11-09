@@ -1,0 +1,79 @@
+use engine/desktop/desktop_app
+use src/game/game_report
+use src/theme/theme
+use src/theme/fonts
+
+const ReviewCardHeight: f32 = 90.0
+const ReviewRowHeight: f32 = 24.0
+const ReviewScoreWidth: f32 = 54.0
+const ReviewCountWidth: f32 = 28.0
+const ReviewBestWidth: f32 = 38.0
+const ReviewLossWidth: f32 = 42.0
+
+fn mark_sign(m: MoveMark) -> str
+    match m
+        Brilliant: return "!!"
+        Inaccuracy: return "?!"
+        Mistake: return "?"
+        Blunder: return "??"
+    return ""
+
+fn mark_color(theme: *GuiTheme, m: MoveMark) -> Color
+    let d = theme.dark
+    match m
+        Brilliant: return Color.hex(d ? 0x5CC4E6 : 0x1683A8)
+        Best: return Color.hex(d ? 0x8CC37A : 0x4E8A3A)
+        Inaccuracy: return Color.hex(d ? 0xE3C25A : 0xA88210)
+        Mistake: return Color.hex(d ? 0xE7964F : 0xC4621F)
+        Blunder: return Color.hex(d ? 0xEC6B6B : 0xC23B3B)
+    return theme.muted
+
+fn draw_review_card(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, report: *GameReport, x: f32, y: f32, w: f32, h: f32)
+    let ui = &app.ui
+    if w < 1.0 or h < 1.0: return
+    let head = UiTextStyle(face: fonts.text, size: 11.0, color: theme.muted)
+    with ui.open(UiNode(name: "reviewcard", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(8.0, 6.0, 8.0, 6.0), gap: 2.0, clip: true))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(ReviewRowHeight - 4.0), padding: Vec4(6.0, 0.0, 0.0, 0.0), align: Vec2(0.0, 0.5)))
+            ui.label("Game review", UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+            ui.label("Accuracy", head, UiNode(width: UiSize.fixed(ReviewScoreWidth), align: Vec2(0.5, 0.5)))
+            for m in [Brilliant, Best, Inaccuracy, Mistake, Blunder]
+                let shown = m == Best ? "Best" : mark_sign(m)
+                ui.label(shown, UiTextStyle(face: fonts.strong, size: 11.5, color: mark_color(theme, m)), UiNode(width: UiSize.fixed(count_width(m)), align: Vec2(0.5, 0.5)))
+            ui.label("ACPL", head, UiNode(width: UiSize.fixed(ReviewLossWidth), align: Vec2(0.5, 0.5)))
+        for side in [White, Black]
+            side_row(app, theme, fonts, game, report, side)
+
+fn count_width(m: MoveMark) -> f32
+    return m == Best ? ReviewBestWidth : ReviewCountWidth
+
+fn side_row(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, report: *GameReport, side: Side)
+    let ui = &app.ui
+    let s = &report.sides[side as int]
+    var text: [16]u8
+    var name = game.tag(side == White ? "White" : "Black")
+    if name.len == 0 or name == "?": name = side == White ? "White" : "Black"
+    let value = UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink)
+    with ui.open(UiNode(key: side as int, name: "reviewside", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(ReviewRowHeight), padding: Vec4(6.0, 0.0, 0.0, 0.0), gap: 0.0, align: Vec2(0.0, 0.5), box: UiBox(fill: UiFill.solid(side == White ? theme.sunken : theme.surface), radius: Vec4.splat(4.0))))
+        ui.leaf(UiNode(width: UiSize.fixed(9.0), height: UiSize.fixed(9.0), box: UiBox(fill: UiFill.solid(Color.hex(side == White ? 0xF4F1EA : 0x2B2522)), radius: Vec4.splat(4.5), border: 1.0, border_color: theme.muted.with_alpha(0.6))))
+        ui.label(name, UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(width: UiSize.grow(), padding: Vec4(7.0, 0.0, 4.0, 0.0), clip: true))
+        let score = s.judged > 0 ? format(&text, "{s.mean_accuracy():.0}") : "–"
+        ui.label(score, value, UiNode(width: UiSize.fixed(ReviewScoreWidth), align: Vec2(0.5, 0.5)))
+        for m in [Brilliant, Best, Inaccuracy, Mistake, Blunder]
+            count_cell(app, theme, fonts, game, report, side, m)
+        var loss: [16]u8
+        let shown_loss = s.judged > 0 ? format(&loss, "{s.average_loss()}") : "–"
+        ui.label(shown_loss, UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(width: UiSize.fixed(ReviewLossWidth), align: Vec2(0.5, 0.5)))
+
+fn count_cell(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, report: *GameReport, side: Side, m: MoveMark)
+    let ui = &app.ui
+    let count = report.sides[side as int].count(m)
+    let c = mark_color(theme, m)
+    var text: [16]u8
+    let o = ui.open(UiNode(key: m as int, name: "reviewcount", width: UiSize.fixed(count_width(m)), height: UiSize.fixed(ReviewRowHeight - 4.0), align: Vec2(0.5, 0.5), hit: count > 0))
+    let hv = ui.interact(o.id, false)
+    let lit = ui.spring(o.id, 0, hv.hovered ? 1.0 : 0.0, 22.0)
+    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(c.with_alpha(0.16 * lit)), radius: Vec4.splat(4.0))
+    ui.label(format(&text, "{count}"), UiTextStyle(face: count > 0 ? fonts.strong : fonts.text, size: 12.5, color: count > 0 ? c : theme.muted.with_alpha(0.7)))
+    ui.close()
+    if hv.hovered: app.cursor = SDL_SYSTEM_CURSOR_POINTER
+    if hv.clicked: game.go(report.next_marked(game, side, m))

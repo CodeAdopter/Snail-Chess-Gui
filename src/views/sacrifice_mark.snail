@@ -1,0 +1,27 @@
+use src/effects/sacrifice
+use src/game/game
+
+fn sacrifice_line_of(line: *SacrificeLine, g: *Game)
+    var back: [SacrificeHorizon + 3]int
+    var n = 0
+    var at = g.at
+    while at != NoNode and n < SacrificeHorizon + 3
+        back[n] = at
+        n += 1
+        at = g.nodes[at].parent
+    line.count = 0
+    for k in 0..n
+        let i = back[n - 1 - k]
+        line.add(&g.nodes[i].board, g.nodes[i].move, i)
+    line.shown = line.count - 1
+    var next = g.nodes[g.at].first
+    var ahead = 0
+    while next != NoNode and not g.nodes[next].gone and ahead <= SacrificeHorizon
+        line.add(&g.nodes[next].board, g.nodes[next].move, next)
+        next = g.nodes[next].first
+        ahead += 1
+
+fn white_view(kind: ScoreKind, score: int, side: Side) -> int
+    var own = score
+    if kind == MateIn: own = score > 0 ? 10000 : -10000
+    return side == White ? own : -own

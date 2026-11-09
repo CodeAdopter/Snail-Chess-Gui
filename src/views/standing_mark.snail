@@ -1,0 +1,14 @@
+use src/tournament/event_runner
+use src/views/board_view
+
+fn standing_box(look: *BoardLook, r: *EventRunner, place: int, fill: Color, radius: f32) -> UiBox
+    let st = &r.standings
+    if not look.effects or place < 0 or place >= st.order.len: return UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(radius))
+    let i = st.order[place]
+    let began = st.tallies[i].games() - abs(st.streak(i))
+    return look.effects.mark_box(st.mark_of(place), r.id as u64, i as u64 * 100000 + began as u64, fill, radius)
+
+fn standing_place(r: *EventRunner, entrant: int) -> int
+    for place in 0..r.standings.order.len
+        if r.standings.order[place] == entrant: return place as int
+    return -1

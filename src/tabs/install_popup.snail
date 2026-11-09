@@ -1,0 +1,372 @@
+use src/engines/install_job
+use src/engines/engine_probe
+use src/tabs/registry_popup
+use src/store/github_token
+
+const InstallListHeight: f32 = 340.0
+const InstallReportBytes = 4000
+
+enum InstallStage: u8
+    StageClosed
+    StageChoosing
+    StageWorking
+    StagePicking
+    StageDone
+
+struct InstallPopup
+    stage: InstallStage
+    engine: int = -1
+    list: ReleaseList
+    checks: [..]bool
+    made_version: int = -1
+    queue: [..]int
+    queue_release: [..]int
+    at: int
+    job: InstallJob
+    picks: [..]bool
+    probing: int = -1
+    probe: EngineProbe
+    report: [..]u8
+    documentation: [..]u8
+    back: bool
+    go_when_listed: bool
+    added_id: int
+    token: GithubToken
+    token_field: UiEditText
+    token_open: bool
+    token_said: int
+
+    fn open(registry: *Registry, e: int, data: *DataFolder)
+        let c = &registry.catalog
+        if e < 0 or e >= c.engines.len: return
+        engine = e
+        token.load(data)
+        token_said = 0
+        list.choose(c, &c.engines[e], data)
+        if list.due(): list.refresh(token.text())
+        check_best()
+        report.clear()
+        back = false
+        stage = StageChoosing
+
+    fn update(app: *DesktopApp, registry: *Registry, lib: *EngineLibrary)
+        if list.update(): app.redraw()
+        if stage == StageChoosing and made_version != list.version: check_best()
+        if stage == StageChoosing and go_when_listed and list.set.releases.len > 0
+            go_when_listed = false
+            begin(lib, &registry.catalog)
+        if stage != StageWorking: return
+        let c = &registry.catalog
+        if probing >= 0
+            if not probe.update(app): return
+            probed(lib, c)
+            app.redraw()
+            return
+        if job.step == InstallUnpacking: app.wake_in(0.2)
+        if not job.update(): return
+        app.redraw()
+        match job.step
+            InstallReady
+                picks.clear()
+                for i in 0..job.programs.len
+                    picks.push(i == 0)
+                if job.programs.len > 1: stage = StagePicking
+                else: start_probes(lib, c)
+            InstallFailed
+                var said: [600]u8
+                note_job(format(&said, "{job_asset()} could not be installed. {job.failure_text()}"))
+                next(lib, c)
+            InstallCancelled
+                var said: [600]u8
+                note_job(format(&said, "{job_asset()} was cancelled."))
+                next(lib, c)
+            InstallIdle, InstallDownloading, InstallUnpacking, InstallUnpackingTar: return
+
+    fn check_best()
+        made_version = list.version
+        let s = &list.set
+        checks.clear()
+        for i in 0..s.assets.len
+            checks.push(false)
+        var pick = -1
+        for want_stable in [true, false]
+            for rel in s.releases
+                if pick >= 0 or rel.count == 0 or want_stable and rel.prerelease: continue
+                if s.assets[rel.first].score >= 0: pick = rel.first
+            if pick >= 0: break
+        if pick >= 0: checks[pick] = true
+
+    fn begin(lib: *EngineLibrary, c: *Catalog)
+        queue.clear()
+        queue_release.clear()
+        let s = &list.set
+        for r in 0..s.releases.len as int
+            let rel = &s.releases[r]
+            for i in rel.first..rel.first + rel.count
+                if checks[i]
+                    queue.push(i)
+                    queue_release.push(r)
+        if queue.len == 0: return
+        report.clear()
+        documentation.clear()
+        at = -1
+        stage = StageWorking
+        next(lib, c)
+
+    fn next(lib: *EngineLibrary, c: *Catalog)
+        at += 1
+        probing = -1
+        if at >= queue.len
+            stage = StageDone
+            return
+        if not job.start(lib.data, lib.reserve_id(), &list.set, queue_release[at], queue[at], &list.cpu)
+            var said: [600]u8
+            note_job(format(&said, "{job_asset()} could not be installed. {job.failure_text()}"))
+            next(lib, c)
+
+    fn start_probes(lib: *EngineLibrary, c: *Catalog)
+        stage = StageWorking
+        probing = -1
+        probe_next(lib, c, 0)
+
+    fn probe_next(lib: *EngineLibrary, c: *Catalog, from: int)
+        var i = from
+        while i < picks.len and not picks[i]
+            i += 1
+        if i >= picks.len
+            probing = -1
+            if not added_any(lib): job.clean()
+            next(lib, c)
+            return
+        probing = i
+        var buf: [600]u8
+        let path = lib.data.path(job.program_path(i), &buf)
+        probe.start(path, folder_of(path))
+        if probe.state == ProbeFailed: probed(lib, c)
+
+    fn probed(lib: *EngineLibrary, c: *Catalog)
+        let i = probing
+        let e = &c.engines[engine]
+        let name = file_name_of(job.program_path(i))
+        let answered = probe.state == ProbeDone
+        if answered or probe.engine.answered_uci
+            let id = job_entry_id(lib)
+            let entry = job.add_to(lib, id, i, &probe.engine, c, e, not answered)
+            added_id = id
+            if answered
+                var said: [600]u8
+                note_job(format(&said, "{entry.display_name()} was added."))
+            else
+                var said: [600]u8
+                note_job(format(&said, "{entry.display_name()} was added but needs setup. {probe.engine.failure_text()}"))
+                hold_text(&documentation, entry.origin.text(entry.origin.documentation))
+        else
+            var said: [600]u8
+            note_job(format(&said, "{name} was not added. {probe.engine.failure_text()}"))
+        probe_next(lib, c, i + 1)
+
+    fn job_entry_id(lib: *EngineLibrary) -> int
+        return lib.index_of(job.folder_id) < 0 ? job.folder_id : lib.reserve_id()
+
+    fn added_any(lib: *EngineLibrary) -> bool
+        var inside: [64]u8
+        let folder = format(&inside, "engines\\{job.folder_id}")
+        for i in 0..lib.entries.len
+            let e = &lib.entries[i]
+            if install_folder(e.text(e.path)) == folder: return true
+        return false
+
+    fn job_asset() -> str
+        return str(job.asset[0..job.asset.len])
+
+    fn note_job(line: str)
+        if report.len + line.len + 1 > InstallReportBytes: return
+        for k in 0..line.len
+            report.push(line[k])
+        report.push('\n')
+
+    fn cancel(lib: *EngineLibrary)
+        if stage == StageWorking or stage == StagePicking
+            if probing >= 0: probe.cancel()
+            job.stop()
+            probing = -1
+            if not added_any(lib): job.clean()
+        stage = StageClosed
+
+    fn draw(app: *DesktopApp, registry: *Registry, lib: *EngineLibrary, theme: *GuiTheme, fonts: *GuiFonts)
+        if stage == StageClosed: return
+        let ui = &app.ui
+        let c = &registry.catalog
+        if engine < 0 or engine >= c.engines.len: return
+        var showing = true
+        var line: [400]u8
+        let title = UiTextStyle(face: fonts.strong, size: 14.0, color: theme.ink)
+        let body = UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink)
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let name = c.text(c.engines[engine].name)
+        var sheet = sheet_popup(ui, theme, fonts, "install", ref showing, clamp(ui.width - 120.0, 600.0, 860.0), 0.0, 0.0)
+        var status: [200]u8
+        var heading: [200]u8
+        with sheet.header(format(&heading, "{stage == StageDone ? "Installing" : "Install"} {name}"), stage == StageChoosing ? releases_status(&list, &status) : "")
+            if stage == StageChoosing
+                if not list.codeberg and ui.button(token.saved() ? "GitHub token saved" : "GitHub token"): token_open = not token_open
+                if ui.button(list.fetching ? "Fetching" : "Refresh") and not list.fetching: list.refresh(token.text())
+        with sheet.body()
+            match stage
+                StageChoosing
+                    ui.label(format(&line, "CPU: {list.cpu.name()} · Recommended build: {cpu_text(&list.cpu)}"), note)
+                    let trust = trust_of(c, &c.engines[engine])
+                    let doubtful = trust.level() == TrustLow
+                    if doubtful
+                        var warning: [300]u8
+                        ui.paragraph(low_trust_text(&trust, &warning), UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn))
+                    if list.failure_len > 0: ui.paragraph(list.failure_text(), body)
+                    let limited = list.failure_len > 0 and not list.codeberg and (list.fetch.status == 403 or list.fetch.status == 429)
+                    if token_open or limited: token_row(ui, theme, fonts)
+                    choices(ui, theme, fonts)
+                    var count = 0
+                    for k in checks
+                        if k: count += 1
+                    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                        if ui.button("Back to the registry")
+                            back = true
+                            showing = false
+                        ui.spacer()
+                        if ui.button("Cancel"): showing = false
+                        var counted_label: [40]u8
+                        let label = count == 1 ? "Install" : format(&counted_label, "Install {count}")
+                        if count > 0 and ui.button(doubtful ? format(&line, "{label} anyway") : label, true): begin(lib, c)
+                StageWorking
+                    working(ui, theme, fonts)
+                    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                        ui.spacer()
+                        if ui.button("Cancel"): showing = false
+                StagePicking
+                    ui.label(format(&line, "{job_asset()} contains {job.programs.len} executables"), title)
+                    ui.paragraph("Select the executables to add. The recommended build for this computer is selected.", note)
+                    with ui.scroll_area("programs", gap: 2.0, node: UiNode(width: UiSize.grow(), height: UiSize.fit(0.0, InstallListHeight)))
+                        for i in 0..job.programs.len as int
+                            let p = &job.programs[i]
+                            with ui.open(UiNode(key: i, flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+                                ui.checkbox(job.program_path(i), ref picks[i], UiNode(width: UiSize.grow()))
+                                ui.label(p.score < 0 ? "Not compatible with this computer" : build_word(p.build), note)
+                    var count = 0
+                    for k in picks
+                        if k: count += 1
+                    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                        ui.spacer()
+                        if ui.button("Skip")
+                            for i in 0..picks.len
+                                picks[i] = false
+                            start_probes(lib, c)
+                        if count > 0 and ui.button(format(&line, "Add {count}"), true): start_probes(lib, c)
+                StageDone
+                    var start = 0
+                    for k in 0..report.len as int
+                        if report[k] != '\n': continue
+                        ui.paragraph(str(report[start..k]), body)
+                        start = k + 1
+                    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                        if documentation.len > 0 and ui.button("Setup instructions"): open_link(str(documentation[0..documentation.len]))
+                        ui.spacer()
+                        if ui.button("Close", true): showing = false
+                StageClosed: showing = false
+        sheet.end()
+        if sheet.closed: showing = false
+        if not showing: cancel(lib)
+
+    fn token_row(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+        let note = UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.text_field("githubtoken", &token_field, token.saved() ? "Paste a new token to replace the saved token" : "Paste a token; public repositories require no scopes", UiNode(width: UiSize.grow()))
+            if ui.button("Save")
+                if token.save(token_field.text())
+                    token_field.set("")
+                    token_said = 1
+                    list.refresh(token.text())
+                else: token_said = 2
+            if token.saved() and ui.button("Remove token")
+                token.remove()
+                token_said = 3
+        let said = token_said == 1 ? "Token saved and encrypted for this Windows account. Releases have been refreshed." : token_said == 2 ? "Invalid token format. Use only letters, digits and underscores." : token_said == 3 ? "Forgotten." : "A token increases the GitHub API request limit. It is encrypted for this Windows account and sent only to GitHub."
+        ui.paragraph(said, note)
+
+    fn choices(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+        let s = &list.set
+        let note = UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted)
+        let head = UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink)
+        var line: [300]u8
+        var size: [40]u8
+        with ui.scroll_area("releases", gap: 2.0, node: UiNode(width: UiSize.grow(), height: UiSize.fixed(InstallListHeight), padding: Vec4(0.0, 4.0, 8.0, 4.0)))
+            if s.releases.len == 0: ui.paragraph(list.fetching ? "Loading releases..." : "No releases are available to install.", note)
+            for r in 0..s.releases.len as int
+                let rel = &s.releases[r]
+                let title = s.text(rel.title)
+                let shown = title.len > 0 and title != s.text(rel.tag) ? format(&line, "{s.text(rel.tag)}, {title}") : format(&line, "{s.text(rel.tag)}")
+                with ui.open(UiNode(key: r, name: "release", flow: FlowRow, width: UiSize.grow(), gap: 10.0, padding: Vec4(0.0, r == 0 ? 0.0 : 8.0, 0.0, 2.0)))
+                    ui.label(shown, head, UiNode(width: UiSize.grow(), clip: true))
+                    if rel.prerelease: ui.label("Prerelease", note)
+                    ui.label(s.text(rel.published), note)
+                if rel.count == 0: ui.paragraph("No Windows builds in this release.", note)
+                for i in rel.first..rel.first + rel.count
+                    let a = &s.assets[i]
+                    with ui.open(UiNode(key: 1000 + i, flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+                        ui.checkbox(s.text(a.name), ref checks[i], UiNode(width: UiSize.grow()))
+                        ui.label(a.score < 0 ? "Not compatible with this computer" : build_word(a.build), note)
+                        if a.size >= 0: ui.label(megabytes(a.size, &size), note, UiNode(width: UiSize.fixed(56.0), align: Vec2(1.0, 0.5)))
+
+    fn working(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+        var line: [400]u8
+        var size: [40]u8
+        let title = UiTextStyle(face: fonts.strong, size: 14.0, color: theme.ink)
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        ui.label(format(&line, "Installing {at + 1} of {queue.len}: {job_asset()}"), title, UiNode(width: UiSize.grow(), clip: true))
+        if probing >= 0
+            ui.paragraph(format(&line, "Detecting engine: {file_name_of(job.program_path(probing))}"), note)
+            return
+        match job.step
+            InstallDownloading
+                let (got, total) = job.get.progress()
+                let whole = total > 0 ? total : job.size
+                ui.paragraph(whole > 0 ? format(&line, "Downloading, {got / 1048576} of {megabytes(whole, &size)}") : format(&line, "Downloading, {got / 1048576} MB"), note)
+                if whole > 0: ui.progress(got as f32 / whole as f32)
+            InstallUnpacking
+                let total = job.zip.total
+                ui.paragraph(job.unpack_zip ? "Extracting and verifying downloaded files..." : "Verifying downloaded files...", note)
+                if job.unpack_zip and total > 0: ui.progress(atomic_load(&job.zip.unpacked) as f32 / total as f32)
+            InstallUnpackingTar: ui.paragraph("Extracting archive with Windows tar.exe...", note)
+            InstallIdle, InstallReady, InstallFailed, InstallCancelled: ui.paragraph("", note)
+
+    fn release()
+        list.release()
+        job.stop()
+        job.release()
+        probe.release()
+        checks.free()
+        queue.free()
+        queue_release.free()
+        picks.free()
+        report.free()
+        documentation.free()
+        token.release()
+
+fn megabytes(bytes: i64, buf: *[40]u8) -> str
+    if bytes < 1048576: return format(buf, "{(bytes + 1023) / 1024} KB")
+    return format(buf, "{(bytes + 524288) / 1048576} MB")
+
+fn cpu_text(cpu: *CpuFeatures) -> str
+    if cpu.icl: return "AVX-512 for Ice Lake and later"
+    if cpu.vnni512: return "AVX-512 with VNNI"
+    if cpu.avx512: return "AVX-512"
+    if cpu.avxvnni: return "AVX-VNNI"
+    if cpu.bmi2: return cpu.slow_pext ? "AVX2 with slow BMI2" : "BMI2"
+    if cpu.avx2: return "AVX2"
+    if cpu.popcnt: return "POPCNT"
+    if cpu.sse41: return "SSE4.1"
+    return "x86-64"
+
+fn releases_status(list: *ReleaseList, line: *[200]u8) -> str
+    if list.fetching: return format(line, "Loading releases...")
+    if list.fetched_ns == 0: return format(line, "")
+    var age: [40]u8
+    return format(line, "{list.set.releases.len} releases · Checked {age_text(wall_ns() - list.fetched_ns, &age)}")

@@ -1,0 +1,113 @@
+use engine/ui/ui_widgets
+use src/theme/theme
+use src/theme/fonts
+
+const KitColumn: f32 = 860.0
+const KitNarrow: f32 = 560.0
+const KitControl: f32 = 240.0
+
+struct SettingsKit
+    ui: *UiCanvas
+    theme: *GuiTheme
+    fonts: *GuiFonts
+    width: f32
+    rows: int
+    inset: f32
+
+    fn narrow() -> bool
+        return width < KitNarrow
+
+    fn title(group: str, text: str, about: str)
+        with ui.open(UiNode(name: "kittitle", width: UiSize.grow(), gap: 4.0, padding: Vec4(inset + 2.0, 0.0, 0.0, 6.0)))
+            if group.len > 0: ui.label(group, UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8))
+            ui.label(text, UiTextStyle(face: fonts.serif, size: 26.0, color: theme.ink))
+            if about.len > 0: ui.paragraph(about, UiTextStyle(face: fonts.text, size: 13.0, color: theme.muted), UiNode(width: UiSize.grow()))
+
+    fn card(key: int, heading: str) -> UiOpen
+        rows = 0
+        if heading.len > 0: ui.label(heading, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink), UiNode(key: key, name: "kitheading", padding: Vec4(2.0, 18.0, 0.0, 4.0)))
+        return ui.open(UiNode(key: key, name: "kitcard", width: UiSize.grow(), box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(10.0), border: 1.0, border_color: theme.line))))
+
+    fn row(key: int, title: str, note: str) -> UiOpen
+        return open_row(key, title, note, narrow())
+
+    fn block(key: int, title: str, note: str) -> UiOpen
+        return open_row(key, title, note, true)
+
+    fn open_row(key: int, title: str, note: str, stacked: bool) -> UiOpen
+        if rows > 0
+            with ui.open(UiNode(key: key, name: "kitrule", width: UiSize.grow(), padding: Vec4(18.0, 0.0, 18.0, 0.0)))
+                ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.fixed(1.0), box: UiBox(fill: UiFill.solid(theme.line.with_alpha(0.7)))))
+        rows += 1
+        let o = ui.open(UiNode(key: key, name: "kitrow", flow: stacked ? FlowColumn : FlowRow, width: UiSize.grow(), padding: Vec4(18.0, 14.0, 18.0, 14.0), gap: stacked ? 12.0 : 24.0, align: Vec2(0.0, stacked ? 0.0 : 0.5)))
+        with ui.open(UiNode(name: "kitwords", width: UiSize.grow(), gap: 3.0))
+            ui.paragraph(title, UiTextStyle(face: fonts.text, size: 13.5, color: theme.ink), UiNode(width: UiSize.grow()))
+            if note.len > 0: ui.paragraph(note, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.grow()))
+        return o
+
+    fn segments(name: str, words: []str, ref chosen: int) -> bool
+        let before = chosen
+        with ui.open(UiNode(name: name, flow: FlowRow, height: UiSize.fixed(32.0), padding: Vec4.splat(3.0), gap: 2.0, align: Vec2(0.0, 0.5), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(8.0), border: 1.0, border_color: theme.line)))
+            for i, word in words
+                let on = i == chosen
+                let o = ui.open(UiNode(name: word, key: i, flow: FlowRow, height: UiSize.grow(), padding: Vec4(16.0, 0.0, 16.0, 0.0), align: Vec2(0.5, 0.5), hit: true, focusable: true))
+                let h = ui.interact(o.id)
+                let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 24.0)
+                let raised = ui.spring(o.id, 1, on ? 1.0 : 0.0, 24.0)
+                ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.6).with_alpha(raised)), radius: Vec4.splat(6.0), shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.25 * raised), 0.0, 1.0, 3.0, 0.0, false))
+                ui.label(word, UiTextStyle(face: on ? fonts.strong : fonts.text, size: 12.5, color: theme.muted.lerp(theme.ink, max(raised, lit))))
+                ui.close()
+                if h.clicked: chosen = i
+        return chosen != before
+
+    fn colour_segments(name: str, words: []str, colours: []u32, ref chosen: int, down: bool = false, wide: f32 = 0.0) -> bool
+        let before = chosen
+        let across = down ? UiSize.fixed(wide) : UiSize.fit()
+        with ui.open(UiNode(name: name, flow: down ? FlowColumn : FlowRow, width: across, height: down ? UiSize.fit() : UiSize.fixed(32.0), padding: Vec4.splat(3.0), gap: 2.0, align: Vec2(0.0, 0.5), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(8.0), border: 1.0, border_color: theme.line)))
+            for i, word in words
+                let on = i == chosen
+                let o = ui.open(UiNode(name: word, key: i, flow: FlowRow, width: down ? UiSize.grow() : UiSize.fit(), height: down ? UiSize.fixed(30.0) : UiSize.grow(), padding: Vec4(10.0, 0.0, 14.0, 0.0), gap: 7.0, align: Vec2(down ? 0.0 : 0.5, 0.5), hit: true, focusable: true))
+                let h = ui.interact(o.id)
+                let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 24.0)
+                let raised = ui.spring(o.id, 1, on ? 1.0 : 0.0, 24.0)
+                ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.6).with_alpha(raised)), radius: Vec4.splat(6.0), shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.25 * raised), 0.0, 1.0, 3.0, 0.0, false))
+                let none = colours[i] == 0
+                ui.leaf(UiNode(name: "dot", width: UiSize.fixed(12.0), height: UiSize.fixed(12.0), box: UiBox(fill: UiFill.solid(none ? Color(0.0, 0.0, 0.0, 0.0) : Color.hex(colours[i])), radius: Vec4.splat(6.0), border: 1.0, border_color: none ? theme.muted : theme.line)))
+                ui.label(word, UiTextStyle(face: on ? fonts.strong : fonts.text, size: 12.5, color: theme.muted.lerp(theme.ink, max(raised, lit))))
+                ui.close()
+                if h.clicked: chosen = i
+        return chosen != before
+
+    fn heading(key: int, text: str, note: str) -> UiOpen
+        let o = ui.open(UiNode(key: key, name: "kitshelfhead", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5), padding: Vec4(inset + 2.0, 18.0, inset, 0.0)))
+        ui.label(text, UiTextStyle(face: fonts.strong, size: 15.0, color: theme.ink))
+        ui.label(note, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.grow(), clip: true))
+        return o
+
+    fn words(key: int, title: str, note: str)
+        let o = open_row(key, title, note, narrow())
+        o.end()
+
+    fn switch(key: int, title: str, note: str, ref on: bool) -> bool
+        var changed = false
+        with row(key, title, note)
+            changed = ui.toggle("", ref on, UiNode(name: "kitswitch", width: UiSize.fixed(40.0)))
+        return changed
+
+    fn choice(key: int, title: str, note: str, ref chosen: int, options: []str) -> bool
+        var changed = false
+        with row(key, title, note)
+            changed = ui.dropdown("kitchoice", ref chosen, options, UiNode(width: UiSize.fixed(KitControl)))
+        return changed
+
+    fn slide(key: int, title: str, note: str, ref v: f32, low: f32, high: f32, step: f32) -> bool
+        var changed = false
+        with row(key, title, note)
+            changed = ui.slider("", ref v, low, high, step, UiNode(name: "kitslider", width: UiSize.fixed(KitControl)))
+        return changed
+
+    fn count(key: int, title: str, note: str, ref n: int, low: int, high: int) -> bool
+        var changed = false
+        with row(key, title, note)
+            changed = ui.stepper("", ref n, low, high, UiNode(name: "kitstepper", width: UiSize.fixed(104.0)))
+        return changed

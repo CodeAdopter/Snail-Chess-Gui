@@ -1,0 +1,91 @@
+const LogBytes = 524288
+const LogLines = 4000
+const LogLineMost = 2000
+
+enum LogSide: u8
+    LogSent
+    LogRead
+    LogNote
+
+struct LogLine
+    at: int
+    len: int
+    ns: i64
+    side: LogSide
+
+struct EngineLog
+    bytes: [..]u8
+    lines: [..]LogLine
+    first: int
+    count: int
+    head: int
+    added: i64
+    origin_ns: i64
+
+    fn add(side: LogSide, text: str, ns: i64)
+        if bytes.len == 0
+            bytes.resize(LogBytes)
+            lines.resize(LogLines)
+            origin_ns = ns
+        let n = min(text.len, LogLineMost) as int
+        let room = max(n, 1)
+        if count == LogLines: drop_oldest()
+        if head + room > LogBytes
+            while count > 0 and lines[first].at >= head
+                drop_oldest()
+            head = 0
+        while count > 0 and overlaps(lines[first], head, room)
+            drop_oldest()
+        for k in 0..n
+            bytes[head + k] = text[k]
+        lines[(first + count) % LogLines] = LogLine(head, n, ns, side)
+        count += 1
+        head += room
+        added += 1
+
+    fn drop_oldest()
+        first = (first + 1) % LogLines
+        count -= 1
+
+    fn oldest() -> i64
+        return added - count
+
+    fn line(seq: i64) -> LogLine
+        return lines[(first + (seq - oldest()) as int) % LogLines]
+
+    fn text(l: LogLine) -> str
+        return str(bytes[l.at..l.at + l.len])
+
+    fn seconds(l: LogLine) -> f64
+        return (l.ns - origin_ns) as f64 / 1.0e9
+
+    fn clear()
+        added += count
+        first = 0
+        count = 0
+        head = 0
+
+    fn write_text(out: *[..]u8)
+        var stamp: [32]u8
+        for seq in oldest()..added
+            let l = line(seq)
+            let mark = l.side == LogSent ? ">" : l.side == LogRead ? "<" : "*"
+            let head_text = format(&stamp, "{seconds(l):10.3} {mark} ")
+            for k in 0..head_text.len
+                out.push(head_text[k])
+            let t = text(l)
+            for k in 0..t.len
+                out.push(t[k])
+            out.push('\n')
+
+    fn release()
+        bytes.free()
+        lines.free()
+        count = 0
+
+fn overlaps(l: LogLine, at: int, n: int) -> bool
+    return l.at < at + n and l.at + max(l.len, 1) > at
+
+fn is_search_line(text: str) -> bool
+    if text.len < 5 or text[0..5] != "info ": return false
+    return not (text.len >= 11 and text[0..11] == "info string")

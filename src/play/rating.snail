@@ -1,0 +1,85 @@
+use engine/math/scalar
+
+const RatingStart: f64 = 1500.0
+const DeviationStart: f64 = 350.0
+const DeviationLeast: f64 = 45.0
+const VolatilityStart: f64 = 0.09
+const GlickoTau: f64 = 0.75
+const GlickoScale: f64 = 173.7178
+const EngineDeviation: f64 = 60.0
+const ProvisionalDeviation: f64 = 110.0
+
+struct Rating
+    rating: f64 = RatingStart
+    deviation: f64 = DeviationStart
+    volatility: f64 = VolatilityStart
+    games: int
+    wins: int
+    draws: int
+    losses: int
+    peak: f64
+
+    fn provisional() -> bool
+        return deviation > ProvisionalDeviation
+
+    fn shown() -> int
+        return round(rating) as int
+
+    fn text(buf: *[16]u8) -> str
+        return format(buf, "{shown()}{provisional() ? "?" : ""}")
+
+    fn after(opponent: f64, score: f64) -> Rating
+        var r = *self
+        let mu = (rating - RatingStart) / GlickoScale
+        let phi = deviation / GlickoScale
+        let them = (opponent - RatingStart) / GlickoScale
+        let spread = EngineDeviation / GlickoScale
+        let g = 1.0 / sqrt(1.0 + 3.0 * spread * spread / (Pi * Pi))
+        let e = 1.0 / (1.0 + exp(-g * (mu - them)))
+        let v = 1.0 / (g * g * e * (1.0 - e))
+        let delta = v * g * (score - e)
+        let sigma = next_volatility(phi, v, delta)
+        let before = sqrt(phi * phi + sigma * sigma)
+        let phi_after = 1.0 / sqrt(1.0 / (before * before) + 1.0 / v)
+        r.rating = (mu + phi_after * phi_after * g * (score - e)) * GlickoScale + RatingStart
+        r.deviation = clamp(phi_after * GlickoScale, DeviationLeast, DeviationStart)
+        r.volatility = sigma
+        r.games += 1
+        if score > 0.75: r.wins += 1
+        elif score > 0.25: r.draws += 1
+        else: r.losses += 1
+        r.peak = max(peak, r.rating)
+        return r
+
+    fn change(opponent: f64, score: f64) -> int
+        return after(opponent, score).shown() - shown()
+
+    fn next_volatility(phi: f64, v: f64, delta: f64) -> f64
+        let a = log(volatility * volatility)
+        var lo = a
+        var hi = 0.0
+        if delta * delta > phi * phi + v: hi = log(delta * delta - phi * phi - v)
+        else
+            var k = 1.0
+            while volatility_step(a - k * GlickoTau, a, phi, v, delta) < 0.0 and k < 100.0
+                k += 1.0
+            hi = a - k * GlickoTau
+        var f_lo = volatility_step(lo, a, phi, v, delta)
+        var f_hi = volatility_step(hi, a, phi, v, delta)
+        var turns = 0
+        while abs(hi - lo) > 0.000001 and turns < 100
+            let c = lo + (lo - hi) * f_lo / (f_hi - f_lo)
+            let f_c = volatility_step(c, a, phi, v, delta)
+            if f_c * f_hi <= 0.0
+                lo = hi
+                f_lo = f_hi
+            else: f_lo = f_lo / 2.0
+            hi = c
+            f_hi = f_c
+            turns += 1
+        return exp(lo / 2.0)
+
+fn volatility_step(x: f64, a: f64, phi: f64, v: f64, delta: f64) -> f64
+    let ex = exp(x)
+    let d = phi * phi + v + ex
+    return ex * (delta * delta - phi * phi - v - ex) / (2.0 * d * d) - (x - a) / (GlickoTau * GlickoTau)

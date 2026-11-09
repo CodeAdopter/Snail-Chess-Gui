@@ -1,0 +1,204 @@
+use engine/desktop/png_image
+use src/board3d/wood_look
+use src/board3d/scene_style
+
+struct SceneLooks
+    squares: [BoardStyles]int
+    frames: [BoardStyles]int
+    pieces: [SetStyles]int
+    mirrored: [SetStyles]int
+    boards_made: [BoardStyles]bool
+    sets_made: [SetStyles]bool
+    drop: int
+    drop_made: bool
+    felts: [2]int
+    felts_made: bool
+    field: WoodField
+    view: Mat4
+    coords: Texture
+    capitals: Texture
+    sampler: *SDL_GPUSampler
+    mirror: Texture
+
+    fn init(gpu: *Gpu, aniso: f32)
+        field.clear()
+        coords = atlas(gpu, embed("../../assets/board3d/coords.png"))
+        capitals = atlas(gpu, embed("../../assets/board3d/coords_sans.png"))
+        sampler = gpu.sampler_aniso(aniso)
+        for k in 0..BoardStyles: boards_made[k] = false
+        for k in 0..SetStyles: sets_made[k] = false
+        felts_made = false
+        drop_made = false
+
+    fn board(r: *Renderer, style: BoardStyle) -> (int, int)
+        let k = style as int
+        if boards_made[k]: return (squares[k], frames[k])
+        boards_made[k] = true
+        var sq = 0
+        var fr = 0
+        var letters = &coords
+        match style
+            WalnutBoard, BurlBoard
+                sq = wood_material(r, shader("shaders/wood3d.hlsl", fragment: "board_ps"))
+                fr = wood_material(r, shader("shaders/wood3d.hlsl", fragment: "frame_ps"))
+            TournamentBoard
+                sq = wood_material(r, shader("shaders/wood3d.hlsl", fragment: "board_ps"))
+                fr = wood_material(r, shader("shaders/wood3d.hlsl", fragment: "print_frame_ps"))
+                letters = &capitals
+            MarbleBoard
+                sq = wood_material(r, shader("shaders/stone3d.hlsl", fragment: "marble_board_ps"))
+                fr = wood_material(r, shader("shaders/stone3d.hlsl", fragment: "marble_frame_ps"))
+            GlassBoard
+                sq = wood_material(r, shader("shaders/glass3d.hlsl", fragment: "glass_board_ps"))
+                fr = wood_material(r, shader("shaders/glass3d.hlsl", fragment: "glass_frame_ps"))
+                letters = &capitals
+            VinylBoard
+                sq = wood_material(r, shader("shaders/vinyl3d.hlsl", fragment: "vinyl_board_ps"))
+                fr = wood_material(r, shader("shaders/vinyl3d.hlsl", fragment: "vinyl_frame_ps"))
+                letters = &capitals
+        for m in [sq, fr]
+            let v = &r.materials[m].values
+            match style
+                WalnutBoard
+                    v[0] = wood_rgb(0xB99C76, 0.55)
+                    v[1] = wood_rgb(0x4E3526, 0.28)
+                    v[2] = wood_rgb(0x34241A, 0.0025)
+                    v[3] = Vec4(0.45, 9.0, 0.6, 0.0)
+                BurlBoard
+                    v[0] = wood_rgb(0xD5BC93, 0.6)
+                    v[1] = wood_rgb(0x5E3C24, 0.22)
+                    v[2] = wood_rgb(0x4A2E1C, 0.0025)
+                    v[3] = Vec4(0.42, 8.0, 0.7, 1.0)
+                TournamentBoard
+                    v[0] = wood_rgb(0xD8C49E, 0.3)
+                    v[1] = wood_rgb(0x2E2622, 0.38)
+                    v[2] = wood_rgb(0x1D1815, 0.0015)
+                    v[3] = Vec4(0.5, 7.0, 0.4, 0.0)
+                MarbleBoard
+                    v[0] = Vec4(1.8, 0.35, 0.035, 0.0)
+                GlassBoard
+                    v[0] = wood_rgb(0xCBD2D1, 0.0)
+                    v[1] = wood_rgb(0x07090A, 0.22)
+                VinylBoard
+                    v[0] = wood_rgb(0xEEEED2, 0.0)
+                    v[1] = wood_rgb(0x769656, 0.0)
+                    v[2] = Vec4(0.62, 0.45, 0.0, 0.0)
+            r.materials[m].block = &field
+            r.materials[m].block_bytes = sizeof(WoodField)
+            r.materials[m].extras[0] = &mirror
+        r.materials[fr].texture = letters
+        r.materials[fr].sampler = sampler
+        squares[k] = sq
+        frames[k] = fr
+        return (sq, fr)
+
+    fn set(r: *Renderer, style: SetStyle) -> (int, int)
+        let k = style as int
+        if sets_made[k]: return (pieces[k], mirrored[k])
+        sets_made[k] = true
+        for twin in 0..2
+            let flip = twin == 1
+            var m = 0
+            match style
+                WoodSet: m = wood_material(r, shader("shaders/wood3d.hlsl", fragment: "piece_ps"), flip)
+                MarbleSet: m = wood_material(r, shader("shaders/stone3d.hlsl", fragment: "marble_piece_ps"), flip)
+                GlassSet: m = wood_material(r, shader("shaders/glass3d.hlsl", fragment: "glass_piece_ps"), flip)
+                MetalSet: m = wood_material(r, shader("shaders/metal3d.hlsl", fragment: "metal_piece_ps"), flip)
+                GooSet: m = goo_material(r, false, flip)
+                PaperSet: m = wood_material(r, shader("shaders/paper3d.hlsl", fragment: "paper_piece_ps"), flip)
+            let v = &r.materials[m].values
+            match style
+                WoodSet
+                    v[0] = Vec4(0.42, 18.0, 1.0, 0.0)
+                    v[1] = Vec4(0.6, 0.2, 0.9, 0.12)
+                MarbleSet: v[0] = Vec4(0.35, 0.045, 0.7, 0.0)
+                GlassSet
+                    v[0] = wood_rgb(0xF2F7F6, 0.0)
+                    v[1] = wood_rgb(0x4A4440, 0.0)
+                    behind(r, m)
+                MetalSet
+                    v[0] = wood_rgb(0xE0BC72, 0.2)
+                    v[1] = wood_rgb(0x5A5C62, 0.3)
+                GooSet
+                    goo_values(v)
+                    behind(r, m)
+                PaperSet
+                    v[0] = wood_rgb(0xF3EEE2, 0.35)
+                    v[1] = wood_rgb(0x263046, 0.05)
+            r.materials[m].block = &field
+            r.materials[m].block_bytes = sizeof(WoodField)
+            if flip: mirrored[k] = m
+            else: pieces[k] = m
+        return (pieces[k], mirrored[k])
+
+    fn goo_drop(r: *Renderer) -> int
+        if drop_made: return drop
+        drop_made = true
+        drop = goo_material(r, true, false)
+        goo_values(&r.materials[drop].values)
+        behind(r, drop)
+        r.materials[drop].block = &field
+        r.materials[drop].block_bytes = sizeof(WoodField)
+        return drop
+
+    fn behind(r: *Renderer, m: int)
+        r.materials[m].order = GlassOrder
+        r.materials[m].extras[0] = &r.behind
+        r.materials[m].shared = &view
+        r.materials[m].shared_bytes = sizeof(Mat4)
+
+    fn felt(r: *Renderer) -> (int, int)
+        if not felts_made
+            felts_made = true
+            for twin in 0..2: felts[twin] = wood_material(r, shader("shaders/felt3d.hlsl", fragment: "felt_ps"), twin == 1)
+        return (felts[0], felts[1])
+
+    fn show_board(r: *Renderer, set: SetStyle, board: BoardStyle)
+        let k = set as int
+        if not sets_made[k] or set == WoodSet: return
+        let (light, dark, frame) = style_squares(board)
+        for m in [pieces[k], mirrored[k]]
+            r.materials[m].values[2] = wood_rgb(light, frame)
+            r.materials[m].values[3] = wood_rgb(dark, set == GlassSet ? 6.0 : 0.0)
+        if set == GooSet and drop_made
+            r.materials[drop].values[2] = wood_rgb(light, frame)
+            r.materials[drop].values[3] = wood_rgb(dark, 0.0)
+
+    fn release(gpu: *Gpu)
+        gpu.release_texture(&coords)
+        gpu.release_texture(&capitals)
+        gpu.release_sampler(sampler)
+        if mirror.handle: gpu.release_texture(&mirror)
+
+const GlassOrder = 100
+
+const GlassLayers = 8
+
+fn see_through(s: SetStyle) -> bool
+    return s == GlassSet or s == GooSet
+
+fn goo_material(r: *Renderer, drops: bool, mirrored: bool) -> int
+    var desc = MaterialDesc.three(shader("shaders/goo3d.hlsl", fragment: "goo_piece_ps"))
+    desc.vertex = drops ? shader("shaders/goo3d.hlsl", vertex: "goo_drop_vs") : shader("shaders/goo3d.hlsl", vertex: "goo_vs")
+    if mirrored: desc.cull = CullFront
+    return r.add_material_desc(&desc)
+
+fn goo_values(v: *[4]Vec4)
+    v[0] = wood_rgb(0xB8F05A, 0.06)
+    v[1] = wood_rgb(0x7A2BB8, 0.08)
+
+fn atlas(gpu: *Gpu, bytes: []u8) -> Texture
+    var png: PngImage
+    defer png.free_all()
+    png.read(bytes)
+    return gpu.texture_mipped(png.width, png.height, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 4, png.pixels.ptr)
+
+fn style_squares(b: BoardStyle) -> (u32, u32, f32)
+    match b
+        WalnutBoard: return (0xB99C76, 0x4E3526, 0.0)
+        BurlBoard: return (0xD5BC93, 0x5E3C24, 0.0)
+        TournamentBoard: return (0xD8C49E, 0x2E2622, 0.0)
+        MarbleBoard: return (0xDCDCD8, 0x141416, 0.1)
+        GlassBoard: return (0xCBD2D1, 0x07090A, 0.0)
+        VinylBoard: return (0xEEEED2, 0x769656, 1.0)
+    return (0xB99C76, 0x4E3526, 0.0)

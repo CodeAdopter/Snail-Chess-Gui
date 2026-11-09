@@ -1,0 +1,136 @@
+use engine/desktop/sound_player
+
+enum SoundKind: u8
+    SoundMove
+    SoundCapture
+    SoundCastle
+    SoundClockPress
+
+const TickLead = SoundRate * 3
+const LatePress = SoundRate * 3 / 10
+
+const SoundCount = 5
+const SoundTicking = 4
+const SoundWords = ["move", "capture", "castle", "press", "ticking"]
+const SoundLabels = ["Moves", "Captures", "Castling", "Clock press", "Clock ticking"]
+
+struct GuiSounds
+    player: SoundPlayer
+    ticker: SoundLoop
+    made: bool
+    move: [..]f32
+    capture: [..]f32
+    castle: [..]f32
+    press: [..]f32
+    late_press: [..]f32
+    ticks: [..]f32
+    volume: f32 = 1.0
+    levels: [SoundCount]f32
+    muted: [SoundCount]bool
+
+    fn loudness(k: int) -> f32
+        return muted[k] ? 0.0 : volume * levels[k]
+
+    fn play(kind: SoundKind)
+        if muted[kind as int]: return
+        if not made: make()
+        let v = loudness(kind as int)
+        match kind
+            SoundCapture: player.play(capture[0..capture.len], v)
+            SoundCastle: player.play(castle[0..castle.len], v)
+            SoundClockPress: player.play(press[0..press.len], v)
+            else: player.play(move[0..move.len], v)
+
+    fn play_late_press()
+        if muted[SoundClockPress as int]: return
+        if not made: make()
+        player.play(late_press[0..late_press.len], loudness(SoundClockPress as int))
+
+    fn hear(k: int)
+        if not made: make()
+        if k == SoundTicking: player.play(ticks[0..min(ticks.len as int, SoundRate * 2)], loudness(k))
+        else: play(k as SoundKind)
+
+    fn tick(on: bool)
+        if not on or muted[SoundTicking]
+            ticker.stop()
+            return
+        if not made: make()
+        ticker.keep(ticks[0..ticks.len], TickLead, loudness(SoundTicking))
+
+    fn ready(on: bool)
+        if not on
+            player.close()
+            ticker.close()
+            return
+        if not made: make()
+        player.open()
+
+    fn make()
+        made = true
+        wav_samples(&move, embed("../../assets/sounds/move.wav"))
+        wav_samples(&capture, embed("../../assets/sounds/capture.wav"))
+        wav_samples(&castle, embed("../../assets/sounds/castle.wav"))
+        wav_samples(&press, embed("../../assets/sounds/clock_press.wav"))
+        wav_samples(&ticks, embed("../../assets/sounds/clock_ticks.wav"))
+        late_press.resize(LatePress)
+        for v in press: late_press.push(v)
+
+    fn release()
+        player.close()
+        ticker.close()
+        move.free()
+        capture.free()
+        castle.free()
+        press.free()
+        late_press.free()
+        ticks.free()
+
+struct SoundLoop
+    stream: *SDL_AudioStream
+    failed: bool
+
+    fn open() -> bool
+        if stream: return true
+        if failed: return false
+        if not SDL_InitSubSystem(SDL_INIT_AUDIO)
+            failed = true
+            return false
+        var spec = SDL_AudioSpec(format: SDL_AUDIO_F32, channels: 1, freq: SoundRate)
+        stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, null, null)
+        if not stream
+            failed = true
+            return false
+        SDL_ResumeAudioStreamDevice(stream)
+        return true
+
+    fn keep(samples: []f32, lead: int, gain: f32) -> bool
+        if samples.len == 0 or not open(): return false
+        SDL_SetAudioStreamGain(stream, gain)
+        while SDL_GetAudioStreamQueued(stream) / 4 < lead
+            if not SDL_PutAudioStreamData(stream, samples.ptr, (samples.len * 4) as int): return false
+        return true
+
+    fn stop()
+        if stream: SDL_ClearAudioStream(stream)
+
+    fn queued() -> int
+        return stream ? SDL_GetAudioStreamQueued(stream) : 0
+
+    fn close()
+        if stream: SDL_DestroyAudioStream(stream)
+        stream = null
+
+fn wav_samples(into: *[..]f32, bytes: []u8)
+    var at = 12
+    while at + 8 <= bytes.len as int
+        let size = bytes[at + 4] as int | bytes[at + 5] as int << 8 | bytes[at + 6] as int << 16 | bytes[at + 7] as int << 24
+        let body = at + 8
+        if bytes[at] == 'd' and bytes[at + 1] == 'a' and bytes[at + 2] == 't' and bytes[at + 3] == 'a'
+            let n = min(size, bytes.len as int - body) / 2
+            for i in 0..n
+                var v = bytes[body + i * 2] as int | bytes[body + i * 2 + 1] as int << 8
+                if v >= 32768: v -= 65536
+                into.push(v as f32 / 32768.0)
+            return
+        at = body + size + (size & 1)

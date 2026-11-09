@@ -1,0 +1,100 @@
+use src/game/game
+
+const OpeningMagic: u64 = 0x314E45504F474353
+const EcoCodes = 500
+
+struct OpeningHead
+    magic: u64
+    count: u32
+    deepest: u32
+
+struct OpeningMark
+    name_at: u32
+    name_len: u16
+    eco: u16
+
+struct OpeningNames
+    data: []u8
+    keys: *u64
+    marks: *OpeningMark
+    codes_at: int
+    names_at: int
+    count: int
+    deepest: int
+    start_key: u64
+    opened: bool
+
+    fn ready()
+        if opened: return
+        opened = true
+        var b: Board
+        b.load_fen(StartFen)
+        start_key = b.key
+        data = embed("../../assets/openings/openings.bin")
+        let head = data.ptr as *OpeningHead
+        if data.len as int < sizeof(OpeningHead) or head.magic != OpeningMagic: return
+        let n = head.count as int
+        let keys_at = sizeof(OpeningHead)
+        let marks_at = keys_at + n * sizeof(u64)
+        if marks_at + n * sizeof(OpeningMark) + EcoCodes * 3 > data.len as int: return
+        keys = (data.ptr + keys_at) as *u64
+        marks = (data.ptr + marks_at) as *OpeningMark
+        codes_at = marks_at + n * sizeof(OpeningMark)
+        names_at = codes_at + EcoCodes * 3
+        count = n
+        deepest = head.deepest as int
+
+    fn find(key: u64) -> int
+        var low = 0
+        var high = count
+        while low < high
+            let mid = (low + high) >> 1
+            if keys[mid] < key: low = mid + 1
+            else: high = mid
+        if low < count and keys[low] == key: return low
+        return -1
+
+    fn eco(i: int) -> str
+        let at = codes_at + marks[i].eco as int * 3
+        return str(data[at..at + 3])
+
+    fn name(i: int) -> str
+        let at = names_at + marks[i].name_at as int
+        return str(data[at..at + marks[i].name_len as int])
+
+var opening_names: OpeningNames
+
+fn standard_ply(b: *Board) -> int
+    return (b.fullmove - 1) * 2 + (b.side == Black ? 1 : 0)
+
+fn opening_of(start: *Board, moves: []Move) -> (str, str, int)
+    let t = &opening_names
+    t.ready()
+    var b = *start
+    var found = t.find(b.key)
+    var plies = 0
+    for i in 0..moves.len
+        if standard_ply(&b) >= t.deepest: break
+        b.play(moves[i])
+        let at = t.find(b.key)
+        if at >= 0
+            found = at
+            plies = i as int + 1
+    if found < 0: return ("", "", 0)
+    return (t.eco(found), t.name(found), plies)
+
+fn opening_at(game: *Game, node: int) -> (str, str, int)
+    let t = &opening_names
+    t.ready()
+    var n = node
+    while n != NoNode
+        let b = &game.nodes[n].board
+        if standard_ply(b) <= t.deepest
+            let at = t.find(b.key)
+            if at >= 0: return (t.eco(at), t.name(at), n)
+        n = game.nodes[n].parent
+    return ("", "", NoNode)
+
+fn is_standard_start(b: *Board) -> bool
+    opening_names.ready()
+    return b.key == opening_names.start_key and b.fullmove == 1

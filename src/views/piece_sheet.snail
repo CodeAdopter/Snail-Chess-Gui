@@ -1,0 +1,283 @@
+use engine/desktop/png_image
+use engine/ui/ui_layer
+use engine/ui/ui_svg
+use src/pieces/piece_sets
+use src/pieces/costumes
+
+const SheetGap = 2
+const SheetPathRoom = 131072
+const SheetMostRoom = 4194304
+const SheetRuns = 8
+const SheetFigures = 18
+
+fn piece_set_label(set: PieceSet) -> str
+    return piece_art(set).name
+
+fn piece_set_named(word: str) -> PieceSet
+    for i in 0..PieceSetWords.len
+        if PieceSetWords[i] == word: return i as PieceSet
+    return Classic
+
+fn piece_set_word(set: PieceSet) -> str
+    return PieceSetWords[set as int]
+
+struct PieceSheet
+    layer: UiLayer
+    ready: bool
+    set: PieceSet
+    costume: Costume
+    cell: int
+    path: UiPath
+    finish: u32
+    finish_values: Vec4
+    picture: Texture
+    picture_set: PieceSet
+    pictured: bool
+    clock: f32
+    moving: bool
+    art_size: f32
+    cols: int
+    moods: bool
+    drawn: [8]bool
+    runs: [18]int
+    run_motions: [144]int
+
+    fn prepare(gpu: *Gpu, outer: *UiRenderer, set: PieceSet, cell_px: int, costume: Costume = NoCostume)
+        let cell = clamp(cell_px, 8, 512)
+        let pitch = cell + SheetGap * 2
+        let art = piece_art(set)
+        take_moods(&art)
+        let most = cut_runs(&art)
+        if costume != NoCostume and not moving: moods = false
+        let w = (pitch * cols + 63) / 64 * 64
+        let h = (pitch * (2 + most * 2) + 63) / 64 * 64
+        if not ready
+            layer.init(gpu, outer, w, h, room: 256, path_room: SheetPathRoom, writing: false)
+            ready = true
+        elif w > layer.texture.width or h > layer.texture.height
+            layer.resize(gpu, max(w, layer.texture.width), max(h, layer.texture.height))
+        let c = layer.begin((cell as u64) << 16 | (costume as u64) << 8 | set as u64)
+        if not c: return
+        self.set = set
+        self.costume = costume
+        self.cell = cell
+        art_size = art.size
+        if art.picture.len > 0
+            take_picture(gpu, set, art.picture)
+            draw_picture(c, &picture, cell, pitch, SheetGap as f32, SheetGap as f32)
+        elif costume == NoCostume or moving: draw_art(c, &art, cell, pitch, SheetGap as f32, SheetGap as f32, &path, moods: true)
+        else: dress(c, &art, costume, cell, pitch, SheetGap as f32, SheetGap as f32, &path)
+        if moving: draw_runs(c, &art, cell, pitch, SheetGap as f32, (pitch * 2 + SheetGap) as f32, &path)
+        if c.dropped > 0 and c.vertex_room < SheetMostRoom
+            layer.grow(gpu, c.vertex_room * 2)
+            prepare(gpu, outer, set, cell_px, costume)
+
+    fn show(ui: *UiCanvas, piece: Piece, x: f32, y: f32, size: f32, alpha: f32 = 1.0, mood: PieceMood = Calm)
+        if not ready or piece == NoPiece: return
+        let d = ui.density
+        let held = ui.material
+        let held_values = ui.material_values
+        if finish != 0 and held == 0: ui.shade(finish, finish_values)
+        let px = round(x * d) / d
+        let py = round(y * d) / d
+        if not moving: layer.show(ui, px, py, size, size, uv(piece, 0, mood), Color(1.0, 1.0, 1.0, alpha))
+        else
+            let art = piece_art(set)
+            let place = UiTransform.scale(size / art_size, size / art_size).then(UiTransform.translate(px, py))
+            let i = piece.side as int * cols + figure_column(piece.kind, shown_mood(piece, mood))
+            for r in 0..runs[i]
+                let m = run_motions[i * SheetRuns + r]
+                var fade: f32 = 1.0
+                if m >= 0
+                    let (move, f) = motion_at(&art, m, clock)
+                    ui.push(place.inverse().then(move).then(place))
+                    fade = f
+                layer.show(ui, px, py, size, size, uv(piece, 2 + r * 2, mood), Color(1.0, 1.0, 1.0, alpha * fade))
+                if m >= 0: ui.pop()
+        ui.shade(held, held_values)
+
+    fn take_moods(art: *PieceArt)
+        for i in 0..8: drawn[i] = false
+        moods = false
+        for part in art.parts
+            if part.mood == Calm: continue
+            drawn[part.side as int * MoodCount + part.mood as int] = true
+            moods = true
+        cols = moods ? 5 + MoodCount : 6
+
+    fn shown_mood(piece: Piece, mood: PieceMood) -> PieceMood
+        return moods and drawn[piece.side as int * MoodCount + mood as int] ? mood : Calm
+
+    fn cut_runs(art: *PieceArt) -> int
+        moving = art.motions.len > 0
+        if not moving: return 0
+        for i in 0..SheetFigures: runs[i] = 0
+        var at = -1
+        var motion = -2
+        for part in art.parts
+            let i = part.side as int * cols + figure_column(part.kind, part.mood)
+            if i != at or part.motion != motion
+                at = i
+                motion = part.motion
+                if runs[i] == SheetRuns
+                    moving = false
+                    return 0
+                run_motions[i * SheetRuns + runs[i]] = motion
+                runs[i] += 1
+        var most = 0
+        for i in 0..SheetFigures: most = max(most, runs[i])
+        return most
+
+    fn uv(piece: Piece, row: int = 0, mood: PieceMood = Calm) -> Vec4
+        let pitch = cell + SheetGap * 2
+        let tw = layer.texture.width as f32
+        let th = layer.texture.height as f32
+        let u = (figure_column(piece.kind, shown_mood(piece, mood)) * pitch + SheetGap) as f32
+        let v = ((row + piece.side as int) * pitch + SheetGap) as f32
+        return Vec4(u / tw, v / th, (u + cell as f32) / tw, (v + cell as f32) / th)
+
+    fn take_picture(gpu: *Gpu, set: PieceSet, bytes: []u8)
+        if pictured and picture_set == set: return
+        if pictured: gpu.release_texture(&picture)
+        picture = picture_texture(gpu, bytes)
+        picture_set = set
+        pictured = true
+
+    fn release(gpu: *Gpu)
+        if ready: layer.release(gpu)
+        if pictured: gpu.release_texture(&picture)
+        pictured = false
+        path.free_all()
+
+fn picture_texture(gpu: *Gpu, bytes: []u8) -> Texture
+    var png: PngImage
+    defer png.free_all()
+    png.read(bytes)
+    return gpu.texture_mipped(png.width, png.height, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 4, png.pixels.ptr)
+
+fn draw_picture(c: *UiCanvas, t: *Texture, cell: int, pitch: int, x: f32, y: f32)
+    for i in 0..12
+        let col = i % 6
+        let row = i / 6
+        let uv = Vec4(col as f32 / 6.0, row as f32 / 2.0, (col + 1) as f32 / 6.0, (row + 1) as f32 / 2.0)
+        c.texture(t, x + (col * pitch) as f32, y + (row * pitch) as f32, cell as f32, cell as f32, uv: uv)
+
+fn figure_column(kind: Kind, mood: PieceMood) -> int
+    return mood == Calm ? kind as int - 1 : 5 + mood as int
+
+fn draw_runs(c: *UiCanvas, art: *PieceArt, cell: int, pitch: int, x: f32, y: f32, path: *UiPath)
+    let s = cell as f32 / art.size
+    var at = -1
+    var motion = -2
+    var run = -1
+    for part in art.parts
+        let col = figure_column(part.kind, part.mood)
+        let figure = col * 2 + part.side as int
+        if figure != at or part.motion != motion
+            if at >= 0: c.pop()
+            run = figure != at ? 0 : run + 1
+            at = figure
+            motion = part.motion
+            c.push(UiTransform.scale(s, s).then(UiTransform.translate(x + (col * pitch) as f32, y + ((run * 2 + part.side as int) * pitch) as f32)))
+        draw_part(c, path, part.d, part.fill, part.stroke, part.width, part.cap, part.join, part.paint, art.paints, art.stops, 0.2 / s)
+    if at >= 0: c.pop()
+
+fn draw_art(c: *UiCanvas, art: *PieceArt, cell: int, pitch: int, x: f32, y: f32, path: *UiPath, tolerance: f32 = 0.2, clock: f32 = 0.0, moods: bool = false)
+    let s = cell as f32 / art.size
+    var at = -1
+    var moving = -1
+    var fade: f32 = 1.0
+    for part in art.parts
+        if part.mood != Calm and not moods: continue
+        let col = figure_column(part.kind, part.mood)
+        let figure = col * 2 + part.side as int
+        if figure != at or part.motion != moving
+            if at >= 0: c.pop()
+            at = figure
+            moving = part.motion
+            var place = UiTransform.scale(s, s).then(UiTransform.translate(x + (col * pitch) as f32, y + (part.side as int * pitch) as f32))
+            fade = 1.0
+            if moving >= 0
+                let (move, alpha) = motion_at(art, moving, clock)
+                place = move.then(place)
+                fade = alpha
+            c.push(place)
+        draw_part(c, path, part.d, part.fill, part.stroke, part.width, part.cap, part.join, part.paint, art.paints, art.stops, tolerance / s, fade)
+    if at >= 0: c.pop()
+
+fn dress(c: *UiCanvas, art: *PieceArt, costume: Costume, cell: int, pitch: int, x: f32, y: f32, path: *UiPath)
+    let s = cell as f32 / art.size
+    let bounds = art_bounds(art, path, 0.5 / s)
+    let room = cell as f32
+    let mid = Vec2(room * 0.5, room)
+    for i in 0..12
+        let side = (i / 6) as Side
+        let kind = (i % 6 + 1) as Kind
+        let b = bounds[i]
+        var lo = Vec2(b.x * s, b.y * s)
+        var hi = Vec2(b.z * s, b.w * s)
+        let w = costume_wear(costume, kind)
+        var item = UiTransform.identity()
+        var k: f32 = 1.0
+        if w >= 0
+            let wear = CostumeWears[w]
+            k = (hi.x - lo.x) * wear.size / 100.0
+            let tall = hi.y - lo.y
+            let at = Vec2((lo.x + hi.x) * 0.5, wear.bottom ? hi.y + tall * wear.drop : lo.y + tall * wear.drop)
+            item = UiTransform.translate(-50.0, -100.0).then(UiTransform.scale(k, k)).then(UiTransform.rotate(wear.tilt)).then(UiTransform.translate(at.x, at.y))
+            let ib = CostumeItemBounds[wear.item as int]
+            for corner in [Vec2(ib.x, ib.y), Vec2(ib.z, ib.y), Vec2(ib.x, ib.w), Vec2(ib.z, ib.w)]
+                let p = item.apply(corner)
+                lo = lo.min(p)
+                hi = hi.max(p)
+        let fit = min(1.0, min(room / max(hi.x - lo.x, 1.0), room / max(hi.y - lo.y, 1.0)))
+        let lo_fit = mid + (lo - mid) * fit
+        let hi_fit = mid + (hi - mid) * fit
+        var shift = Vec2(0.0, 0.0)
+        if lo_fit.x < 0.0: shift.x = -lo_fit.x
+        elif hi_fit.x > room: shift.x = room - hi_fit.x
+        if lo_fit.y < 0.0: shift.y = -lo_fit.y
+        elif hi_fit.y > room: shift.y = room - hi_fit.y
+        let place = UiTransform.translate(-mid.x, -mid.y).then(UiTransform.scale(fit, fit)).then(UiTransform.translate(x + ((kind as int - 1) * pitch) as f32 + mid.x + shift.x, y + (side as int * pitch) as f32 + mid.y + shift.y))
+        if w >= 0: draw_item(c, CostumeWears[w].item, true, item.then(place), k * fit, path)
+        c.push(UiTransform.scale(s, s).then(place))
+        for part in art.parts
+            if part.side == side and part.kind == kind and part.mood == Calm: draw_part(c, path, part.d, part.fill, part.stroke, part.width, part.cap, part.join, part.paint, art.paints, art.stops, 0.2 / (s * fit))
+        c.pop()
+        if w >= 0: draw_item(c, CostumeWears[w].item, false, item.then(place), k * fit, path)
+
+fn draw_item(c: *UiCanvas, item: CostumeItem, behind: bool, t: UiTransform, px: f32, path: *UiPath)
+    c.push(t)
+    for p in CostumeParts
+        if p.item == item and p.behind == behind: draw_part(c, path, p.d, p.fill, p.stroke, p.width, p.cap, p.join, p.paint, CostumePaints, CostumeStops, 0.2 / max(px, 0.01))
+    c.pop()
+
+fn draw_part(c: *UiCanvas, path: *UiPath, d: str, fill: u32, stroke: u32, width: f32, cap: UiCap, join: UiJoin, paint: int, paints: []PiecePaint, stops: []PieceStop, tolerance: f32, fade: f32 = 1.0)
+    path.clear()
+    path.tolerance = tolerance
+    path.svg(d)
+    if paint >= 0: c.fill_parts_gradient(path, art_gradient(stops, paints[paint]))
+    elif fill & 255 != 0: c.fill_parts(path, faded_color(fill, fade))
+    if stroke & 255 != 0: c.stroke_path(path, width, faded_color(stroke, fade), join, cap)
+
+fn faded_color(rgba: u32, fade: f32) -> Color
+    var col = art_color(rgba)
+    col.a *= fade
+    return col
+
+fn art_bounds(art: *PieceArt, path: *UiPath, tolerance: f32) -> [12]Vec4
+    var out: [12]Vec4
+    var seen: [12]bool
+    for part in art.parts
+        if part.mood != Calm: continue
+        path.clear()
+        path.tolerance = tolerance
+        path.svg(part.d)
+        let i = part.side as int * 6 + part.kind as int - 1
+        let half = part.stroke & 255 != 0 ? part.width * 0.5 : 0.0
+        for p in path.points
+            if not seen[i]
+                out[i] = Vec4(p.x, p.y, p.x, p.y)
+                seen[i] = true
+            out[i] = Vec4(min(out[i].x, p.x - half), min(out[i].y, p.y - half), max(out[i].z, p.x + half), max(out[i].w, p.y + half))
+    return out

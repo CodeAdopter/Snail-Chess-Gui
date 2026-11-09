@@ -1,0 +1,78 @@
+use src/database/db_records
+use src/database/db_game_types
+use snaildb/db_store
+
+struct PositionDb
+    store: Db
+    evals: *DbTable
+    positions: *DbTable
+    seen: *DbTable
+    engines: *DbNames
+    names: *DbNames
+    games: *DbJournal
+    logs: *DbJournal
+
+    fn open(at: str) -> bool
+        if not evals
+            evals = store.table("evals", sizeof(DbEval), 3, db_eval_better)
+            positions = store.table("positions", sizeof(DbPos), 0, db_keep_first)
+            seen = store.table("seen", sizeof(DbSeen), 6, db_keep_first)
+            engines = store.name_list("engines")
+            names = store.name_list("names")
+            games = store.journal("games", sizeof(DbGame))
+            logs = store.journal("logs", sizeof(DbLogEntry))
+        return store.open(at)
+
+    fn close()
+        store.close()
+
+    fn commit()
+        store.commit()
+
+    fn engine(name: str) -> u16
+        return store.name_id(engines, name) as u16
+
+    fn is_engine(name: str) -> bool
+        return store.known_id(engines, name) != 0
+
+    fn engine_name(id: u16, out: *[..]u8)
+        store.name_of(engines, id as u32, out)
+
+    fn name_of(id: u32, out: *[..]u8)
+        store.name_of(names, id, out)
+
+    fn put_eval(board: *Board, e: DbEval)
+        var rec = e
+        rec.key = board.key
+        var pos = db_pack(board)
+        store.guard.write()
+        store.put_held(evals, &rec as *u8)
+        store.put_held(positions, &pos as *u8)
+        store.guard.write_done()
+
+    fn put_eval_key(e: *DbEval)
+        store.put(evals, e as *u8)
+
+    fn evals_at(key: u64, out: *[..]DbEval)
+        var bytes: [..]u8
+        defer bytes.free()
+        store.find(evals, key, &bytes)
+        let n = bytes.len / sizeof(DbEval)
+        out.resize(n)
+        if n > 0: copy(out.ptr as *u8, bytes.ptr, bytes.len)
+
+    fn position_of(key: u64, out: *DbPos) -> bool
+        var bytes: [..]u8
+        defer bytes.free()
+        store.find(positions, key, &bytes)
+        if bytes.len < sizeof(DbPos): return false
+        copy(out as *u8, bytes.ptr, sizeof(DbPos))
+        return true
+
+    fn games_at(key: u64, out: *[..]DbSeen)
+        var bytes: [..]u8
+        defer bytes.free()
+        store.find(seen, key, &bytes)
+        let n = bytes.len / sizeof(DbSeen)
+        out.resize(n)
+        if n > 0: copy(out.ptr as *u8, bytes.ptr, bytes.len)

@@ -1,0 +1,130 @@
+use src/game/game
+
+const PgnLineWidth = 80
+const RosterTags = ["Event", "Site", "Date", "Round", "White", "Black", "Result"]
+const RosterUnknown = ["?", "?", "????.??.??", "?", "?", "?", "*"]
+
+struct PgnWriter
+    out: *[..]u8
+    column: int
+    open: bool = true
+
+    fn raw(s: str, skip: u8 = 0)
+        for i in 0..s.len
+            if skip != 0 and s[i] == skip: continue
+            out.push(s[i])
+            column += 1
+
+    fn word(s: str, skip: u8 = 0)
+        if not open
+            if column + 1 + s.len > PgnLineWidth
+                out.push('\n')
+                column = 0
+            else: raw(" ")
+        raw(s, skip)
+        open = false
+
+    fn keep(n: int)
+        if not open and column + 1 + n > PgnLineWidth: newline()
+
+    fn bracket_open()
+        word("(")
+        open = true
+
+    fn bracket_close()
+        raw(")")
+
+    fn newline()
+        out.push('\n')
+        column = 0
+        open = true
+
+fn write_pgn(game: *Game, out: *[..]u8)
+    var w = PgnWriter(out: out)
+    var line: [24]u8
+    for i in 0..RosterTags.len
+        let name = RosterTags[i]
+        var value = game.tag(name)
+        if name == "Result": value = result_text(game.result)
+        if value.len == 0: value = RosterUnknown[i]
+        write_tag(&w, name, value)
+    for t in game.tags
+        let name = game.text_of(t.name)
+        if is_roster_tag(name) or name == "FEN" or name == "SetUp": continue
+        write_tag(&w, name, game.text_of(t.value))
+    if not game.starts_from_standard()
+        var fen: ShortText
+        game.start_board().write_fen(&fen)
+        write_tag(&w, "SetUp", "1")
+        write_tag(&w, "FEN", fen.text())
+    w.newline()
+    let root = &game.nodes[0]
+    if root.comment.len > 0: write_comment(&w, game.text_of(root.comment))
+    write_line(&w, game, root.first, true, &line)
+    w.word(result_text(game.result))
+    w.newline()
+
+fn is_roster_tag(name: str) -> bool
+    for t in RosterTags
+        if t == name: return true
+    return false
+
+fn write_tag(w: *PgnWriter, name: str, value: str)
+    w.raw("[")
+    w.raw(name)
+    w.raw(" \"")
+    for i in 0..value.len
+        let c = value[i]
+        if c == '"' or c == '\\': w.out.push('\\')
+        if c >= 32: w.out.push(c)
+    w.raw("\"]")
+    w.newline()
+
+fn write_comment(w: *PgnWriter, text: str)
+    w.word("{{")
+    w.open = true
+    var at = 0
+    while at < text.len
+        if text[at] == ' '
+            at += 1
+            continue
+        var end = at
+        while end < text.len and text[end] != ' '
+            end += 1
+        w.word(text[at..end], '}')
+        at = end
+    w.raw("}")
+
+fn write_line(w: *PgnWriter, game: *Game, first: int, numbered: bool, line: *[24]u8)
+    var n = first
+    var number = numbered
+    while n != NoNode
+        let node = &game.nodes[n]
+        let p = node.parent
+        if node.lead.len > 0
+            write_comment(w, game.text_of(node.lead))
+            number = true
+        let (fullmove, side) = game.move_number(n)
+        var label = ""
+        if side == White: label = format(line, "{fullmove}.")
+        elif number: label = format(line, "{fullmove}...")
+        let san = node.san_text()
+        if label.len > 0
+            w.keep(label.len + 1 + san.len)
+            w.word(label)
+        w.word(san)
+        for k in 0..node.nag_count
+            w.word(format(line, "${node.nags[k]}"))
+        number = false
+        if node.comment.len > 0
+            write_comment(w, game.text_of(node.comment))
+            number = true
+        if game.nodes[p].first == n
+            var v = node.next
+            while v != NoNode
+                w.bracket_open()
+                write_line(w, game, v, true, line)
+                w.bracket_close()
+                number = true
+                v = game.nodes[v].next
+        n = node.first

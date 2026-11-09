@@ -1,0 +1,152 @@
+use src/tabs/game_cards
+
+const EventTileWide: f32 = 148.0
+const EventTileNarrow: f32 = 100.0
+const EventNarrowTall: f32 = 118.0
+const CrossMost = 16
+const MosaicMost = 400
+const MosaicLeast = 5
+const FormShown = 5
+const FormatNames = ["Round robin", "Gauntlet", "Match"]
+const FormatIcons = [IconGrid, IconBracket, IconTrophy]
+const MedalColors = [0xE3B341, 0xB8BEC6, 0xC7834A]
+
+fn event_card_tall(width: f32) -> f32
+    return width >= CardWideFrom ? EventTileWide : EventNarrowTall
+
+struct EventCards
+    icons: LineIcons
+    open: int = -1
+    resume: int = -1
+
+    fn draw(ui: *UiCanvas, look: *BoardLook, events: []*EventRunner, picked: []int, width: f32, key: int)
+        let wide = width >= CardWideFrom
+        let tall = event_card_tall(width)
+        let item = tall + GameCardPad * 2.0 + GameCardGap
+        with v = ui.virtual_list("eventcards", picked.len as int, item, UiNode(key: key, width: UiSize.grow(), height: UiSize.grow(1.0, 0.0, picked.len as f32 * item)))
+            for k in v.first..v.last
+                with ui.open(UiNode(key: picked[k], name: "eventitem", width: UiSize.grow(), height: UiSize.fixed(item), padding: Vec4(0.0, 0.0, 0.0, GameCardGap)))
+                    card(ui, look, events[picked[k]], picked[k], wide, tall)
+
+    fn card(ui: *UiCanvas, look: *BoardLook, e: *EventRunner, i: int, wide: bool, tall: f32)
+        let theme = look.theme
+        let fonts = look.fonts
+        let c = &e.config
+        let tint = state_color(theme, e.state)
+        let o = ui.open(UiNode(name: "eventcard", flow: FlowRow, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4.splat(GameCardPad), gap: wide ? 18.0 : 14.0, hit: true))
+        let h = ui.interact(o.id)
+        let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 20.0)
+        ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.3 * lit)), radius: Vec4.splat(RowCurve), border: 1.0, border_color: theme.line.lerp(tint, 0.4 * lit)))
+        if h.clicked: open = i
+        ui.leaf(UiNode(name: "cardedge", floating: true, offset: Vec2(0.0, GameCardPad + 4.0), width: UiSize.fixed(3.0), height: UiSize.fixed(tall - 8.0), box: UiBox(fill: UiFill.solid(tint.with_alpha(0.9)), radius: Vec4(0.0, 1.5, 1.5, 0.0))))
+        let tile = wide ? EventTileWide : EventTileNarrow
+        if c.entrants.len == 2: mosaic(ui, theme, e, tile)
+        else: crosstable(ui, theme, &e.standings, tile)
+        var line: [200]u8
+        var clock: [32]u8
+        var when: [24]u8
+        with ui.open(UiNode(name: "eventinfo", width: UiSize.grow(), height: UiSize.grow(), gap: wide ? 8.0 : 6.0, clip: true))
+            with ui.open(UiNode(name: "eventtitle", flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                ui.label(c.name_text(), UiTextStyle(face: fonts.strong, size: 15.5, color: theme.ink), UiNode(clip: true))
+                card_chip(ui, theme, fonts, state_word(e.state), tint)
+                ui.spacer()
+                ui.label(when_text(day_of_seconds(e.begun), &when), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+            let format_at = clamp(c.format as int, 0, FormatNames.len as int - 1)
+            with ui.open(UiNode(name: "eventmeta", flow: FlowRow, width: UiSize.grow(), gap: 7.0, align: Vec2(0.0, 0.5), clip: true))
+                icons.show(ui, FormatIcons[format_at], 15.0, theme.muted)
+                let book = c.book == NoEventBook ? "No book" : c.book_name_text()
+                ui.label(format(&line, "{FormatNames[format_at]}  ·  {c.entrants.len} engines  ·  {c.control.text(&clock)}  ·  {book}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(clip: true))
+            leaders(ui, look, e, wide ? 3 : 2)
+            ui.spacer()
+            with ui.open(UiNode(name: "eventprogress", flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+                let done = e.finished_games()
+                let all = e.schedule.len as int
+                with ui.open(UiNode(name: "eventbar", width: UiSize.grow(1.0, 40.0, 300.0), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(3.0))))
+                    if done > 0: ui.leaf(UiNode(width: UiSize.part(all > 0 ? done as f32 / all as f32 : 0.0), height: UiSize.grow(), box: UiBox(fill: UiFill.solid(tint), radius: Vec4.splat(3.0))))
+                ui.label(format(&line, "{done} of {all} games"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+                ui.spacer()
+                if e.state == EventPaused and ui.button("Resume"): resume = i
+                if wide and ui.button("Open"): open = i
+        ui.close()
+
+    fn leaders(ui: *UiCanvas, look: *BoardLook, e: *EventRunner, shown: int)
+        let theme = look.theme
+        let fonts = look.fonts
+        let st = &e.standings
+        let two = e.config.entrants.len == 2
+        var points: [24]u8
+        var elo: [48]u8
+        var said: [80]u8
+        with ui.open(UiNode(name: "eventleaders", width: UiSize.grow(1.0, 0.0, 460.0), gap: 3.0))
+            for place in 0..min(two ? 2 : shown, st.order.len as int)
+                let who = st.order[place]
+                let t = &st.tallies[who]
+                with ui.open(UiNode(key: place as int, flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                    medal(ui, theme, fonts, place as int)
+                    ui.label(e.config.entrants[who].name_text(), UiTextStyle(face: place == 0 ? fonts.strong : fonts.text, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+                    with ui.open(UiNode(flow: FlowRow, gap: 2.0, align: Vec2(0.0, 0.5)))
+                        for k in 0..FormShown
+                            let r = st.recent(who, FormShown - 1 - k as int)
+                            let c = r == 3 ? theme.gain() : r == 2 ? theme.muted : r == 1 ? theme.loss() : theme.line.with_alpha(0.5)
+                            ui.leaf(UiNode(key: k as int, width: UiSize.fixed(7.0), height: UiSize.fixed(7.0), box: UiBox(fill: UiFill.solid(c), radius: Vec4.splat(2.0))))
+                    with ui.open(UiNode(width: UiSize.fixed(58.0), align: Vec2(1.0, 0.5)))
+                        ui.label(format(&points, "{t.points():.1}/{t.games()}"), UiTextStyle(face: fonts.strong, size: 12.5, color: place == 0 ? theme.ink : theme.muted))
+            if two and st.order.len > 0 and shown > 2
+                let lead = estimate_games(&st.tallies[st.order[0]])
+                ui.label(format(&said, "Elo difference {lead.text(&elo)}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(padding: Vec4(26.0, 2.0, 0.0, 0.0)))
+
+    fn release()
+        icons.release()
+
+fn state_color(theme: *GuiTheme, s: EventState) -> Color
+    if s == EventRunning or s == EventPausing: return theme.accent
+    if s == EventPaused: return theme.warn
+    if s == EventFinished: return theme.gain()
+    return theme.muted
+
+fn medal(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, place: int)
+    let won = place < 3
+    var n: [8]u8
+    with ui.open(UiNode(name: "medal", width: UiSize.fixed(18.0), height: UiSize.fixed(18.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(won ? Color.hex(MedalColors[place] as u32) : theme.sunken), radius: Vec4.splat(9.0))))
+        ui.label(format(&n, "{place + 1}"), UiTextStyle(face: fonts.strong, size: 10.5, color: won ? Color.hex(0x1C1A16) : theme.muted))
+
+fn crosstable(ui: *UiCanvas, theme: *GuiTheme, st: *Standings, size: f32)
+    let n = min(st.order.len as int, CrossMost)
+    let gap: f32 = n > 8 ? 1.0 : 2.0
+    let cell = n > 0 ? floor((size - 16.0 - gap * (n - 1) as f32) / n as f32) : 0.0
+    with ui.open(UiNode(name: "crosstile", width: UiSize.fixed(size), height: UiSize.fixed(size), gap: gap, align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(6.0), border: 1.0, border_color: theme.line.with_alpha(0.6))))
+        for a in 0..n
+            with ui.open(UiNode(key: a as int, flow: FlowRow, gap: gap))
+                for b in 0..n
+                    let i = st.order[a]
+                    let j = st.order[b]
+                    var c = theme.line.with_alpha(0.35)
+                    if i != j
+                        let t = st.against(i, j)
+                        c = t.games() == 0 ? theme.line.with_alpha(0.18) : score_color(theme, t.points() / t.games() as f64).with_alpha(0.9)
+                    ui.leaf(UiNode(key: b as int, width: UiSize.fixed(cell), height: UiSize.fixed(cell), box: UiBox(fill: UiFill.solid(c), radius: Vec4.splat(min(cell * 0.2, 3.0)))))
+
+fn mosaic(ui: *UiCanvas, theme: *GuiTheme, e: *EventRunner, size: f32)
+    let count = min(e.schedule.len as int, MosaicMost)
+    let lead = e.standings.order.len > 0 ? e.standings.order[0] : 0
+    let cols = max(ceil(sqrt(count as f32)) as int, MosaicLeast)
+    let rows = (count + cols - 1) / cols
+    let gap: f32 = cols > 10 ? 1.0 : 3.0
+    let cell = floor((size - 16.0 - gap * (cols - 1) as f32) / cols as f32)
+    with ui.open(UiNode(name: "mosaictile", width: UiSize.fixed(size), height: UiSize.fixed(size), gap: gap, align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(6.0), border: 1.0, border_color: theme.line.with_alpha(0.6))))
+        for r in 0..rows
+            with ui.open(UiNode(key: r as int, flow: FlowRow, gap: gap))
+                for col in 0..cols
+                    let k = r * cols + col as int
+                    if k >= count: break
+                    var c = theme.line.with_alpha(0.18)
+                    if k < e.records.len and e.records[k].done and e.records[k].result != Unfinished
+                        let res = e.records[k].result
+                        let g = e.schedule[k]
+                        let won = res == WhiteWins and g.white == lead or res == BlackWins and g.black == lead
+                        c = res == Drawn ? theme.muted : won ? theme.gain() : theme.loss()
+                    ui.leaf(UiNode(key: col as int, width: UiSize.fixed(cell), height: UiSize.fixed(cell), box: UiBox(fill: UiFill.solid(c.with_alpha(0.9)), radius: Vec4.splat(min(cell * 0.2, 4.0)))))
+
+fn score_color(theme: *GuiTheme, s: f64) -> Color
+    if s < 0.5: return theme.loss().lerp(theme.muted, (s * 2.0) as f32)
+    return theme.muted.lerp(theme.gain(), ((s - 0.5) * 2.0) as f32)

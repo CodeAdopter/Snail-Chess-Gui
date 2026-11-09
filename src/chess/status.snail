@@ -1,0 +1,25 @@
+use chess/moves
+
+enum Outcome: u8
+    Playing
+    Checkmate
+    Stalemate
+    DeadPosition
+    FiftyMoves
+
+const DarkSquares: Bitboard = 0xAA55AA55AA55AA55
+
+fn outcome_of(board: *Board) -> Outcome
+    if not has_any_move(board): return board.in_check ? Outcome.Checkmate : Outcome.Stalemate
+    if is_dead_position(board): return DeadPosition
+    if board.clock >= 100: return FiftyMoves
+    return Playing
+
+fn is_dead_position(board: *Board) -> bool
+    let heavy = board.pieces(White, Pawn) | board.pieces(Black, Pawn) | board.rooks_queens(White) | board.rooks_queens(Black)
+    if heavy: return false
+    let knights = board.pieces(White, Knight) | board.pieces(Black, Knight)
+    let bishops = board.pieces(White, Bishop) | board.pieces(Black, Bishop)
+    if (knights | bishops).count <= 1: return true
+    if knights: return false
+    return bishops & DarkSquares == 0 or bishops & ~DarkSquares == 0

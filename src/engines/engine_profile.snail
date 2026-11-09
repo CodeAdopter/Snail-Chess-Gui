@@ -1,0 +1,85 @@
+struct ProfileValue
+    name: [..]u8
+    value: [..]u8
+
+    fn name_text() -> str
+        return str(name[0..name.len])
+
+    fn value_text() -> str
+        return str(value[0..value.len])
+
+    fn release()
+        name.free()
+        value.free()
+
+struct EngineProfile
+    id: int
+    name: [..]u8
+    values: [..]ProfileValue
+    revision: int
+    touched_ns: i64
+
+    fn name_text() -> str
+        return str(name[0..name.len])
+
+    fn set_name(s: str)
+        set_text(&name, s)
+
+    fn find(option: str) -> int
+        for i in 0..values.len
+            if values[i].name_text() == option: return i as int
+        return -1
+
+    fn value_of(option: str) -> (str, bool)
+        let i = find(option)
+        if i < 0: return "", false
+        return values[i].value_text(), true
+
+    fn set(option: str, value: str, default: str)
+        if value != default
+            put(option, value)
+            return
+        let i = find(option)
+        if i >= 0
+            values[i].release()
+            values.remove(i)
+            touch()
+
+    fn put(option: str, value: str)
+        touch()
+        let i = find(option)
+        if i >= 0
+            set_text(&values[i].value, value)
+            return
+        var v: ProfileValue
+        set_text(&v.name, option)
+        set_text(&v.value, value)
+        values.push(v)
+
+    fn copy_values(from: *EngineProfile)
+        clear_values()
+        for v in from.values
+            var mine: ProfileValue
+            set_text(&mine.name, v.name_text())
+            set_text(&mine.value, v.value_text())
+            values.push(mine)
+
+    fn clear_values()
+        for i in 0..values.len
+            values[i].release()
+        values.clear()
+        touch()
+
+    fn touch()
+        revision += 1
+        touched_ns = now_ns()
+
+    fn release()
+        clear_values()
+        values.free()
+        name.free()
+
+fn set_text(into: *[..]u8, s: str)
+    into.clear()
+    for k in 0..s.len
+        into.push(s[k])

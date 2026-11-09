@@ -1,0 +1,183 @@
+use src/tournament/telemetry
+use src/views/analysis_panel
+
+const GraphNames = ["Evaluation", "Speed", "Depth", "Time", "CPU"]
+const GraphEvalCp = 800
+const GraphLabelWidth: f32 = 58.0
+
+struct TelemetryGraph
+    layer: UiLayer
+    ready: bool
+    kind: int
+    path: UiPath
+    low: f64
+    high: f64
+
+    fn draw(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, records: []TelemetryRecord, white: str, black: str, x: f32, y: f32, w: f32, h: f32) -> int
+        let ui = &app.ui
+        var clicked = -1
+        if w < 60.0 or h < 70.0: return clicked
+        let small = UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted)
+        with ui.open(UiNode(name: "graphhead", floating: true, offset: Vec2(x + 6.0, y + 2.0), width: UiSize.fixed(w - 12.0), height: UiSize.fixed(32.0), flow: FlowRow, gap: 10.0, align: Vec2(0.0, 0.5)))
+            ui.tabs("graphkind", ref kind, GraphNames)
+        let px = x + GraphLabelWidth
+        let py = y + 42.0
+        let pw = w - GraphLabelWidth - 14.0
+        let ph = h - 42.0 - 12.0
+        if pw < 10.0 or ph < 10.0: return clicked
+        if records.len == 0
+            ui.text(px, py + ph * 0.5 - 8.0, "Engine statistics appear here as the game progresses.", small)
+            return clicked
+        let pw_px = max(floor(pw * app.scale) as int, 1)
+        let ph_px = max(floor(ph * app.scale) as int, 1)
+        prepare(app, theme, records, pw_px, ph_px)
+        let tw = layer.texture.width as f32
+        let th = layer.texture.height as f32
+        layer.show(ui, px, py, pw, ph, Vec4(0.0, 0.0, pw_px as f32 / tw, ph_px as f32 / th))
+        var top: [32]u8
+        var bottom: [32]u8
+        ui.text(x + 10.0, py - 2.0, value_text(high, &top), small)
+        ui.text(x + 10.0, py + ph - 14.0, value_text(low, &bottom), small)
+        clicked = hover(app, theme, fonts, records, white, black, px, py, pw, ph)
+        return clicked
+
+    fn prepare(app: *DesktopApp, theme: *GuiTheme, records: []TelemetryRecord, w: int, h: int)
+        let last = records[records.len - 1]
+        let key = (records.len as u64) << 40 ^ (kind as u64) << 36 ^ (theme.name as u64) << 34 ^ (w as u64) << 17 ^ h as u64 ^ (last.nodes as u64) << 50
+        if not ready
+            layer.init(&app.gpu, &app.ui_gpu, max(w, 512), max(h, 128), room: 64, path_room: 65536, writing: false)
+            ready = true
+        elif w > layer.texture.width or h > layer.texture.height
+            layer.resize(&app.gpu, max(w, layer.texture.width), max(h, layer.texture.height))
+        let c = layer.begin(key)
+        if not c: return
+        scale_for(records)
+        let line_px = 1.5 * app.scale
+        let zero = kind == 0 ? 0.0 : low
+        let zy = y_of(zero, h)
+        c.line(0.0, zy, w as f32, zy, 1.0 * app.scale, theme.line, CapButt)
+        for side in [White, Black]
+            path.clear()
+            var begun = false
+            for r in records
+                if r.side != side as i32: continue
+                let (v, known) = value_of(&r)
+                if not known: continue
+                let px = x_of(r.ply as int, records, w)
+                let py = y_of(v, h)
+                if begun: path.line_to(px, py)
+                else: path.move_to(px, py)
+                begun = true
+            if begun: c.stroke_path(&path, line_px, side == White ? white_ink(theme) : theme.accent, JoinRound, CapRound)
+
+    fn scale_for(records: []TelemetryRecord)
+        var most = 0.0
+        for r in records
+            let (v, known) = value_of(&r)
+            if known: most = max(most, abs(v))
+        if kind == 0
+            high = clamp(most, 100.0, GraphEvalCp as f64)
+            low = -high
+        else
+            high = max(most * 1.1, 1.0)
+            low = 0.0
+
+    fn value_of(r: *TelemetryRecord) -> (f64, bool)
+        match kind
+            0
+                let (cp, known) = r.white_cp(GraphEvalCp)
+                return cp as f64, known
+            1: return r.nps as f64, r.nps > 0
+            2: return r.depth as f64, r.depth > 0
+            3: return r.time_ms as f64, true
+        return r.cpu_ms as f64 * 100.0 / max(r.time_ms as f64, 1.0), r.time_ms > 0
+
+    fn value_text(v: f64, buf: *[32]u8) -> str
+        var speed: [32]u8
+        match kind
+            0
+                let pawns = v / 100.0
+                return pawns > 0.0 ? format(buf, "+{pawns:.1}") : pawns < 0.0 ? format(buf, "−{-pawns:.1}") : format(buf, "0.0")
+            1: return format(buf, "{speed_text(v as i64, &speed)}")
+            2: return format(buf, "{v:.0}")
+            3: return v >= 1000.0 ? format(buf, "{v / 1000.0:.1} s") : format(buf, "{v:.0} ms")
+        return format(buf, "{v:.0}%")
+
+    fn x_of(ply: int, records: []TelemetryRecord, w: int) -> f32
+        let first = records[0].ply as int
+        let last = records[records.len - 1].ply as int
+        if last <= first: return w as f32 * 0.5
+        return (ply - first) as f32 / (last - first) as f32 * (w as f32 - 4.0) + 2.0
+
+    fn y_of(v: f64, h: int) -> f32
+        let share = (v - low) / max(high - low, 1.0e-9)
+        return (1.0 - clamp(share, 0.0, 1.0)) as f32 * (h as f32 - 4.0) + 2.0
+
+    fn hover(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, records: []TelemetryRecord, white: str, black: str, px: f32, py: f32, pw: f32, ph: f32) -> int
+        let ui = &app.ui
+        let o = ui.open(UiNode(name: "graphplot", floating: true, offset: Vec2(px, py), width: UiSize.fixed(pw), height: UiSize.fixed(ph), hit: true))
+        let h = ui.interact(o.id, false)
+        ui.close()
+        if not h.hovered: return -1
+        let mouse = app.pointer.mouse
+        let wide = floor(pw) as int
+        let tall = floor(ph) as int
+        var best = -1
+        var gap = 1.0e18
+        for i in 0..records.len
+            let (v, known) = value_of(&records[i])
+            if not known: continue
+            let dx = x_of(records[i].ply as int, records, wide) - (mouse.x - px)
+            let dy = y_of(v, tall) - (mouse.y - py)
+            let d = dx * dx + dy * dy * 0.25
+            if d < gap
+                gap = d
+                best = i as int
+        if best < 0: return -1
+        let r = &records[best]
+        let (v, known) = value_of(r)
+        let mx = px + x_of(r.ply as int, records, wide)
+        let my = py + y_of(v, tall)
+        let line = r.side == White as i32 ? white_ink(theme) : theme.accent
+        let keep = ui.layer
+        ui.layer = 7
+        ui.box(mx - 0.5, py, 1.0, ph, UiBox(fill: UiFill.solid(theme.muted.with_alpha(0.35))))
+        ui.circle(mx, my, 6.5, theme.surface)
+        ui.circle(mx, my, 4.5, line)
+        let cw: f32 = 244.0
+        let ch: f32 = 76.0
+        let cx = mx + 14.0 + cw <= px + pw ? mx + 14.0 : mx - 14.0 - cw
+        let cy = clamp(my - ch * 0.5, py - 30.0, py + ph - ch)
+        ui.box(cx, cy, cw, ch, UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(6.0), border: 1.0, border_color: theme.line, shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.28), 0.0, 6.0, 18.0, 0.0, false)))
+        ui.clip_to(cx, cy, cw, ch, 6.0)
+        ui.circle(cx + 16.0, cy + 18.0, 4.0, line)
+        ui.text(cx + 26.0, cy + 10.0, r.side == White as i32 ? white : black, UiTextStyle(face: fonts.strong, size: 12.0, color: theme.ink))
+        var shown: [32]u8
+        var move: [32]u8
+        let number = (r.ply as int + 1) / 2
+        let mover = r.side == White as i32 ? White : Black
+        var eval: [24]u8
+        let said = kind == 0 and known ? score_text(r.kind as ScoreKind, r.score as int, mover, &eval) : known ? value_text(v, &shown) : "–"
+        ui.text(cx + 12.0, cy + 30.0, said, UiTextStyle(face: fonts.strong, size: 16.0, color: theme.ink))
+        ui.text(cx + 100.0, cy + 34.0, format(&move, "Move {number}, {mover == White ? "White" : "Black"}"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+        var facts: [120]u8
+        var speed: [32]u8
+        var took: [32]u8
+        var depth: [24]u8
+        let time_ms = r.time_ms as f64
+        let cpu = r.time_ms > 0 ? r.cpu_ms as f64 * 100.0 / time_ms : 0.0
+        let seconds = time_ms >= 1000.0 ? format(&took, "{time_ms / 1000.0:.1} s") : format(&took, "{time_ms:.0} ms")
+        let reached = r.seldepth > 0 ? format(&depth, "depth {r.depth}/{r.seldepth}") : format(&depth, "depth {r.depth}")
+        ui.text(cx + 12.0, cy + 54.0, format(&facts, "{reached}  ·  {speed_text(r.nps, &speed)}  ·  {seconds}  ·  CPU {cpu:.0}%"), UiTextStyle(face: fonts.text, size: 11.0, color: theme.muted))
+        ui.unclip()
+        ui.layer = keep
+        app.cursor = SDL_SYSTEM_CURSOR_POINTER
+        return h.clicked ? r.ply as int : -1
+
+    fn release(gpu: *Gpu)
+        if ready: layer.release(gpu)
+        ready = false
+        path.free_all()
+
+fn white_ink(theme: *GuiTheme) -> Color
+    return theme.ink

@@ -1,0 +1,533 @@
+use engine/ui/ui_widgets
+use src/fastchess/fast_run
+use src/views/board_view
+use src/views/list_rows
+use src/views/fact_row
+
+const FastPanelNames = ["Results", "Games", "Output", "Log", "Details"]
+const FastFaultWords = ["", "Illegal move", "Crash", "Time loss", "Interrupted", "Warning"]
+const FastCellGap: f32 = 14.0
+const FastNameRow: f32 = 22.0
+const FastBar: f32 = 8.0
+const FastBoardMost: f32 = 420.0
+const FastRowsLeast: f32 = 380.0
+const FastLead: f32 = 58.0
+const FastCardCurve: f32 = 6.0
+const FastLogRow: f32 = 16.0
+const FastSlideSize: f32 = 180.0
+const FastClockQuietMs: i64 = 300
+
+struct FastView
+    panel: int
+    stopping: bool
+    eco: bool
+    follow_set: bool
+    last_end: f32
+    clip: [..]u8
+
+    fn draw_boards(app: *DesktopApp, look: *BoardLook, run: *FastRun, x: f32, y: f32, w: f32, h: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        var n = 0
+        for i in 0..run.boards.len
+            if fast_board_shows(run, &run.boards[i]): n += 1
+        if n == 0
+            let words = run.running() ? "Waiting for fastchess to start its first games." : "This run played no games."
+            ui.label(words, UiTextStyle(face: fonts.text, size: 14.0, color: theme.muted), UiNode(floating: true, offset: Vec2(x, y + h * 0.5 - 10.0), width: UiSize.fixed(w), align: Vec2(0.5, 0.5)))
+            return
+        var cols = 1
+        var size: f32 = 0.0
+        for c in 1..n + 1
+            let rows = (n + c - 1) / c
+            let cell_w = w / c as f32 - FastCellGap
+            let cell_h = h / rows as f32 - FastCellGap
+            let s = min(min(cell_w - FastBar - 6.0, cell_h - FastNameRow * 2.0), FastBoardMost)
+            if s > size
+                size = s
+                cols = c as int
+        let place = board_place(0.0, 0.0, max(size, 40.0), app.scale)
+        size = place.size
+        if not eco: look.sheet.prepare(&app.gpu, &app.ui_gpu, look.set, place.cell_px, look.costume)
+        let rows = (n + cols - 1) / cols
+        let cell_w = size + FastBar + 6.0
+        let cell_h = size + FastNameRow * 2.0
+        let left = x + max((w - cols as f32 * (cell_w + FastCellGap) + FastCellGap) * 0.5, 0.0)
+        let top = y + max((h - rows as f32 * (cell_h + FastCellGap) + FastCellGap) * 0.5, 0.0)
+        let now = sn_fc_now_ms()
+        let playing = run.running() and not run.stopping
+        var soonest: i64 = -1
+        var sliding = false
+        var i = -1
+        for k in 0..run.boards.len
+            let b = &run.boards[k]
+            if not fast_board_shows(run, b): continue
+            i += 1
+            let s = fast_slot_of(&run.live, b.thread)
+            let cx = left + (i % cols) as f32 * (cell_w + FastCellGap)
+            let cy = top + (i / cols) as f32 * (cell_h + FastCellGap)
+            let bx = cx + FastBar + 6.0
+            let by = cy + FastNameRow
+            let white_moves = s.white_to_move()
+            for (black_side, ty) in [(true, cy), (false, by + size)]
+                let name = black_side ? s.black_name() : s.white_name()
+                let on_move = black_side != white_moves and playing
+                ui.circle(bx + 5.0, ty + 10.0, 4.5, theme.muted)
+                ui.circle(bx + 5.0, ty + 10.0, 3.5, black_side ? Color(0.08, 0.08, 0.09, 1.0) : Color(0.95, 0.95, 0.93, 1.0))
+                var ms = black_side ? s.btime : s.wtime
+                var clock_w: f32 = 0.0
+                if ms >= 0
+                    if on_move and not eco
+                        ms = max(ms - (now - s.go_ms), 0)
+                        let next = ms < 20000 ? ms % 100 + 1 : ms % 1000 + 1
+                        if soonest < 0 or next < soonest: soonest = next
+                    var clock: [24]u8
+                    let shown = fast_clock_text(ms, &clock)
+                    clock_w = shown.len as f32 * 7.6
+                    ui.text(bx + size - 6.0 - clock_w, ty + 3.0, shown, UiTextStyle(face: fonts.mono, size: 12.5, color: on_move ? theme.accent : theme.muted))
+                let side = black_side ? 0 : 1
+                let room = size - 31.0 - clock_w
+                let key = id_hash(name)
+                if b.fit_key[side] != key or b.fit_room[side] != room
+                    var short: [72]u8
+                    let fitted = fast_fit_name(ui, name.len > 0 ? name : "–", UiTextStyle(face: fonts.text, size: 12.5), room, &short)
+                    b.fit_len[side] = min(fitted.len, 72) as int
+                    for k in 0..b.fit_len[side]
+                        b.fit[side][k] = fitted[k]
+                    b.fit_key[side] = key
+                    b.fit_room[side] = room
+                ui.text(bx + 15.0, ty + 3.0, str(b.fit[side][0..b.fit_len[side]]), UiTextStyle(face: on_move ? fonts.strong : fonts.text, size: 12.5, color: theme.ink))
+            let target = fast_share(s.eval_kind, s.eval)
+            let moves_show = not eco and size >= FastSlideSize and b.gap_ms >= FastSlideLeastMs
+            let share = moves_show ? ui.spring(id_hash("fastbar") + b.thread as u32, 0, target, 10.0) : target
+            ui.box(cx, by, FastBar, size, UiBox(fill: UiFill.solid(Color(0.1, 0.1, 0.11, 1.0)), radius: Vec4.splat(2.0)))
+            ui.box(cx, by + size * (1.0 - share), FastBar, size * share, UiBox(fill: UiFill.solid(Color(0.93, 0.93, 0.9, 1.0)), radius: Vec4.splat(2.0)))
+            if eco
+                fast_draw_flat(ui, look, b, bx, by, size)
+                continue
+            let slid = moves_show ? b.slid(now) : 1.0
+            if slid < 1.0
+                sliding = true
+                fast_draw_sliding(ui, look, b, slid, bx, by, size)
+            else: draw_small_board(ui, look, &b.board, b.last, bx, by, size, false)
+        if sliding: app.wake_in(0.0)
+        if soonest >= 0: app.wake_in((now - run.live_ms < FastClockQuietMs ? max(soonest, FastClockQuietMs) : soonest) as f64 / 1000.0)
+
+    fn draw_panel(app: *DesktopApp, look: *BoardLook, run: *FastRun, x: f32, y: f32, w: f32, h: f32)
+        let ui = &app.ui
+        if w < 1.0 or h < 40.0: return
+        with ui.open(UiNode(name: "fasttabs", floating: true, offset: Vec2(x + 4.0, y), height: UiSize.fixed(34.0)))
+            ui.tabs("fastpanel", ref panel, FastPanelNames)
+        let top = y + 38.0
+        with ui.open(UiNode(name: "fastpanelbody", floating: true, offset: Vec2(x, top), width: UiSize.fixed(w), height: UiSize.fixed(h - 38.0), padding: Vec4(12.0, 8.0, 12.0, 8.0), gap: 4.0, clip: true))
+            match panel
+                0: results(app, look, run, w - 24.0)
+                1: games(app, look, run, w - 24.0)
+                2: output(app, look, run)
+                3: log(app, look, run)
+                else: details(app, look, run)
+        draw_stop(app, look, run)
+
+    fn results(app: *DesktopApp, look: *BoardLook, run: *FastRun, width: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let t = &run.tally
+        var line: [200]u8
+        with ui.scroll_area("fastresults", gap: 6.0)
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                let (word, color) = fast_state_word(run, theme)
+                with ui.open(UiNode(name: "faststate", padding: Vec4(8.0, 3.0, 8.0, 3.0), box: UiBox(fill: UiFill.solid(color.with_alpha(0.16)), radius: Vec4.splat(10.0))))
+                    ui.label(word, UiTextStyle(face: fonts.strong, size: 11.0, color: color))
+                ui.label(fast_title(run, &line), UiTextStyle(face: fonts.strong, size: 15.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+            var about: [200]u8
+            ui.label(fast_about(run, &about), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+            if t.sprt or run.args.sprt: sprt_card(ui, look, run, width)
+            figures(ui, look, run)
+            if t.has_ptnml: pairs(ui, look, t)
+            left_card(ui, look, run)
+            if t.ranks.len > 0
+                fast_section(ui, look, "RATINGS")
+                for k in 0..t.ranks.len
+                    let r = &t.ranks[k]
+                    var value: [120]u8
+                    fact(ui, fonts, theme, format(&line, "{k + 1}. {t.text(r.name)}"), format(&value, "Elo {t.text(r.elo)} · {r.games} games · {t.text(r.score)}"))
+            faults_card(ui, look, run)
+
+    fn sprt_card(ui: *UiCanvas, look: *BoardLook, run: *FastRun, width: f32)
+        let theme = look.theme
+        let fonts = look.fonts
+        let t = &run.tally
+        let lower = t.sprt ? t.lower : run.args.lower()
+        let upper = t.sprt ? t.upper : run.args.upper()
+        let elo0 = t.sprt ? t.elo0 : run.args.elo0
+        let elo1 = t.sprt ? t.elo1 : run.args.elo1
+        var line: [160]u8
+        with ui.open(UiNode(name: "fastsprt", width: UiSize.grow(), padding: Vec4(14.0, 12.0, 14.0, 12.0), gap: 6.0, box: UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(FastCardCurve), border: 1.0, border_color: theme.line)))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 1.0)))
+                ui.label("SPRT", UiTextStyle(face: fonts.strong, size: 9.5, color: theme.muted, tracking: 0.6), UiNode(width: UiSize.grow()))
+                var hyp: [64]u8
+                ui.label(format(&hyp, "H0 {elo0:.1}  ·  H1 {elo1:.1}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 1.0)))
+                ui.label(t.sprt ? format(&line, "{t.llr:.2}") : "–", UiTextStyle(face: fonts.mono, size: 26.0, color: theme.ink))
+                var share: [48]u8
+                ui.label(t.sprt ? format(&share, "LLR  ·  {t.llr_share * 100.0:.1}% of the way") : "LLR  ·  no results yet", UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(width: UiSize.grow(), padding: Vec4(0.0, 0.0, 0.0, 4.0)))
+            let bar = ui.open(UiNode(name: "fastllr", width: UiSize.grow(), height: UiSize.fixed(14.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(7.0), border: 1.0, border_color: theme.line)))
+            let span = max(upper - lower, 0.01)
+            let at = clamp((t.llr - lower) / span, 0.0, 1.0) as f32
+            let mid = clamp((0.0 - lower) / span, 0.0, 1.0) as f32
+            let eased = eco ? at : ui.spring(bar.id, 0, at, 8.0)
+            let tint = t.llr >= 0.0 ? theme.gain() : theme.loss()
+            let from = min(mid, eased)
+            let to = max(mid, eased)
+            ui.leaf(UiNode(floating: true, offset: Vec2((width - 28.0) * from, 2.0), width: UiSize.fixed(max((width - 28.0) * (to - from), 0.0)), height: UiSize.fixed(10.0), box: UiBox(fill: UiFill.solid(tint.with_alpha(0.8)), radius: Vec4.splat(5.0))))
+            ui.leaf(UiNode(floating: true, offset: Vec2((width - 28.0) * mid - 0.5, -2.0), width: UiSize.fixed(1.0), height: UiSize.fixed(18.0), box: UiBox(fill: UiFill.solid(theme.muted))))
+            ui.close()
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0))
+                var low: [48]u8
+                var high: [48]u8
+                ui.label(format(&low, "{lower:.2}  H0 accepted"), UiTextStyle(face: fonts.text, size: 11.0, color: theme.muted), UiNode(width: UiSize.grow()))
+                ui.label(format(&high, "H1 accepted  {upper:.2}"), UiTextStyle(face: fonts.text, size: 11.0, color: theme.muted))
+            let v = run.verdict()
+            if v != 0
+                ui.label(v > 0 ? "H1 accepted: the change passes." : "H0 accepted: the change fails.", UiTextStyle(face: fonts.strong, size: 13.0, color: v > 0 ? theme.gain() : theme.loss()))
+            elif not run.running() and t.sprt
+                ui.label(run.can_continue() ? "Stopped before either bound. Continue goes on from here." : "Stopped before either bound.", UiTextStyle(face: fonts.strong, size: 13.0, color: theme.muted))
+
+    fn figures(ui: *UiCanvas, look: *BoardLook, run: *FastRun)
+        let theme = look.theme
+        let fonts = look.fonts
+        let t = &run.tally
+        var a: [48]u8
+        var b: [48]u8
+        var c: [48]u8
+        var d: [64]u8
+        var first = t.entrants.len > 0 ? &t.entrants[0] : null
+        for i in 0..t.entrants.len
+            if t.name(i as int) == run.args.first_name(): first = &t.entrants[i]
+        let played = t.games.len as int
+        let games = t.total > 0 ? format(&a, "{played} / {t.total}") : format(&a, "{played}")
+        let score = first and first.games() > 0 ? format(&b, "{first.points() * 100.0 / first.games() as f64:.1}%") : "–"
+        let wdl = first ? format(&c, "+{first.wins} ={first.draws} −{first.losses}") : "–"
+        let elo = t.elo.len > 0 ? t.text(t.elo) : "–"
+        with ui.open(UiNode(name: "fastfigures", flow: FlowRow, width: UiSize.grow(), gap: 6.0))
+            fast_figure(ui, look, 0, games, "GAMES")
+            fast_figure(ui, look, 1, score, first ? format(&d, "SCORE · {t.text(first.name)}") : "SCORE")
+            fast_figure(ui, look, 2, wdl, "W · D · L")
+        with ui.open(UiNode(name: "fastelo", flow: FlowRow, width: UiSize.grow(), gap: 6.0))
+            fast_figure(ui, look, 3, elo, "ELO")
+            fast_figure(ui, look, 4, t.nelo.len > 0 ? t.text(t.nelo) : "–", "NELO")
+            fast_figure(ui, look, 5, t.los.len > 0 ? t.text(t.los) : "–", "LOS")
+
+    fn pairs(ui: *UiCanvas, look: *BoardLook, t: *FastTally)
+        let theme = look.theme
+        let fonts = look.fonts
+        let words = ["0", "½", "1", "1½", "2"]
+        var most = 1
+        for k in 0..5
+            most = max(most, t.ptnml[k])
+        fast_section(ui, look, "PAIRS · POINTS FROM EACH OPENING")
+        with ui.open(UiNode(name: "fastpairs", flow: FlowRow, width: UiSize.grow(), gap: 4.0, align: Vec2(0.0, 1.0)))
+            for k in 0..5
+                let share = t.ptnml[k] as f32 / most as f32
+                let tint = k < 2 ? theme.loss() : k > 2 ? theme.gain() : theme.muted
+                with ui.open(UiNode(key: k as int, name: "fastpair", width: UiSize.grow(), gap: 3.0, align: Vec2(0.5, 1.0)))
+                    var n: [24]u8
+                    ui.label(format(&n, "{t.ptnml[k]}"), UiTextStyle(face: fonts.mono, size: 12.0, color: theme.ink))
+                    ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.fixed(max(46.0 * share, 2.0)), box: UiBox(fill: UiFill.solid(tint.with_alpha(0.75)), radius: Vec4.splat(2.0))))
+                    ui.label(words[k], UiTextStyle(face: fonts.text, size: 11.0, color: theme.muted))
+
+    fn left_card(ui: *UiCanvas, look: *BoardLook, run: *FastRun)
+        let theme = look.theme
+        let fonts = look.fonts
+        let t = &run.tally
+        fast_section(ui, look, run.running() and not run.stopping ? "TIME LEFT" : "TIME")
+        var line: [160]u8
+        var span: [48]u8
+        let rate = run.rate()
+        let took = fast_span_text((run.clock_ms() - run.session_ms) / 1000, &span)
+        if not run.running() or run.stopping
+            if run.stopping: fact(ui, fonts, theme, "Stopping", "fastchess is ending its games")
+            fact(ui, fonts, theme, run.stopping ? "Ran for" : "Took", took)
+            if rate > 0.0: fact(ui, fonts, theme, "Pace", format(&line, "{rate * 60.0:.1} games a minute"))
+            return
+        let (most, likely) = run.games_left()
+        var a: [48]u8
+        var b: [48]u8
+        if rate <= 0.0: fact(ui, fonts, theme, "Estimate", "After the first games finish")
+        elif t.sprt and likely >= 0 and likely != most
+            fact(ui, fonts, theme, "Likely", format(&line, "About {fast_span_text((likely as f64 / rate) as i64, &a)}, {likely} more games, at the pace so far"))
+            var c: [48]u8
+            if most >= 0: fact(ui, fonts, theme, "At most", format(&b, "{fast_span_text((most as f64 / rate) as i64, &c)}"))
+        elif most >= 0: fact(ui, fonts, theme, "Left", format(&line, "About {fast_span_text((most as f64 / rate) as i64, &a)}, {most} more games"))
+        var pace: [64]u8
+        if rate > 0.0: fact(ui, fonts, theme, "Pace", format(&pace, "{rate * 60.0:.1} games a minute"))
+        fact(ui, fonts, theme, "Running for", took)
+        if t.total > 0
+            let share = t.games.len as f32 / t.total as f32
+            ui.open(UiNode(name: "fastprogress", width: UiSize.grow(), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(3.0))))
+            ui.leaf(UiNode(floating: true, width: UiSize.part(share), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(3.0))))
+            ui.close()
+
+    fn faults_card(ui: *UiCanvas, look: *BoardLook, run: *FastRun)
+        let theme = look.theme
+        let fonts = look.fonts
+        let t = &run.tally
+        var counts: [6]int
+        for f in t.faults
+            counts[f.kind as int] += 1
+        let serious = counts[1] + counts[2] + counts[3]
+        var line: [240]u8
+        if serious > 0
+            let red = theme.loss()
+            with ui.open(UiNode(name: "fastfaults", width: UiSize.grow(), padding: Vec4(14.0, 12.0, 14.0, 12.0), gap: 5.0, box: UiBox(fill: UiFill.solid(red.with_alpha(theme.dark ? 0.16 : 0.1)), radius: Vec4.splat(FastCardCurve), border: 1.0, border_color: red.with_alpha(0.7))))
+                ui.label(format(&line, "{counts[1]} illegal moves · {counts[2]} crashes · {counts[3]} time losses"), UiTextStyle(face: fonts.strong, size: 13.5, color: red))
+                var shown = 0
+                var k = t.faults.len as int - 1
+                while k >= 0 and shown < 4
+                    let f = &t.faults[k]
+                    k -= 1
+                    if f.kind == FastWarning or f.kind == FastInterrupted: continue
+                    var who: [120]u8
+                    ui.label(format(&line, "Game {f.game}{fast_fault_who(t, f, &who)}: {t.text(f.text)}"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(key: k))
+                    shown += 1
+        if counts[5] > 0: ui.label(format(&line, "{counts[5]} warnings from fastchess. Details lists them."), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+
+    fn games(app: *DesktopApp, look: *BoardLook, run: *FastRun, width: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let t = &run.tally
+        let n = t.games.len as int
+        if n == 0
+            ui.label("No games have finished yet.", UiTextStyle(face: fonts.text, size: 13.0, color: theme.muted))
+            return
+        with list = row_list(ui, theme, fonts, "fastgames", 0, n, width, FastRowsLeast, 0.0, false, FastLead)
+            for k in list.first()..list.last()
+                let g = &t.games[n - 1 - k as int]
+                var line: [240]u8
+                with list.row(k as int, g.id)
+                    with list.middle()
+                        with list.line()
+                            player_tag(ui, theme, fonts, 0, t.name(g.white), 0, true)
+                            versus(ui, theme, fonts)
+                            player_tag(ui, theme, fonts, 1, t.name(g.black), 0, false)
+                        list.note(format(&line, "Game {g.id}  ·  {t.text(g.reason)}"))
+                    let words = ["1-0", "0-1", "½-½", "–"]
+                    let faulty = g.fault != FastNoFault and g.fault != FastInterrupted
+                    list.lead(words[clamp(g.result, 0, 3)], faulty ? FastFaultWords[g.fault as int] : "", faulty ? theme.loss() : g.result == FastDrawn ? theme.muted : theme.ink, 15.0)
+
+    fn output(app: *DesktopApp, look: *BoardLook, run: *FastRun)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let n = run.block_count()
+        if n == 0
+            ui.label("fastchess prints its results every few games. They show here.", UiTextStyle(face: fonts.text, size: 13.0, color: theme.muted))
+            return
+        with ui.scroll_area("fastblocks", gap: 8.0)
+            for i in 0..n
+                let k = n - 1 - i
+                let latest = i == 0
+                with ui.open(UiNode(key: k, name: "fastblock", width: UiSize.grow(), padding: Vec4(12.0, 10.0, 12.0, 10.0), box: UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(FastCardCurve), border: 1.0, border_color: latest ? theme.accent.with_alpha(0.7) : theme.line)))
+                    ui.paragraph(run.block(k), UiTextStyle(face: fonts.mono, size: 11.5, color: latest ? theme.ink : theme.muted), UiNode(width: UiSize.grow()))
+
+    fn log(app: *DesktopApp, look: *BoardLook, run: *FastRun)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let n = run.line_count()
+        if n == 0
+            ui.label("fastchess has printed nothing yet.", UiTextStyle(face: fonts.text, size: 13.0, color: theme.muted))
+            return
+        with area = ui.scroll_area("fastlog")
+            let m = ui.memory(area.id)
+            let span = max(n as f32 * FastLogRow - m.view.y, 0.0)
+            if not follow_set or m.scroll.y >= last_end - FastLogRow * 2.0
+                m.scroll.y = span
+                m.target.y = span
+            follow_set = true
+            last_end = span
+            let first = clamp(floor(m.scroll.y / FastLogRow) as int - 2, 0, n)
+            let last = clamp(ceil((m.scroll.y + max(m.view.y, FastLogRow * 4.0)) / FastLogRow) as int + 2, first, n)
+            if first > 0: ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.fixed(first as f32 * FastLogRow)))
+            for k in first..last
+                let line = run.line(k)
+                let warn = starts_with(line, "Warning") or starts_with(line, "snailfast:") or find(line, "illegal") >= 0 or find(line, "disconnects") >= 0
+                ui.label(line.len > 0 ? line : " ", UiTextStyle(face: fonts.mono, size: 11.5, color: warn ? theme.warn : theme.ink), UiNode(key: run.dropped + k, width: UiSize.grow(), height: UiSize.fixed(FastLogRow), clip: true))
+            if n > last: ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.fixed((n - last) as f32 * FastLogRow)))
+
+    fn details(app: *DesktopApp, look: *BoardLook, run: *FastRun)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        var line: [400]u8
+        with ui.scroll_area("fastdetails", gap: 4.0)
+            fast_section(ui, look, "COMMAND")
+            ui.paragraph(str(run.typed[0..run.typed.len]), UiTextStyle(face: fonts.mono, size: 11.5, color: theme.ink), UiNode(width: UiSize.grow()))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0))
+                if ui.button("Copy command")
+                    clip.clear()
+                    push_text(&clip, "snailfast ")
+                    push_text(&clip, str(run.typed[0..run.typed.len]))
+                    copy_clip(ui, "Command copied")
+                if ui.button("Open folder"): fast_open(run.folder_text())
+                if run.pgn.len > 0 and ui.button("Open PGN"): fast_open(str(run.pgn[0..run.pgn.len]))
+            fast_section(ui, look, "RUN")
+            fact(ui, fonts, theme, "fastchess", str(run.version[0..run.version_len]))
+            fact(ui, fonts, theme, "Started in", str(run.cwd[0..run.cwd.len]))
+            var span: [48]u8
+            fact(ui, fonts, theme, "Concurrency", format(&line, "{run.args.concurrency} games at once"))
+            if run.args.tc_len > 0: fact(ui, fonts, theme, "Time control", run.args.tc_text())
+            if run.args.sprt: fact(ui, fonts, theme, "SPRT", format(&line, "elo0 {run.args.elo0:.1} · elo1 {run.args.elo1:.1} · alpha {run.args.alpha:.3} · beta {run.args.beta:.3}"))
+            if run.state == FastEnded: fact(ui, fonts, theme, "Exit code", format(&span, "{run.code}"))
+            elif run.state == FastLost: fact(ui, fonts, theme, "Ended", "snailfast was closed before fastchess finished")
+            fact(ui, fonts, theme, "Folder", run.folder_text())
+            let t = &run.tally
+            var warnings = 0
+            for f in t.faults
+                if f.kind == FastWarning: warnings += 1
+            if warnings == 0: return
+            fast_section(ui, look, "WARNINGS")
+            var shown = 0
+            var k = t.faults.len as int - 1
+            while k >= 0 and shown < 40
+                let f = &t.faults[k]
+                k -= 1
+                if f.kind != FastWarning: continue
+                ui.paragraph(t.text(f.text), UiTextStyle(face: fonts.mono, size: 11.0, color: theme.muted), UiNode(key: k, width: UiSize.grow()))
+                shown += 1
+
+    fn copy_clip(ui: *UiCanvas, done: str)
+        clip.push(0)
+        if SDL_SetClipboardText(clip.ptr as cstr): ui.toast(done)
+        clip.clear()
+
+    fn draw_stop(app: *DesktopApp, look: *BoardLook, run: *FastRun)
+        if not stopping: return
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        with ui.modal("stopfast", ref stopping, 400.0)
+            ui.label("Stop fastchess?", UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph("fastchess ends the games in progress and saves where it was, as Ctrl+C would. Finished games are kept, and Continue goes on later.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                ui.spacer()
+                if ui.button("Keep running"): stopping = false
+                if ui.button("Stop", true)
+                    if not run.stop(): ui.toast("The run could not be reached.")
+                    stopping = false
+
+    fn release()
+        clip.free()
+
+fn fast_slot_of(live: *FastLive, thread: int) -> *FastSlot
+    for i in 0..live.slots.len
+        if live.slots[i].thread == thread: return &live.slots[i]
+    return null
+
+fn fast_board_shows(run: *FastRun, b: *FastBoard) -> bool
+    let s = fast_slot_of(&run.live, b.thread)
+    if s == null: return false
+    return b.plies > 0 or s.wtime >= 0 or s.btime >= 0 or s.white_name().len > 0 or s.black_name().len > 0
+
+fn fast_share(kind: u8, white: int) -> f32
+    if kind == FastEvalMate: return white > 0 ? 1.0 : white < 0 ? 0.0 : 0.5
+    if kind != FastEvalCp: return 0.5
+    let chances = 2.0 / (1.0 + exp(-0.00368208 * clamp(white, -1000, 1000) as f64)) - 1.0
+    return (0.5 + chances * 0.5) as f32
+
+fn fast_clock_text(ms: i64, buf: *[24]u8) -> str
+    let s = ms / 1000
+    if ms < 20000: return format(buf, "{s}.{(ms % 1000) / 100}")
+    if s >= 3600: return format(buf, "{s / 3600}:{(s / 60) % 60:02}:{s % 60:02}")
+    return format(buf, "{s / 60}:{s % 60:02}")
+
+fn fast_span_text(seconds: i64, buf: *[48]u8) -> str
+    let s = max(seconds, 0)
+    if s < 60: return format(buf, "{s} s")
+    if s < 3600: return format(buf, "{s / 60} min {s % 60} s")
+    if s < 86400: return format(buf, "{s / 3600} h {(s / 60) % 60} min")
+    return format(buf, "{s / 86400} d {(s / 3600) % 24} h")
+
+fn fast_state_word(run: *FastRun, theme: *GuiTheme) -> (str, Color)
+    if run.continuing: return ("STARTING", theme.accent)
+    if run.can_continue(): return ("STOPPED", theme.warn)
+    if run.state == FastLost: return ("ENDED", theme.loss())
+    if run.state == FastEnded
+        if run.code != 0: return ("FAILED", theme.loss())
+        return ("FINISHED", theme.muted)
+    if run.stopping: return ("STOPPING", theme.warn)
+    return ("RUNNING", theme.accent)
+
+fn fast_draw_flat(ui: *UiCanvas, look: *BoardLook, b: *FastBoard, x: f32, y: f32, size: f32)
+    let c = look.colors
+    ui.box(x, y, size, size, UiBox(fill: UiFill.solid(c.dark), radius: Vec4.splat(3.0)))
+    var line: [32]u8
+    let words = format(&line, "Move {b.plies / 2 + 1}")
+    let style = UiTextStyle(face: look.fonts.text, size: 12.0, color: c.light.with_alpha(0.75))
+    let m = ui.measure(words, style)
+    ui.text(x + (size - m.x) * 0.5, y + (size - m.y) * 0.5, words, style)
+
+fn fast_draw_sliding(ui: *UiCanvas, look: *BoardLook, b: *FastBoard, t: f32, x: f32, y: f32, size: f32)
+    var shown = b.board
+    let from = b.last.from
+    let to = b.last.to
+    let piece = shown.squares[to]
+    shown.squares[to] = NoPiece
+    draw_small_board(ui, look, &shown, b.last, x, y, size, false)
+    let cell = size / 8.0
+    let e = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
+    let fx = x + from.file as f32 * cell
+    let fy = y + (7 - from.rank as int) as f32 * cell
+    let tx = x + to.file as f32 * cell
+    let ty = y + (7 - to.rank as int) as f32 * cell
+    ui.clip_to(x, y, size, size, 3.0)
+    look.sheet.show(ui, piece, fx + (tx - fx) * e, fy + (ty - fy) * e, cell)
+    ui.unclip()
+
+fn fast_fit_name(ui: *UiCanvas, name: str, style: UiTextStyle, room: f32, buf: *[72]u8) -> str
+    if room < 10.0: return ""
+    if ui.measure(name, style).x <= room: return name
+    var flip: [64]u8
+    var space = -1
+    for i in 0..min(name.len, 60)
+        if name[i] == ' ': space = i as int
+    let text = space > 0 and space < min(name.len, 60) as int - 1 ? format(&flip, "{name[space + 1..min(name.len, 60)]} {name[0..space]}") : name[0..min(name.len, 60)]
+    var n = text.len as int
+    loop
+        while n > 1 and n < text.len and (text[n] & 0xC0) == 0x80
+            n -= 1
+        let cut = n < text.len ? format(buf, "{text[0..n]}…") : text
+        if n <= 1 or ui.measure(cut, style).x <= room: return cut
+        n -= max(n / 6, 1)
+
+fn fast_title(run: *FastRun, buf: *[200]u8) -> str
+    let a = &run.args
+    if a.engines == 2 and a.first_len > 0 and a.second_len > 0: return format(buf, "{a.first_name()} vs {a.second_name()}")
+    if a.engines > 2: return format(buf, "{a.engines} engines")
+    return format(buf, "fastchess")
+
+fn fast_about(run: *FastRun, buf: *[200]u8) -> str
+    let kind = run.args.sprt ? "SPRT" : run.tally.entrants.len > 2 ? "Round robin" : "Match"
+    let tc = run.args.tc_len > 0 ? run.args.tc_text() : "time control as set"
+    return format(buf, "{kind}  ·  {tc}  ·  {run.args.concurrency} at once")
+
+fn fast_fault_who(t: *FastTally, f: *FastFaultNote, buf: *[120]u8) -> str
+    for g in t.games
+        if g.id == f.game: return format(buf, ", {t.name(g.white)} vs {t.name(g.black)}")
+    return format(buf, "")
+
+fn fast_figure(ui: *UiCanvas, look: *BoardLook, key: int, value: str, caption: str)
+    let theme = look.theme
+    let fonts = look.fonts
+    with ui.open(UiNode(key: key, name: "fastfigure", width: UiSize.grow(), padding: Vec4(10.0, 8.0, 10.0, 8.0), gap: 2.0, box: UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(FastCardCurve), border: 1.0, border_color: theme.line)))
+        ui.label(value, UiTextStyle(face: fonts.mono, size: 14.0, color: theme.ink), UiNode(clip: true, width: UiSize.grow()))
+        ui.label(caption, UiTextStyle(face: fonts.strong, size: 9.0, color: theme.muted, tracking: 0.5), UiNode(clip: true, width: UiSize.grow()))
+
+fn fast_section(ui: *UiCanvas, look: *BoardLook, text: str)
+    ui.label(text, UiTextStyle(face: look.fonts.strong, size: 9.5, color: look.theme.muted, tracking: 0.6), UiNode(padding: Vec4(0.0, 12.0, 0.0, 2.0)))
+
+fn fast_open(path: str)
+    var buf: [800]u8
+    SDL_OpenURL(format(&buf, "file:///{path}").ptr as cstr)

@@ -1,0 +1,4 @@
+Classic pieces by Cburnett (Colin M.L. Burnett), via Wikimedia Commons, used under the BSD license in LICENSE.txt.
+The files Chess_plt45.svg to Chess_kdt45.svg, unchanged but renamed wP.svg to bK.svg, from
+https://commons.wikimedia.org/wiki/File:Chess_klt45.svg and the other eleven pages, each licensed GFDL, CC BY-SA 3.0,
+BSD or GPL at the user's choice. Snail Chess GUI takes the BSD license. Fetched 2026-11-02.

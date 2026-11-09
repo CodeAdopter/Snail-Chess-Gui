@@ -1,0 +1,130 @@
+use src/game/game
+use src/game/pgn_lexer
+
+const MaxPgnDepth = 64
+
+struct PgnRead
+    ok: bool
+    bad: str
+    end: int
+    moves: int
+
+fn read_pgn(text: str, from: int, game: *Game) -> PgnRead
+    var lex = PgnLexer(text: text, at: from)
+    var r: PgnRead
+    var value: [..]u8
+    defer value.free()
+    var stack: [MaxPgnDepth]int
+    var depth = 0
+    var cur = 0
+    var begun = false
+    var after_open = false
+    var lead: GameSpan
+    var result_read = false
+    game.reset_to_start()
+    loop
+        let before = lex.at
+        let t = lex.next()
+        if t == PgnEnd: break
+        if t == PgnTag and begun
+            lex.at = before
+            break
+        let opened = after_open
+        after_open = false
+        match t
+            PgnTag
+                unescape_tag(lex.token, &value)
+                let v = str(value[0..value.len])
+                if lex.tag_name == "FEN"
+                    var b: Board
+                    if not b.load_fen(v)
+                        r.bad = lex.token
+                        r.end = lex.at
+                        return r
+                    game.nodes[0].board = b
+                game.set_tag(lex.tag_name, v)
+            PgnComment
+                begun = true
+                if opened
+                    lead = game.joined(lead, lex.token)
+                    after_open = true
+                else: game.append_comment(cur, lex.token)
+            PgnOpen
+                if cur == 0 or depth >= MaxPgnDepth
+                    r.bad = lex.token
+                    break
+                stack[depth] = cur
+                depth += 1
+                cur = game.nodes[cur].parent
+                begun = true
+                after_open = true
+            PgnClose
+                if depth == 0
+                    r.bad = lex.token
+                    break
+                depth -= 1
+                cur = stack[depth]
+            PgnNag
+                if cur != 0: game.add_nag(cur, lex.nag)
+            PgnNumber
+                begun = true
+            PgnResult
+                if depth == 0
+                    let (res, known) = result_of_text(lex.token)
+                    if known: game.result = res
+                    result_read = true
+                    break
+            PgnSymbol
+                let (m, legal) = parse_move(&game.nodes[cur].board, lex.token)
+                if not legal
+                    r.bad = lex.token
+                    break
+                cur = game.add_move(cur, m)
+                if lead.len > 0
+                    game.nodes[cur].lead = lead
+                    lead = GameSpan(0, 0)
+                r.moves += 1
+                begun = true
+            else
+                r.bad = lex.token
+                break
+    if not result_read
+        let (res, known) = result_of_text(game.tag("Result"))
+        if known: game.result = res
+    game.at = 0
+    r.ok = r.bad.len == 0
+    r.end = lex.at
+    return r
+
+fn scan_pgn(text: str, starts: *[..]int, most: int)
+    starts.clear()
+    var lex = PgnLexer(text: text)
+    var begun = false
+    var open = false
+    var depth = 0
+    loop
+        let before = lex.at
+        let t = lex.next()
+        if t == PgnEnd: break
+        if not open
+            if starts.len >= most: return
+            starts.push(before)
+            open = true
+            begun = false
+            depth = 0
+        match t
+            PgnTag
+                if begun
+                    if starts.len >= most: return
+                    starts.push(before)
+                    begun = false
+                    depth = 0
+            PgnOpen
+                depth += 1
+                begun = true
+            PgnClose
+                depth = max(depth - 1, 0)
+            PgnResult
+                if depth == 0: open = false
+            else
+                begun = true

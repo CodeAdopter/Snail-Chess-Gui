@@ -1,0 +1,142 @@
+use engine/desktop/cpu_features
+use src/tournament/journal
+use src/tournament/event_config
+
+struct EventFault
+    game: int
+    fullmove: int
+    entrant: int
+    end: PlayEnd
+    text: [240]u8
+    text_len: int
+
+    fn reason() -> str
+        return str(text[0..text_len])
+
+fn fault_line(f: *EventFault, buf: *[400]u8) -> str
+    return format(buf, "crash {f.game} {f.fullmove} {f.entrant} {end_word(f.end)} {f.reason()}")
+
+fn read_faults(text: str, out: *[..]EventFault)
+    out.clear()
+    var from = 0
+    for i in 0..text.len
+        if text[i] != '\n': continue
+        var w = UciWords(text: text[from..i])
+        from = i as int + 1
+        if w.next() != "crash": continue
+        let (game, game_ok) = uci_number(w.next())
+        let (move, move_ok) = uci_number(w.next())
+        let (entrant, entrant_ok) = uci_number(w.next())
+        let end = end_named(w.next())
+        if not game_ok or not move_ok or not entrant_ok or end == NotEnded: continue
+        var f = EventFault(game: game as int, fullmove: move as int, entrant: entrant as int, end: end)
+        f.text_len = keep_text(w.rest(), f.text[0..240])
+        out.push(f)
+
+fn machine_line(buf: *[160]u8) -> str
+    var cpu: CpuFeatures
+    cpu.read()
+    return format(buf, "machine {max(cpu_count(), 1)} {total_memory_mb() as i64} {cpu.name()}")
+
+fn read_machines(journal: str, out: *[..]u8)
+    out.clear()
+    var from = 0
+    for i in 0..journal.len
+        if journal[i] != '\n': continue
+        var w = UciWords(text: journal[from..i])
+        from = i as int + 1
+        if w.next() != "machine": continue
+        let (threads, threads_ok) = uci_number(w.next())
+        let (memory, memory_ok) = uci_number(w.next())
+        let name = w.rest()
+        if not threads_ok or not memory_ok: continue
+        var line: [200]u8
+        let shown = format(&line, "{name.len > 0 ? name : "Unknown processor"} · {threads} threads · {(memory + 512) / 1024} GB")
+        if not holds_line(str(out[0..out.len]), shown)
+            push_text(out, shown)
+            out.push('\n')
+
+fn holds_line(text: str, line: str) -> bool
+    var from = 0
+    for i in 0..text.len
+        if text[i] != '\n': continue
+        if text[from..i] == line: return true
+        from = i as int + 1
+    return false
+
+fn compact_told(told: str, header: str, out: *[..]u8)
+    push_text(out, header)
+    out.push('\n')
+    var last_at: [2]int
+    var last_len = [-1, -1]
+    var from = 0
+    for i in 0..told.len
+        if told[i] != '\n': continue
+        let line = told[from..i]
+        let at = from + 2
+        from = i as int + 1
+        if line.len < 2: continue
+        let text = line[2..line.len]
+        let k = line[0] == 'W' ? 0 : 1
+        let positional = text.len >= 9 and text[0..9] == "position "
+        let n = last_len[k]
+        if positional and n >= 0 and text.len > n and text[n] == ' ' and text[0..n] == told[last_at[k]..last_at[k] + n]
+            out.push(line[0])
+            out.push('+')
+            push_text(out, text[n..text.len])
+        else
+            out.push(line[0])
+            out.push(' ')
+            push_text(out, text)
+        out.push('\n')
+        if positional
+            last_at[k] = at
+            last_len[k] = text.len as int
+
+fn expand_told(text: str, c: *EventConfig, out: *[..]u8)
+    var last: [2][..]u8
+    defer last[0].free()
+    defer last[1].free()
+    var from = 0
+    for i in 0..text.len
+        if text[i] != '\n': continue
+        let line = text[from..i]
+        from = i as int + 1
+        if line.len < 2: continue
+        if line[0] == 'g'
+            last[0].clear()
+            last[1].clear()
+            if out.len > 0: out.push('\n')
+            game_heading(line, c, out)
+            continue
+        let k = line[0] == 'W' ? 0 : 1
+        push_text(out, k == 0 ? "White: " : "Black: ")
+        if line[1] == '+'
+            push_text(out, str(last[k][0..last[k].len]))
+            push_text(out, line[2..line.len])
+            push_text(&last[k], line[2..line.len])
+        else
+            let sent = line[2..line.len]
+            push_text(out, sent)
+            if sent.len >= 9 and sent[0..9] == "position "
+                last[k].clear()
+                push_text(&last[k], sent)
+        out.push('\n')
+
+fn told_header(index: int, round: int, white: int, black: int, buf: *[64]u8) -> str
+    return format(buf, "game {index} {round} {white} {black}")
+
+fn game_heading(line: str, c: *EventConfig, out: *[..]u8)
+    var w = UciWords(text: line)
+    w.next()
+    let (index, index_ok) = uci_number(w.next())
+    let (round, round_ok) = uci_number(w.next())
+    let (white, white_ok) = uci_number(w.next())
+    let (black, black_ok) = uci_number(w.next())
+    if not index_ok or not round_ok or not white_ok or not black_ok: return
+    var heading: [240]u8
+    push_text(out, format(&heading, "# Game {index + 1}, round {round}: {entrant_name(c, white as int)} (White) vs {entrant_name(c, black as int)} (Black)"))
+    out.push('\n')
+
+fn entrant_name(c: *EventConfig, i: int) -> str
+    return i >= 0 and i < c.entrants.len ? c.entrants[i].name_text() : "?"

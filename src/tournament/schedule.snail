@@ -1,0 +1,77 @@
+use src/tournament/event_config
+
+struct ScheduledGame
+    white: int
+    black: int
+    round: int
+    opening: int
+
+fn make_schedule(c: *EventConfig, into: *[..]ScheduledGame)
+    into.clear()
+    var pairs: [..]Pairing
+    defer pairs.free()
+    pairings_of(c, &pairs)
+    var rounds = 0
+    for p in pairs
+        rounds = max(rounds, p.round + 1)
+    for k in 0..c.games_per_pairing / 2
+        for i in 0..pairs.len
+            let p = pairs[i]
+            let opening = c.reuse_openings ? k as int : k as int * pairs.len as int + i as int
+            let round = k as int * rounds + p.round + 1
+            var first = p.a
+            var second = p.b
+            if (k as int + p.round) % 2 == 1
+                first = p.b
+                second = p.a
+            into.push(ScheduledGame(first, second, round, opening))
+            into.push(ScheduledGame(second, first, round, opening))
+
+fn openings_needed(c: *EventConfig) -> int
+    var pairs: [..]Pairing
+    defer pairs.free()
+    pairings_of(c, &pairs)
+    let per = c.games_per_pairing / 2
+    return c.reuse_openings ? per : per * pairs.len as int
+
+struct Pairing
+    a: int
+    b: int
+    round: int
+
+fn pairings_of(c: *EventConfig, into: *[..]Pairing)
+    into.clear()
+    let n = c.entrants.len as int
+    if c.format == HeadToHead
+        into.push(Pairing(0, 1, 0))
+        return
+    if c.format == Gauntlet
+        var round = 0
+        for i in 0..n
+            if i == c.challenger: continue
+            into.push(Pairing(c.challenger, i as int, round))
+            round += 1
+        return
+    let m = n % 2 == 0 ? n : n + 1
+    var circle: [..]int
+    defer circle.free()
+    for i in 0..m
+        circle.push(i as int)
+    for round in 0..m - 1
+        for i in 0..m / 2
+            let a = circle[i]
+            let b = circle[m - 1 - i]
+            if a < n and b < n: into.push(Pairing(min(a, b), max(a, b), round as int))
+        let last = circle[m - 1]
+        var k = m - 1
+        while k > 1
+            circle[k] = circle[k - 1]
+            k -= 1
+        circle[1] = last
+
+fn games_in(c: *EventConfig) -> int
+    let n = c.entrants.len as int
+    match c.format
+        HeadToHead: return c.games_per_pairing
+        Gauntlet: return (n - 1) * c.games_per_pairing
+    return n * (n - 1) / 2 * c.games_per_pairing

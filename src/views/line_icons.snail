@@ -1,0 +1,89 @@
+use engine/ui/ui_svg
+use engine/ui/ui_layout
+
+enum LineIcon: u8
+    IconTrophy
+    IconBracket
+    IconChip
+    IconBook
+    IconPerson
+    IconGear
+    IconList
+    IconBullet
+    IconBolt
+    IconClock
+    IconHourglass
+    IconInfinity
+    IconDatabase
+    IconPalette
+    IconArrow
+    IconSparkle
+    IconMonitor
+    IconSliders
+    IconGrid
+    IconPawn
+    IconImage
+    IconCube
+    IconKing
+    IconHouse
+    IconFlip
+    IconPencil
+    IconPaste
+    IconCopy
+    IconPlay
+    IconPlus
+    IconUndo
+    IconHalf
+    IconFlag
+    IconSearch
+    IconPause
+    IconStop
+    IconFile
+    IconDownload
+    IconCloud
+
+const LineIconBox: f32 = 24.0
+const LineIconWeight: f32 = 1.7
+const LineIconPaths = ["M7 4h10v5a5 5 0 0 1-10 0z M7 6H4.5v1.5a3.5 3.5 0 0 0 3.5 3.5 M17 6h2.5v1.5a3.5 3.5 0 0 1-3.5 3.5 M12 14v3.5 M8 20.5h8", "M3 5h4.5v14H3 M7.5 12h4 M17.5 8v8 M13.5 12h8", "M7 7h10v10H7z M10 10h4v4h-4z M10 3v4 M14 3v4 M10 17v4 M14 17v4 M3 10h4 M3 14h4 M17 10h4 M17 14h4", "M12 7C10 5.5 7 5 3.5 5.5v13C7 18 10 18.5 12 20c2-1.5 5-2 8.5-1.5v-13C17 5 14 5.5 12 7z M12 7v13", "M12 12a4 4 0 1 0 0-8a4 4 0 1 0 0 8z M4.5 20.5c.8-3.6 3.9-5.5 7.5-5.5s6.7 1.9 7.5 5.5", "", "M9 6h11 M9 12h11 M9 18h11 M4 6h1.5 M4 12h1.5 M4 18h1.5", "M9.5 18.5l-4-4l8.5-8.5c2-2 6-2.5 6-2.5s-.5 4-2.5 6z M7.5 16.5l-3.5 3.5 M14 7l3 3", "M13.5 3L5.5 13.5h6l-1 7.5l8-10.5h-6z", "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 1 0 0-17z M12 7.5V12l3 2", "M6.5 3.5h11 M6.5 20.5h11 M8 3.5c0 4 1.5 6 4 8.5c2.5-2.5 4-4.5 4-8.5 M8 20.5c0-4 1.5-6 4-8.5c2.5 2.5 4 4.5 4 8.5", "M12 12c-2-2.7-3.5-4-5.5-4a4 4 0 1 0 0 8c2 0 3.5-1.3 5.5-4c2-2.7 3.5-4 5.5-4a4 4 0 1 1 0 8c-2 0-3.5-1.3-5.5-4z", "M4 6.5a8 3 0 1 0 16 0a8 3 0 1 0-16 0z M4 6.5v11a8 3 0 0 0 16 0v-11 M4 12a8 3 0 0 0 16 0", "M12 3.5a8.5 8.5 0 1 0 0 17c1.1 0 1.7-.8 1.7-1.6c0-.5-.2-.8-.5-1.1c-.3-.3-.5-.7-.5-1.1c0-.9.7-1.6 1.6-1.6h1.9a4.3 4.3 0 0 0 4.3-4.3c0-4.1-3.8-7.3-8.5-7.3z M7.5 11a1 1 0 1 0 0 .01z M10 7.5a1 1 0 1 0 0 .01z M14.5 7.5a1 1 0 1 0 0 .01z", "M5 19L19 5 M10 5h9v9", "M11 3c.6 4.2 2.8 6.4 7 7c-4.2.6-6.4 2.8-7 7c-.6-4.2-2.8-6.4-7-7c4.2-.6 6.4-2.8 7-7z M19 15v5 M16.5 17.5h5", "M3 4.5h18v11.5H3z M8 20.5h8 M12 16v4.5", "M4 7h8.5 M17.5 7H20 M15 4.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5z M4 17h2.5 M11.5 17H20 M9 14.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5z", "M4 4h16v16H4z M4 9.3h16 M4 14.7h16 M9.3 4v16 M14.7 4v16", "M12 3.5a2.6 2.6 0 1 0 0 5.2a2.6 2.6 0 1 0 0-5.2z M9.3 10.5h5.4 M10.6 10.5c0 3.4-1 5.8-3 7.6h8.8c-2-1.8-3-4.2-3-7.6 M6 20.5h12", "M3.5 5h17v14h-17z M3.5 16l5-5l4 4l3-3l5 5 M15.5 7.5a1.5 1.5 0 1 0 0 3a1.5 1.5 0 1 0 0-3z", "M12 3l8 4.5v9l-8 4.5l-8-4.5v-9z M4 7.5l8 4.5l8-4.5 M12 12v9", "M12 2.5v4.5 M10 4.5h4 M8.5 9h7l-1.6 8.5H10.1z M6.5 20.5h11 M9 17.5h6", "M4 11l8-7l8 7 M6 9.5V20h12V9.5 M10 20v-5.5h4V20", "M8 20V4 M4 8l4-4l4 4 M16 4v16 M12 16l4 4l4-4", "M4 20l1-4L15.6 5.4a2.2 2.2 0 0 1 3 3L8 19z M13.5 7.5l3 3", "M9 4.5H6v16h12v-16h-3 M9 3h6v3H9z M9.5 11h5 M9.5 15h5", "M9 9h11v11H9z M15 9V4H4v11h5", "M7.5 4.5v15l12-7.5z", "M12 5v14 M5 12h14", "M9 14L4 9l5-5 M4 9h10.5a5.5 5.5 0 0 1 0 11H11", "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 1 0 0-17z M12 3.5v17", "M5 21V4 M5 4.5c4-2 7 2 14 0v9c-7 2-10-2-14 0", "M11 4a7 7 0 1 0 0 14a7 7 0 1 0 0-14z M16 16l4.5 4.5", "M8.5 5v14 M15.5 5v14", "M6 6h12v12H6z", "M14 3.5H6v17h12V7.5z M14 3.5v4h4 M12 10.5v6 M9 13.5h6", "M12 4v11 M7.5 10.5L12 15l4.5-4.5 M4.5 19.5h15", "M7 18.5h10.5a3.8 3.8 0 0 0 .4-7.6a6 6 0 0 0-11.5 1.6a3 3 0 0 0 .6 6z"]
+const LineIconCount = LineIconPaths.len
+
+struct LineIcons
+    paths: [LineIconCount]UiPath
+    made: bool
+
+    fn make()
+        if made: return
+        for i in 0..LineIconCount
+            let p = &paths[i]
+            p.tolerance = 0.04
+            if i == IconGear as int: gear_path(p)
+            else: p.svg(LineIconPaths[i])
+        made = true
+
+    fn show(ui: *UiCanvas, icon: LineIcon, size: f32, color: Color, node: UiNode = UiNode())
+        make()
+        ui.drawing(&paths[icon as int], LineIconBox, LineIconWeight, size, color, node)
+
+    fn path(icon: LineIcon) -> *UiPath
+        make()
+        return &paths[icon as int]
+
+    fn release()
+        for i in 0..LineIconCount
+            paths[i].free_all()
+
+fn gear_path(p: *UiPath)
+    let teeth = 8
+    let outer: f32 = 10.0
+    let inner: f32 = 7.4
+    let step = 6.2831855 / teeth as f32
+    for k in 0..teeth
+        let a = k as f32 * step
+        let corners = [Vec2(a - step * 0.3, inner), Vec2(a - step * 0.16, outer), Vec2(a + step * 0.16, outer), Vec2(a + step * 0.3, inner)]
+        for j, c in corners
+            let x = 12.0 + cos(c.x) * c.y
+            let y = 12.0 + sin(c.x) * c.y
+            if k == 0 and j == 0: p.move_to(x, y)
+            else: p.line_to(x, y)
+    p.close()
+    p.circle(12.0, 12.0, 3.0)

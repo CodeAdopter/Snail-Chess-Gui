@@ -1,0 +1,3 @@
+Studio pieces, Snail Chess GUI's own, drawn by tools/piece_sets/studio.py with a rim of each piece's own
+colour around its line. tools/pieces.py stands them in the square as it stands every set. Dedicated to the
+public domain under CC0 1.0 Universal, https://creativecommons.org/publicdomain/zero/1.0/

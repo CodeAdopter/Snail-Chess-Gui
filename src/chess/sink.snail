@@ -1,0 +1,84 @@
+use chess/primitives
+
+enum GenMode: u8
+    WriteAll
+    WriteTactical
+    CountAll
+    FindAny
+
+    @inline
+    fn writes_quiets() -> bool
+        return self == WriteAll
+
+    @inline
+    fn writes_tactical() -> bool
+        return self == WriteAll or self == WriteTactical
+
+    @inline
+    fn stops_at_first() -> bool
+        return self == FindAny
+
+    @inline
+    fn quiet_existence_enough() -> bool
+        return self == WriteTactical or self == FindAny
+
+    @inline
+    fn writes(kind: MoveKind) -> bool
+        return kind >= Capture ? writes_tactical() : writes_quiets()
+
+struct MoveSink
+    buffer: *Move
+    written: int
+    counted: int
+
+    @inline
+    fn found_any() -> bool
+        return written | counted != 0
+
+    @inline
+    fn add_piece_moves[mode: GenMode](from: Square, targets: Bitboard, kind: MoveKind)
+        if not mode.writes(kind)
+            counted += targets.count
+            return
+        let shared = from | kind << 12
+        var n = written
+        for to in targets
+            buffer[n] = (shared | to << 6) as Move
+            n += 1
+        written = n
+
+    @inline
+    fn add_pawn_moves[mode: GenMode](targets: Bitboard, step: int, kind: MoveKind)
+        if not mode.writes(kind)
+            counted += targets.count
+            return
+        let kind_bits = kind << 12
+        var n = written
+        for to in targets
+            buffer[n] = (kind_bits | to << 6 | to - step) as Move
+            n += 1
+        written = n
+
+    @inline
+    fn add_promotions[mode: GenMode](targets: Bitboard, step: int, capture: bool)
+        if not mode.writes_tactical
+            counted += 4 * targets.count
+            return
+        let knight_bits = (capture ? CapturePromoteKnight : PromoteKnight) << 12
+        var n = written
+        for to in targets
+            let to_knight = knight_bits | to << 6 | to - step
+            buffer[n] = (to_knight | 3 << 12) as Move
+            buffer[n + 1] = to_knight as Move
+            buffer[n + 2] = (to_knight | 2 << 12) as Move
+            buffer[n + 3] = (to_knight | 1 << 12) as Move
+            n += 4
+        written = n
+
+    @inline
+    fn add_move[mode: GenMode](from: Square, to: Square, kind: MoveKind)
+        if not mode.writes(kind)
+            counted += 1
+            return
+        buffer[written] = Move(from, to, kind)
+        written += 1

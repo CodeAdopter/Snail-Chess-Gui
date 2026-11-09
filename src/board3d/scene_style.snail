@@ -1,0 +1,101 @@
+enum BoardStyle: u8
+    WalnutBoard
+    TournamentBoard
+    MarbleBoard
+    GlassBoard
+    BurlBoard
+    VinylBoard
+
+const BoardStyles = 6
+const BoardStyleWords = ["walnut", "tournament", "marble", "glass", "burl", "vinyl"]
+const BoardStyleLabels = ["Walnut and maple", "Ebony tournament", "Marble", "Etched glass", "Burl and bird's-eye", "Club roll-up mat"]
+
+enum SetStyle: u8
+    WoodSet
+    MarbleSet
+    GlassSet
+    MetalSet
+    GooSet
+    PaperSet
+
+const SetStyles = 6
+const SetStyleWords = ["wood", "marble", "glass", "metal", "goo", "paper"]
+const SetStyleLabels = ["Boxwood and rosewood", "Carrara and Marquina", "Crystal and smoke", "Brass and pewter", "Goo", "Folded paper"]
+
+enum ClockStyle: u8
+    WalnutClock
+    AnalogClock
+    BlackClock
+
+const ClockStyles = 3
+const ClockStyleWords = ["walnut", "analog", "black"]
+const ClockStyleLabels = ["Walnut digital", "Twin dial", "Tournament digital"]
+
+enum CardStyle: u8
+    PaperCard
+    SlateCard
+    KraftCard
+    NavyCard
+    OxbloodCard
+
+const CardStyles = 5
+const CardStyleWords = ["paper", "slate", "kraft", "navy", "oxblood"]
+const CardStyleLabels = ["Cream", "Slate", "Kraft", "Navy", "Oxblood"]
+const CardColors: [5]u32 = [0xF2EEE4, 0x272A2E, 0xC6A57C, 0x1E2A44, 0x5B1F24]
+
+enum PlateStyle: u8
+    FoldedPlate
+    BlockPlate
+    StandPlate
+
+const PlateStyles = 3
+const PlateStyleWords = ["card", "block", "stand"]
+const PlateStyleLabels = ["Folded card", "Walnut block", "Tournament stand"]
+
+enum RoomStyle: u8
+    NoRoom
+    CozyRoom
+    ParkRoom
+    DenRoom
+    MarsRoom
+
+const RoomStyles = 5
+const RoomStyleWords = ["none", "library", "park", "bedroom", "mars"]
+const RoomStyleLabels = ["Empty", "Library", "Park", "Room", "Mars"]
+
+enum FeltStyle: u8
+    GreenFelt
+    VermilionFelt
+    NavyFelt
+    BlackFelt
+    NoFelt
+
+const FeltStyles = 5
+const FeltStyleWords = ["green", "vermilion", "navy", "black", "none"]
+const FeltStyleLabels = ["Baize green", "Vermilion", "Navy", "Black", "None"]
+const FeltColors: [5]u32 = [0x2B6A44, 0xC23A20, 0x24325C, 0x1D1C1E, 0]
+
+struct SceneStyle
+    board: BoardStyle
+    set: SetStyle
+    clock: ClockStyle
+    card: CardStyle
+    room: RoomStyle
+    felt: FeltStyle
+    sideways: bool
+    plate: PlateStyle
+    clock_left: bool
+
+    fn key() -> u64
+        return (board as u64) | (set as u64) << 8 | (clock as u64) << 16 | (card as u64) << 24 | (room as u64) << 32 | (felt as u64) << 40 | ((sideways ? 1 : 0) as u64) << 48 | ((clock_left ? 1 : 0) as u64) << 49 | (plate as u64) << 52
+
+fn style_named(words: []str, word: str) -> int
+    for i in 0..words.len
+        if words[i] == word: return i as int
+    return 0
+
+fn board_mirrors(b: BoardStyle) -> bool
+    return b == MarbleBoard or b == GlassBoard
+
+fn board_depth(b: BoardStyle) -> f32
+    return b == VinylBoard ? 0.012 : 0.32

@@ -1,0 +1,138 @@
+use engine/desktop/desktop_app
+use engine/ui/ui_layer
+use src/theme/fonts
+use src/theme/theme
+use src/game/game_report
+
+const EvalGraphLeast = 12
+
+struct EvalGraph
+    layer: UiLayer
+    ready: bool
+    path: UiPath
+    line: [..]int
+
+    fn draw(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, x: f32, y: f32, w: f32, h: f32, empty: str) -> int
+        let ui = &app.ui
+        if w < 40.0 or h < 30.0: return -1
+        gather(game)
+        var known = 0
+        var shown = 0
+        for k in 0..line.len
+            if game.nodes[line[k]].eval_depth > 0: known += 1
+            if line[k] == game.at: shown = k as int
+        if known == 0
+            ui.text_box(x, y + h * 0.5 - 18.0, w, 36.0, empty, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+            return -1
+        let w_px = max(floor(w * app.scale) as int, 1)
+        let h_px = max(floor(h * app.scale) as int, 1)
+        prepare(app, theme, game, w_px, h_px)
+        let tw = layer.texture.width as f32
+        let th = layer.texture.height as f32
+        layer.show(ui, x, y, w, h, Vec4(0.0, 0.0, w_px as f32 / tw, h_px as f32 / th))
+        let sx = x + x_of(shown, w)
+        ui.box(sx - 0.75, y, 1.5, h, UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.5))))
+        let n = &game.nodes[game.at]
+        if n.eval_depth > 0: ui.circle(sx, y + y_of(n.eval_cp as int, h), 3.5, theme.accent)
+        return hover(app, theme, fonts, game, x, y, w, h)
+
+    fn gather(game: *Game)
+        line.clear()
+        var i = game.at
+        while i != NoNode
+            line.push(i)
+            i = game.nodes[i].parent
+        let back = line.len as int
+        for k in 0..back / 2
+            let t = line[k]
+            line[k] = line[back - 1 - k]
+            line[back - 1 - k] = t
+        i = game.nodes[game.at].first
+        while i != NoNode
+            line.push(i)
+            i = game.nodes[i].first
+
+    fn prepare(app: *DesktopApp, theme: *GuiTheme, game: *Game, w: int, h: int)
+        var key = hash_word((theme.name as u64) << 40 | (pack_color(theme.accent) as u64) << 8, (w as u64) << 20 | h as u64)
+        for i in line
+            let n = &game.nodes[i]
+            key = hash_word(key, i as u64 | (n.eval_cp as u32 as u64) << 24 | (n.eval_depth > 0 ? 1 : 0) as u64 << 60)
+        if not ready
+            layer.init(&app.gpu, &app.ui_gpu, max(w, 512), max(h, 128), room: 64, path_room: 65536, writing: false)
+            ready = true
+        elif w > layer.texture.width or h > layer.texture.height
+            layer.resize(&app.gpu, max(w, layer.texture.width), max(h, layer.texture.height))
+        let c = layer.begin(key)
+        if not c: return
+        let fw = w as f32
+        let fh = h as f32
+        c.line(0.0, fh * 0.5, fw, fh * 0.5, app.scale, theme.line, CapButt)
+        path.clear()
+        var first_x: f32 = -1.0
+        var last_x: f32 = 0.0
+        for k in 0..line.len
+            let n = &game.nodes[line[k]]
+            if n.eval_depth == 0: continue
+            let px = x_of(k as int, fw)
+            let py = y_of(n.eval_cp as int, fh)
+            if first_x < 0.0
+                first_x = px
+                path.move_to(px, fh)
+            path.line_to(px, py)
+            last_x = px
+        path.line_to(last_x, fh)
+        path.close()
+        c.fill_path(&path, theme.ink.with_alpha(0.1))
+        path.clear()
+        var points = 0
+        var at = Vec2(0.0, 0.0)
+        for k in 0..line.len
+            let n = &game.nodes[line[k]]
+            if n.eval_depth == 0: continue
+            at = Vec2(x_of(k as int, fw), y_of(n.eval_cp as int, fh))
+            if points > 0: path.line_to(at.x, at.y)
+            else: path.move_to(at.x, at.y)
+            points += 1
+        if points == 1: c.circle(at.x, at.y, 2.5 * app.scale, theme.accent)
+        else: c.stroke_path(&path, 1.5 * app.scale, theme.accent, JoinRound, CapRound)
+
+    fn x_of(k: int, w: f32) -> f32
+        let span = max(line.len as int - 1, EvalGraphLeast)
+        return k as f32 / span as f32 * (w - 6.0) + 3.0
+
+    fn y_of(cp: int, h: f32) -> f32
+        return (1.0 - (winning_chances(cp) + 1.0) * 0.5) * (h - 6.0) + 3.0
+
+    fn hover(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, x: f32, y: f32, w: f32, h: f32) -> int
+        let ui = &app.ui
+        let o = ui.open(UiNode(name: "evalplot", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), hit: true))
+        let hv = ui.interact(o.id, false)
+        ui.close()
+        if not hv.hovered or line.len < 2: return -1
+        let mouse = app.pointer.mouse.x - x
+        var best = 1
+        var gap: f32 = 1.0e9
+        for k in 1..line.len
+            let d = abs(x_of(k as int, w) - mouse)
+            if d < gap
+                gap = d
+                best = k as int
+        let n = &game.nodes[line[best]]
+        let before = &game.nodes[line[best - 1]].board
+        let mx = x + x_of(best, w)
+        ui.box(mx - 0.5, y, 1.0, h, UiBox(fill: UiFill.solid(theme.muted.with_alpha(0.6))))
+        var text: [64]u8
+        var said: [24]u8
+        let dots = before.side == White ? "." : "..."
+        let value = n.eval_depth > 0 ? node_eval_text(n, &said) : "–"
+        let label = format(&text, "{before.fullmove}{dots} {n.san_text()}  {value}")
+        let lx = clamp(mx + 6.0, x, x + w - 130.0)
+        ui.text(lx, y + 2.0, label, UiTextStyle(face: fonts.strong, size: 11.5, color: theme.ink))
+        app.cursor = SDL_SYSTEM_CURSOR_POINTER
+        return hv.clicked ? line[best] : -1
+
+    fn release(gpu: *Gpu)
+        if ready: layer.release(gpu)
+        ready = false
+        path.free_all()
+        line.free()

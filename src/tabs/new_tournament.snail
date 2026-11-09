@@ -1,0 +1,609 @@
+use engine/desktop/command_bar
+use src/tournament/resources
+use src/tournament/schedule
+use src/views/engine_picker
+use src/views/rail
+use src/views/eval_range
+
+const DraftSteps = ["Engines", "Format", "Book"]
+const DraftAbout = ["Choose engines, profiles and options for this tournament.", "Set the format, time control, resource usage and game adjudication rules.", "Choose starting positions. Each opening is played twice, with colours reversed."]
+const DraftFormats = ["Round robin", "Gauntlet", "Head-to-head"]
+const DraftClocks = ["Base + increment", "Moves in time", "Time per move", "Depth", "Nodes"]
+const DraftBooks = ["No book", "From the library", "Consensus"]
+const DraftBooksAbout = ["Start every game from the standard starting position.", "Use openings from a book in your library.", "Generate openings that every participating engine approves."]
+const DraftRail: f32 = 300.0
+
+struct TournamentDraft
+    config: EventConfig
+    step: int
+    ready: bool
+    name: UiEditText
+    minutes: UiEditText
+    increment: UiEditText
+    moves: UiEditText
+    move_seconds: UiEditText
+    depth: UiEditText
+    nodes: UiEditText
+    resign_cp: UiEditText
+    resign_moves: UiEditText
+    draw_cp: UiEditText
+    draw_moves: UiEditText
+    draw_after: UiEditText
+    seed: UiEditText
+    margin: UiEditText
+    all_threads: UiEditText
+    all_hash: UiEditText
+    entrant_names: [..]str
+    changing: int = -1
+    change_edits: [..]UiEditText
+    free_mb: i64
+    renamed: [..]u8
+    book_search: UiEditText
+    consensus: BookEntry
+    band_low: UiEditText
+    band_high: UiEditText
+    margin_cp: UiEditText
+    tries: UiEditText
+    both: bool
+    seed_choice: int
+    seed_names: [..]str
+    seed_ids: [..]int
+    picker: EnginePicker
+    swapping: int = -1
+    kit: SettingsKit
+
+    fn start(lib: *EngineLibrary)
+        ready = true
+        free_mb = free_memory_mb() as i64
+        config.set_name("New tournament")
+        config.control.base_ms = 60000
+        config.control.increment_ms = 1000
+        var r = SplitMix64(state: now_ns() as u64)
+        config.seed = r.next()
+        let first = lib.chosen_id()
+        var second = first
+        for e in lib.entries
+            if e.id != first and second == first: second = e.id
+        config.add_entrant(first, 0, "")
+        config.add_entrant(second, 0, "")
+        rename(lib)
+        var t: [24]u8
+        var a: [16]u8
+        name.set(config.name_text())
+        minutes.set(amount_text(config.control.base_ms, 60000, &a))
+        increment.set(amount_text(config.control.increment_ms, 1000, &a))
+        moves.set(format(&t, "{config.control.moves}"))
+        move_seconds.set(amount_text(config.control.move_ms, 1000, &a))
+        depth.set(format(&t, "{config.control.depth}"))
+        nodes.set(format(&t, "{config.control.nodes}"))
+        let j = &config.adjudication
+        resign_cp.set(format(&t, "{j.resign_cp}"))
+        resign_moves.set(format(&t, "{j.resign_moves}"))
+        draw_cp.set(format(&t, "{j.draw_cp}"))
+        draw_moves.set(format(&t, "{j.draw_moves}"))
+        draw_after.set(format(&t, "{j.draw_after}"))
+        seed.set(format(&t, "{config.seed:016X}"))
+        margin.set(format(&t, "{config.margin_ms}"))
+        let k = &consensus
+        k.band_low = 50
+        k.band_high = 100
+        k.depth = 10
+        k.agree_depth = 12
+        k.tries = 100
+        band_low.set("50")
+        band_high.set("100")
+        both = true
+        margin_cp.set(format(&t, "{k.margin}"))
+        tries.set(format(&t, "{k.tries}"))
+
+    fn rename(lib: *EngineLibrary)
+        let c = &config
+        for i in 0..c.entrants.len
+            let e = &c.entrants[i]
+            let entry = lib.find(e.engine_id)
+            let profile = entry ? entry.profile(e.profile_id) : null
+            renamed.clear()
+            push_text(&renamed, entry ? entry.display_name() : "Engine")
+            if profile
+                push_text(&renamed, " · ")
+                push_text(&renamed, profile.name_text())
+            var same = 0
+            for k in 0..i
+                if c.entrants[k].engine_id == e.engine_id and c.entrants[k].profile_id == e.profile_id: same += 1
+            if same > 0
+                var n: [16]u8
+                push_text(&renamed, format(&n, " {same + 1}"))
+            set_text(&e.name, str(renamed[0..renamed.len]))
+
+    fn draw(app: *DesktopApp, desk: *DesktopLook, look: *BoardLook, icons: *LineIcons, lib: *EngineLibrary, books: *BookLibrary) -> bool
+        let ui = &app.ui
+        if not ready: start(lib)
+        let rail_w = list_rail_width(ui) + DraftRail - RailWide
+        command_bar_rail(app, desk, rail_w, PageCurve)
+        let go = rail(app, look, lib, books, rail_w)
+        kit = SettingsKit(ui, look.theme, look.fonts, page_column(ui, rail_w), 0, 0.0)
+        with page_room(ui, "draft", step, rail_w)
+            tabs(ui, look, books)
+            ui.paragraph(DraftAbout[step], UiTextStyle(face: look.fonts.text, size: 13.0, color: look.theme.muted), UiNode(width: UiSize.grow(), padding: Vec4(2.0, 14.0, 0.0, 2.0)))
+            match step
+                0: engines(ui, look, lib)
+                1: format_step(ui, look, lib)
+                else: book(ui, look, icons, books)
+            with page_actions(ui, 9, 0.0)
+                if step > 0 and ui.button("Back"): step -= 1
+                ui.spacer()
+                if step < 2 and ui.button("Next", true)
+                    step += 1
+                    free_mb = free_memory_mb() as i64
+        draw_changes(app, look, lib)
+        if picker.draw(ui, look, lib, swapping >= 0 and swapping < config.entrants.len ? config.entrants[swapping].engine_id : 0, swapping >= 0 and swapping < config.entrants.len ? config.entrants[swapping].profile_id : -1): take_pick(lib)
+        return go
+
+    fn rail(app: *DesktopApp, look: *BoardLook, lib: *EngineLibrary, books: *BookLibrary, rail_w: f32) -> bool
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let c = &config
+        var go = false
+        var line: [200]u8
+        with rail_room(ui, "draftrail", rail_w, 2.0)
+            rail_group(ui, theme, fonts, 1, "TOURNAMENT SUMMARY", true)
+            with ui.open(UiNode(name: "draftsummary", width: UiSize.grow(), padding: Vec4(12.0, 2.0, 8.0, 0.0), gap: 6.0))
+                ui.paragraph(c.name_text(), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink), UiNode(width: UiSize.grow()))
+                summary_line(ui, theme, fonts, 2, format(&line, "{games_in(c)} games · {c.games_per_pairing} per pairing"))
+                summary_line(ui, theme, fonts, 3, format(&line, "Concurrent games: {c.at_once}"))
+                let u = resources_of(c, lib, free_mb)
+                summary_line(ui, theme, fonts, 4, format(&line, "{u.threads} thread{u.threads == 1 ? "" : "s"}, {u.hash_mb} MB of hash"))
+                let warn = UiTextStyle(face: fonts.text, size: 12.0, color: theme.warn)
+                let b = c.book == CollectionBook ? books.find(c.book_id) : null
+                let needed = openings_needed(c)
+                if b and b.positions < needed: ui.paragraph(format(&line, "{b.name_text()} has {b.positions} openings, but {needed} are needed. Some openings will be reused."), warn, UiNode(width: UiSize.grow()))
+                if u.threads_over: ui.paragraph(format(&line, "{u.threads} threads exceed the {u.cores} available CPU cores. Engines may run more slowly."), warn, UiNode(width: UiSize.grow()))
+                if u.hash_over: ui.paragraph(format(&line, "Engines need {u.hash_mb} MB of hash memory, but only {u.free_mb} MB is currently free."), warn, UiNode(width: UiSize.grow()))
+            ui.spacer()
+            var problem = c.problem()
+            if problem.len == 0: problem = book_problem(books)
+            with ui.open(UiNode(name: "draftgo", width: UiSize.grow(), padding: Vec4(4.0, 0.0, 4.0, 0.0), gap: 8.0))
+                if problem.len > 0: ui.paragraph(problem, UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn), UiNode(width: UiSize.grow()))
+                else: ui.paragraph("Ready to start.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.grow()))
+                if ui.button("Start tournament", true, UiNode(width: UiSize.grow(), height: UiSize.fixed(36.0))) and problem.len == 0: go = true
+        return go
+
+    fn tabs(ui: *UiCanvas, look: *BoardLook, books: *BookLibrary)
+        let theme = look.theme
+        let fonts = look.fonts
+        let c = &config
+        var tc: [32]u8
+        var number: [8]u8
+        with ui.open(UiNode(name: "drafttabs", width: UiSize.grow()))
+            with ui.open(UiNode(name: "drafttabrow", flow: FlowRow, width: UiSize.grow(), gap: 4.0))
+                for i in 0..DraftSteps.len
+                    var about: [120]u8
+                    var said = ""
+                    if i == 0: said = format(&about, "{c.entrants.len} engine{c.entrants.len == 1 ? "" : "s"}")
+                    elif i == 1: said = format(&about, "{format_label(c.format)}  ·  {c.control.text(&tc)}")
+                    else: said = book_words(&about)
+                    let o = ui.open(UiNode(key: i as int, name: "drafttab", width: UiSize.grow(), hit: true, focusable: true))
+                    let h = ui.interact(o.id)
+                    let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 22.0)
+                    let on = ui.spring(o.id, 1, step == i ? 1.0 : 0.0, 22.0)
+                    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.surface.with_alpha(0.8 * max(lit, on * 0.6))), radius: Vec4(10.0, 10.0, 0.0, 0.0))
+                    with ui.open(UiNode(name: "drafttabhead", flow: FlowRow, width: UiSize.grow(), padding: Vec4(14.0, 12.0, 14.0, 12.0), gap: 12.0, align: Vec2(0.0, 0.5)))
+                        with ui.open(UiNode(width: UiSize.fixed(26.0), height: UiSize.fixed(26.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.12 + 0.88 * on)), radius: Vec4.splat(13.0))))
+                            ui.label(format(&number, "{i + 1}"), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.accent.lerp(theme.page, on)))
+                        with ui.open(UiNode(width: UiSize.grow(), gap: 2.0))
+                            ui.label(DraftSteps[i], UiTextStyle(face: fonts.strong, size: 14.0, color: theme.muted.lerp(theme.ink, max(on, lit))), UiNode(width: UiSize.grow(), clip: true))
+                            ui.label(said, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(width: UiSize.grow(), clip: true))
+                    ui.leaf(UiNode(name: "drafttabmark", width: UiSize.grow(), height: UiSize.fixed(2.0), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(on)), radius: Vec4.splat(1.0))))
+                    ui.close()
+                    if h.clicked
+                        step = i as int
+                        free_mb = free_memory_mb() as i64
+            ui.leaf(UiNode(name: "drafttabline", width: UiSize.grow(), height: UiSize.fixed(1.0), box: UiBox(fill: UiFill.solid(theme.line))))
+
+    fn book_words(buf: *[120]u8) -> str
+        let c = &config
+        if c.book == NoEventBook: return "No book"
+        if c.book == ConsensusBook: return format(buf, "Consensus, {openings_needed(c)} opening{openings_needed(c) == 1 ? "" : "s"}")
+        if c.book_id > 0: return format(buf, "{c.book_name_text()}")
+        return "Not selected"
+
+    fn summary_line(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, key: int, text: str)
+        with ui.open(UiNode(key: key, flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+            ui.leaf(UiNode(width: UiSize.fixed(6.0), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(3.0))))
+            ui.paragraph(text, UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(width: UiSize.grow()))
+
+    fn engines(ui: *UiCanvas, look: *BoardLook, lib: *EngineLibrary)
+        let theme = look.theme
+        let fonts = look.fonts
+        let c = &config
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        with kit.card(1, "Tournament")
+            with kit.row(10, "Name", "Used for the tournament folder, games and standings.")
+                if ui.text_field("draftname", &name, "Tournament", UiNode(width: UiSize.fixed(KitControl))) and name.len > 0: c.set_name(name.text())
+        var line: [80]u8
+        with kit.heading(2, "Engines", format(&line, "{c.entrants.len} entrants. Add the same engine twice for self-play."))
+            if ui.button("Add engines", true)
+                swapping = -1
+                fill_counts(lib)
+                picker.open_adding()
+        var removed = -1
+        with ui.open(UiNode(name: "entrants", width: UiSize.grow(), padding: Vec4(0.0, 10.0, 0.0, 0.0), gap: 8.0))
+            if c.entrants.len == 0: ui.paragraph("No engines selected. Click Add engines to choose from your library.", note, UiNode(width: UiSize.grow(), padding: Vec4(2.0, 0.0, 0.0, 0.0)))
+            for i in 0..c.entrants.len
+                let e = &c.entrants[i]
+                let entry = lib.find(e.engine_id)
+                let profile = entry ? entry.profile(e.profile_id) : null
+                let two = kit.narrow()
+                with ui.open(UiNode(key: i, name: "entrant", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(two ? 96.0 : 56.0), padding: Vec4(12.0, two ? 11.0 : 0.0, 12.0, 0.0), gap: 12.0, align: Vec2(0.0, two ? 0.0 : 0.5), box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(10.0), border: 1.0, border_color: theme.line))))
+                    var number: [8]u8
+                    with ui.open(UiNode(width: UiSize.fixed(28.0), height: UiSize.fixed(28.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.14)), radius: Vec4.splat(14.0))))
+                        ui.label(format(&number, "{i + 1}"), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.accent))
+                    if entry
+                        if engine_choice_button(ui, look, "engine", 0, entry.display_name(), profile ? profile.name_text() : "Default profile", picker.shown and swapping == i, UiNode(width: UiSize.grow(1.0, 0.0, 380.0)))
+                            swapping = i as int
+                            picker.open()
+                    else: ui.label("No longer in the library", UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn), UiNode(width: UiSize.grow()))
+                    var label: [40]u8
+                    let n = e.changes.values.len
+                    let changes = n > 0 ? format(&label, "Changes · {n}") : "Changes"
+                    if two
+                        if cross_button(ui, theme, fonts, "remove", 1): removed = i as int
+                        if entry
+                            with ui.open(UiNode(name: "entrantchanges", floating: true, anchor: Vec2(1.0, 1.0), pivot: Vec2(1.0, 1.0), offset: Vec2(-12.0, -10.0)))
+                                if ui.button(changes): open_changes(i as int, lib)
+                    else
+                        ui.spacer()
+                        if entry and ui.button(changes): open_changes(i as int, lib)
+                        if cross_button(ui, theme, fonts, "remove", 1): removed = i as int
+        if removed >= 0
+            c.entrants[removed].release()
+            c.entrants.remove(removed)
+            rename(lib)
+        let small = UiNode(width: UiSize.fixed(80.0))
+        with kit.heading(3, "All engines", "Overrides each profile. Leave empty to keep it. An engine's Changes come first.")
+            ui.spacer()
+        with kit.card(4, "")
+            with kit.row(40, "Threads", "Search threads for each engine.")
+                if ui.text_field("allthreads", &all_threads, "Profile", small): take_optional(&all_threads, 1024, &c.threads)
+            with kit.row(41, "Hash (MB)", "Hash memory for each engine.")
+                if ui.text_field("allhash", &all_hash, "Profile", small): take_optional(&all_hash, 1048576, &c.hash_mb)
+
+    fn fill_counts(lib: *EngineLibrary)
+        picker.counts.resize(lib.entries.len)
+        for i in 0..lib.entries.len
+            picker.counts[i] = 0
+            for e in config.entrants
+                if e.engine_id == lib.entries[i].id: picker.counts[i] += 1
+
+    fn take_pick(lib: *EngineLibrary)
+        let c = &config
+        if swapping >= 0 and swapping < c.entrants.len
+            let e = &c.entrants[swapping]
+            if e.engine_id != picker.picked_engine: e.changes.clear_values()
+            e.engine_id = picker.picked_engine
+            e.profile_id = picker.picked_profile
+            swapping = -1
+        else
+            c.add_entrant(picker.picked_engine, picker.picked_profile, "")
+            fill_counts(lib)
+        rename(lib)
+
+    fn book(ui: *UiCanvas, look: *BoardLook, icons: *LineIcons, books: *BookLibrary)
+        let theme = look.theme
+        let fonts = look.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let c = &config
+        var choice = c.book as int
+        let narrow = kit.narrow()
+        with ui.open(UiNode(name: "bookkinds", flow: narrow ? FlowColumn : FlowRow, width: UiSize.grow(), gap: 12.0, padding: Vec4(0.0, 16.0, 0.0, 4.0)))
+            for i in 0..DraftBooks.len
+                let o = ui.open(UiNode(key: i as int, name: "bookkind", width: UiSize.grow(), height: narrow ? UiSize.fit() : UiSize.grow(), padding: Vec4(16.0, 16.0, 16.0, 16.0), gap: 6.0, hit: true, focusable: true))
+                let h = ui.interact(o.id)
+                let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 22.0)
+                let on = ui.spring(o.id, 1, choice == i ? 1.0 : 0.0, 22.0)
+                ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.35 * lit * (1.0 - on)).lerp(theme.accent, 0.1 * on)), radius: Vec4.splat(12.0), border: 1.0 + on, border_color: theme.line.lerp(theme.accent, on)))
+                with ui.open(UiNode(name: "bookkindtop", flow: FlowRow, width: UiSize.grow(), padding: Vec4(0.0, 0.0, 0.0, 6.0)))
+                    with ui.open(UiNode(width: UiSize.fixed(38.0), height: UiSize.fixed(38.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.12 + 0.1 * on)), radius: Vec4.splat(10.0))))
+                        icons.show(ui, i == 0 ? IconPawn : i == 1 ? IconBook : IconSparkle, 20.0, theme.accent)
+                    ui.spacer()
+                    with ui.open(UiNode(width: UiSize.fixed(18.0), height: UiSize.fixed(18.0), align: Vec2(0.5, 0.5), box: UiBox(radius: Vec4.splat(9.0), border: 1.5, border_color: theme.muted.lerp(theme.accent, on))))
+                        ui.leaf(UiNode(width: UiSize.fixed(8.0), height: UiSize.fixed(8.0), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(on)), radius: Vec4.splat(4.0))))
+                ui.label(DraftBooks[i], UiTextStyle(face: fonts.strong, size: 14.0, color: theme.ink))
+                ui.paragraph(DraftBooksAbout[i], note, UiNode(width: UiSize.grow()))
+                ui.close()
+                if h.clicked: choice = i as int
+        c.book = choice as EventBook
+        if choice == 2: c.reuse_openings = true
+        var line: [300]u8
+        let needed = openings_needed(c)
+        ui.paragraph(format(&line, "This tournament needs {needed} opening{needed == 1 ? "" : "s"}. Each is played twice, with colours reversed."), note, UiNode(width: UiSize.grow(), padding: Vec4(2.0, 6.0, 0.0, 0.0)))
+        if choice == 0: return
+        if choice == 2
+            consensus_settings(ui, look, books)
+            return
+        with kit.heading(3, "Books", "Newest books first.")
+            ui.text_field("draftbooksearch", &book_search, "Search books", UiNode(width: UiSize.fixed(240.0)))
+        with ui.open(UiNode(name: "draftbooks", width: UiSize.grow(), padding: Vec4(6.0, 10.0, 6.0, 6.0), gap: 2.0, box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(10.0), border: 1.0, border_color: theme.line))))
+            if books.books.len == 0: ui.paragraph("No books in your library. Import one in the Books tab.", note, UiNode(width: UiSize.grow(), padding: Vec4(12.0, 8.0, 12.0, 8.0)))
+            let wanted = book_search.text()
+            var k = books.books.len as int - 1
+            while k >= 0
+                let b = books.books[k]
+                k -= 1
+                if wanted.len > 0 and not has_folded(b.name_text(), wanted): continue
+                let picked = c.book_id == b.id and c.book_made == b.made
+                if rail_entry(ui, theme, fonts, "draftbook", b.id, b.name_text(), format(&line, "{book_kind_label(b.kind)}  ·  {b.positions} positions"), picked ? "chosen" : "", picked): c.use_book(b.id, b.made, b.name_text())
+
+    fn consensus_settings(ui: *UiCanvas, look: *BoardLook, books: *BookLibrary)
+        let theme = look.theme
+        let fonts = look.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let k = &consensus
+        let field = UiNode(width: UiSize.fixed(80.0))
+        with kit.card(4, "Consensus book")
+            with ui.open(UiNode(width: UiSize.grow(), padding: Vec4(18.0, 14.0, 18.0, 4.0)))
+                ui.paragraph("Engines take turns generating opening lines. The side the range favours plays the best moves, and the other side may play moves within the move margin. Every engine then evaluates the line at the agreement depth, and the line is kept only if every score is in range. Scores are from White's side.", note, UiNode(width: UiSize.grow()))
+            kit.rows = 0
+            band_rows(&kit, 40, "consensus", &band_low, &band_high, ref both)
+            kit.count(42, "Depth", "Search depth used to generate opening lines.", ref k.depth, 1, 40)
+            kit.count(43, "Agreement depth", "Search depth every engine uses to verify a line.", ref k.agree_depth, 1, 40)
+            kit.count(44, "Shortest line", "Length in half-moves (plies).", ref k.plies_low, 1, 40)
+            kit.count(45, "Longest line", "Length in half-moves (plies).", ref k.plies_high, 1, 40)
+            with kit.row(46, "Move margin (cp)", "Maximum score difference from the best move allowed for the other side, in centipawns.")
+                ui.text_field("consensusmargin", &margin_cp, "30", field)
+            with kit.row(47, "Maximum attempts", "Maximum generation attempts for each opening.")
+                ui.text_field("consensustries", &tries, "100", field)
+            seed_names.clear()
+            seed_ids.clear()
+            seed_names.push("Standard starting position")
+            seed_ids.push(0)
+            var at = books.books.len as int - 1
+            while at >= 0
+                seed_names.push(books.books[at].name_text())
+                seed_ids.push(books.books[at].id)
+                at -= 1
+            seed_choice = 0
+            for i in 0..seed_ids.len
+                if seed_ids[i] == k.seed_book: seed_choice = i as int
+            if kit.choice(48, "Starting book", "Start from a book's existing lines, or use the standard starting position.", ref seed_choice, seed_names[0..seed_names.len]): k.seed_book = seed_ids[seed_choice]
+        var line: [300]u8
+        let needed = openings_needed(&config)
+        let n = config.entrants.len as int
+        if needed < n: ui.paragraph(format(&line, "Only {needed} opening{needed == 1 ? "" : "s"} needed for {n} engines; some engines will not generate an opening this cycle. Use at least {n * 2} games per pairing for every engine to contribute."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn), UiNode(width: UiSize.grow(), padding: Vec4(2.0, 8.0, 0.0, 0.0)))
+
+    fn consensus_book(books: *BookLibrary) -> *BookEntry
+        let k = &consensus
+        let e = new BookEntry
+        var name: [200]u8
+        var shown = format(&name, "Consensus for {config.name_text()}")
+        var same = 1
+        var numbered: [220]u8
+        while books.named(shown)
+            same += 1
+            shown = format(&numbered, "Consensus for {config.name_text()} {same}")
+        set_text(&e.name, shown)
+        e.kind = BookConsensus
+        var line: [300]u8
+        set_text(&e.origin, format(&line, "Generated by {config.entrants.len} engines in {config.name_text()}"))
+        set_text(&e.engine_name, "All participating engines")
+        e.depth = k.depth
+        e.agree_depth = k.agree_depth
+        let (low, _) = uci_number(band_low.text())
+        let (high, _) = uci_number(band_high.text())
+        let (m, _) = uci_number(margin_cp.text())
+        let (t, _) = uci_number(tries.text())
+        e.set_band(low as int, high as int, both)
+        e.margin = m as int
+        e.tries = t as int
+        e.plies_low = k.plies_low
+        e.plies_high = k.plies_high
+        e.seed_book = k.seed_book
+        e.wanted = openings_needed(&config)
+        e.seed = config.seed
+        e.state = BookMaking
+        var stamp: SDL_Time
+        if SDL_GetCurrentTime(&stamp): e.made = stamp / 1000000000
+        return e
+
+    fn book_problem(books: *BookLibrary) -> str
+        if config.book == ConsensusBook
+            let (low, low_ok) = uci_number(band_low.text())
+            let (high, high_ok) = uci_number(band_high.text())
+            let (m, m_ok) = uci_number(margin_cp.text())
+            let (t, t_ok) = uci_number(tries.text())
+            if not low_ok or not high_ok or low > high: return "Enter two numbers for the consensus evaluation range, lowest first."
+            if not m_ok or m < 0: return "Enter the consensus move margin as a number of centipawns."
+            if not t_ok or t < 1: return "Maximum attempts per opening must be at least 1."
+            if consensus.plies_low > consensus.plies_high: return "The consensus book's shortest line cannot be longer than its longest."
+            return ""
+        if config.book != CollectionBook or config.book_id <= 0: return ""
+        let b = books.find(config.book_id)
+        if not b or b.made != config.book_made: return "The selected book is no longer in your library."
+        return ""
+
+    fn format_step(ui: *UiCanvas, look: *BoardLook, lib: *EngineLibrary)
+        let theme = look.theme
+        let fonts = look.fonts
+        let c = &config
+        let muted = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let small = UiNode(width: UiSize.fixed(64.0))
+        var line: [160]u8
+        with kit.card(1, "Pairing")
+            with kit.block(10, "Format", c.format == Gauntlet ? "The challenger plays every other engine." : c.format == HeadToHead ? "The first two engines play each other." : "Each engine plays every other engine.")
+                var f = c.format as int
+                if kit_pick(&kit, "draftformat", DraftFormats, ref f): c.format = f as EventFormat
+            if c.format == Gauntlet
+                entrant_names.clear()
+                for e in c.entrants
+                    entrant_names.push(e.name_text())
+                c.challenger = clamp(c.challenger, 0, max(c.entrants.len as int - 1, 0))
+                if entrant_names.len > 0: kit.choice(11, "Challenger", "", ref c.challenger, entrant_names[0..entrant_names.len])
+            var openings = max(c.games_per_pairing / 2, 1)
+            if kit.count(12, "Openings per pairing", format(&line, "{c.games_per_pairing} games per pairing. Each opening is played with both colours."), ref openings, 1, 500): c.games_per_pairing = openings * 2
+        with kit.card(2, "Time control")
+            with kit.block(20, "Kind", "")
+                var k = clamp(c.control.kind as int - 1, 0, 4)
+                if kit_pick(&kit, "draftclock", DraftClocks, ref k): c.control.kind = (k + 1) as ClockKind
+            with kit.row(21, clock_title(c.control.kind), "")
+                with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    match c.control.kind
+                        MovesInTime
+                            if ui.text_field("moves", &moves, "40", small): take_int(&moves, 1, 200, &c.control.moves)
+                            ui.label("moves in", muted)
+                            if ui.text_field("minutes", &minutes, "5", small): take_amount(&minutes, 60000, 1000, 36000000, &c.control.base_ms)
+                            ui.label("min", muted)
+                        TimePerMove
+                            if ui.text_field("moveseconds", &move_seconds, "1", small): take_amount(&move_seconds, 1000, 10, 3600000, &c.control.move_ms)
+                            ui.label("s per move", muted)
+                        FixedDepth
+                            if ui.text_field("depth", &depth, "10", small): take_int(&depth, 1, 99, &c.control.depth)
+                            ui.label("plies per move", muted)
+                        FixedNodes
+                            if ui.text_field("nodes", &nodes, "100000", UiNode(width: UiSize.fixed(110.0))): take_long(&nodes, 1, 1000000000000, &c.control.nodes)
+                            ui.label("nodes per move", muted)
+                        else
+                            if ui.text_field("minutes", &minutes, "5", small): take_amount(&minutes, 60000, 1000, 36000000, &c.control.base_ms)
+                            ui.label("min", muted)
+                            ui.label("+", muted)
+                            if ui.text_field("increment", &increment, "0", small): take_amount(&increment, 1000, 0, 60000, &c.control.increment_ms)
+                            ui.label("s per move", muted)
+        with kit.card(3, "Resources")
+            kit.count(30, "Concurrent games", "Each game runs two engine processes.", ref c.at_once, 1, max(cpu_count(), 1))
+            let u = resources_of(c, lib, free_mb)
+            with kit.row(31, "Estimated usage", format(&line, "{u.cores} CPU cores · {u.free_mb} MB memory currently free"))
+                with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    var threads: [60]u8
+                    ui.label(format(&threads, "{u.threads} thread{u.threads == 1 ? "" : "s"}"), UiTextStyle(face: fonts.strong, size: 12.5, color: u.threads_over ? theme.warn : theme.ink))
+                    ui.label("·", muted)
+                    ui.label(format(&line, "{u.hash_mb} MB of hash"), UiTextStyle(face: fonts.strong, size: 12.5, color: u.hash_over ? theme.warn : theme.ink))
+            kit.words(32, "CPU affinity", "Assigning dedicated CPU cores to each engine is not available yet.")
+        let j = &c.adjudication
+        with kit.card(4, "Game adjudication")
+            kit.switch(40, "Adjudicate wins", "End the game when both engines report a winning advantage above the threshold for this many consecutive moves each.", ref j.resign)
+            if j.resign
+                with kit.row(41, "Win score", "")
+                    with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                        if ui.text_field("resigncp", &resign_cp, "1000", small): take_int(&resign_cp, 100, 100000, &j.resign_cp)
+                        ui.label("cp for", muted)
+                        if ui.text_field("resignmoves", &resign_moves, "3", UiNode(width: UiSize.fixed(52.0))): take_int(&resign_moves, 1, 100, &j.resign_moves)
+                        ui.label("moves", muted)
+            kit.switch(42, "Adjudicate draws", "End the game as a draw when both evaluations stay within the draw threshold for this many consecutive moves each, starting from the chosen move number.", ref j.draw)
+            if j.draw
+                with kit.row(43, "Draw score", "")
+                    with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                        if ui.text_field("drawcp", &draw_cp, "10", UiNode(width: UiSize.fixed(56.0))): take_int(&draw_cp, 0, 1000, &j.draw_cp)
+                        ui.label("cp for", muted)
+                        if ui.text_field("drawmoves", &draw_moves, "8", UiNode(width: UiSize.fixed(52.0))): take_int(&draw_moves, 1, 100, &j.draw_moves)
+                        ui.label("moves from move", muted)
+                        if ui.text_field("drawafter", &draw_after, "40", UiNode(width: UiSize.fixed(52.0))): take_int(&draw_after, 1, 500, &j.draw_after)
+            with kit.row(44, "Forfeit margin", "Extra time in milliseconds allowed before a time forfeit.")
+                if ui.text_field("margin", &margin, "100", small): take_long(&margin, 0, 60000, &c.margin_ms)
+        with kit.card(5, "Openings")
+            kit.switch(50, "Use the same openings for every pairing", "Each pairing plays the same openings, so results compare fairly.", ref c.reuse_openings)
+            with kit.row(51, "Seed", "Use a seed to shuffle the book's openings reproducibly.")
+                with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    if ui.text_field("seed", &seed, "seed", UiNode(width: UiSize.fixed(170.0))) and seed.len > 0: c.seed = parse_hex(seed.text()) as u64
+                    if ui.button("New")
+                        var r = SplitMix64(state: now_ns() as u64)
+                        c.seed = r.next()
+                        var t: [24]u8
+                        seed.set(format(&t, "{c.seed:016X}"))
+
+    fn open_changes(i: int, lib: *EngineLibrary)
+        changing = i
+        let e = &config.entrants[i]
+        let entry = lib.find(e.engine_id)
+        change_edits.clear()
+        if not entry: return
+        change_edits.resize(entry.options.len)
+        for k in 0..entry.options.len
+            let (v, given) = e.changes.value_of(entry.text(entry.options[k].name))
+            if given: change_edits[k].set(v)
+
+    fn draw_changes(app: *DesktopApp, look: *BoardLook, lib: *EngineLibrary)
+        if changing < 0 or changing >= config.entrants.len
+            changing = -1
+            return
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let e = &config.entrants[changing]
+        let entry = lib.find(e.engine_id)
+        let profile = entry ? entry.profile(e.profile_id) : null
+        var show = true
+        var title: [120]u8
+        let muted = UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted)
+        with ui.modal("draftchanges", ref show, 620.0)
+            ui.label(format(&title, "Changes for {e.name_text()}"), UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink))
+            renamed.clear()
+            for v in e.changes.values
+                if renamed.len > 0: push_text(&renamed, ", ")
+                push_text(&renamed, v.name_text())
+                push_text(&renamed, " ")
+                push_text(&renamed, v.value_text())
+            ui.paragraph(renamed.len > 0 ? str(renamed[0..renamed.len]) : "No overrides. The engine uses its profile settings.", muted)
+            if entry and change_edits.len == entry.options.len
+                with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0))
+                    ui.label("Option", muted, UiNode(width: UiSize.fixed(180.0)))
+                    ui.label("Default", muted, UiNode(width: UiSize.fixed(110.0)))
+                    ui.label("Effective value", muted, UiNode(width: UiSize.fixed(110.0)))
+                    ui.label("Tournament override", muted)
+                with ui.scroll_area("changerows", gap: 2.0, node: UiNode(width: UiSize.grow(), height: UiSize.fixed(320.0)))
+                    for k in 0..entry.options.len
+                        let o = &entry.options[k]
+                        if o.kind == ButtonOption: continue
+                        let option = entry.text(o.name)
+                        var playing: [24]u8
+                        let value = entrant_value(&config, entry, profile, e, option, &playing)
+                        let given = e.changes.find(option) >= 0
+                        with ui.open(UiNode(key: k, name: "changerow", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(30.0), gap: 8.0, align: Vec2(0.0, 0.5)))
+                            ui.label(option, UiTextStyle(face: given ? fonts.strong : fonts.text, size: 12.5, color: given ? theme.accent : theme.ink), UiNode(width: UiSize.fixed(180.0), clip: true))
+                            ui.label(entry.text(o.default), muted, UiNode(width: UiSize.fixed(110.0), clip: true))
+                            ui.label(value, UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(width: UiSize.fixed(110.0), clip: true))
+                            if ui.text_field("change", &change_edits[k], "", UiNode(width: UiSize.grow()))
+                                let typed = change_edits[k].text()
+                                if typed.len == 0: e.changes.set(option, "", "")
+                                else: e.changes.put(option, typed)
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                if ui.button("Clear all")
+                    e.changes.clear_values()
+                    for k in 0..change_edits.len
+                        change_edits[k].set("")
+                ui.spacer()
+                if ui.button("Done", true): show = false
+        if not show: changing = -1
+
+    fn release()
+        config.release()
+        entrant_names.free()
+        change_edits.free()
+        renamed.free()
+        consensus.release()
+        seed_names.free()
+        seed_ids.free()
+        picker.release()
+
+fn clock_title(kind: ClockKind) -> str
+    match kind
+        MovesInTime: return "Moves in time"
+        TimePerMove: return "Time per move"
+        FixedDepth: return "Depth per move"
+        FixedNodes: return "Nodes per move"
+    return "Base and increment"
+
+fn take_int(edit: *UiEditText, low: int, high: int, into: *int)
+    let (v, ok) = uci_number(edit.text())
+    if ok and v >= low and v <= high: *into = v as int
+
+fn take_optional(edit: *UiEditText, high: int, into: *int)
+    if edit.len == 0: *into = 0
+    else: take_int(edit, 1, high, into)
+
+fn take_long(edit: *UiEditText, low: i64, high: i64, into: *i64)
+    let (v, ok) = uci_number(edit.text())
+    if ok and v >= low and v <= high: *into = v
+
+fn take_amount(edit: *UiEditText, unit_ms: i64, low: i64, high: i64, into: *i64)
+    let (v, ok) = read_amount(edit.text(), unit_ms)
+    if ok and v >= low and v <= high: *into = v

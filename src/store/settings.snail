@@ -1,0 +1,422 @@
+use src/looks/surfaces
+use src/views/piece_sheet
+use src/engines/engine_library
+use src/effects/effect_kinds
+use src/views/arrow_paint
+use src/play/sounds
+use src/board3d/scene_style
+use src/theme/fonts
+
+const SettingsSaveDelayNs: i64 = 400000000
+
+enum StartWith: u8
+    StartSession
+    StartNewTab
+    StartAnalysis
+
+const StartWords = ["session", "new-tab", "analysis"]
+const ArrowColorNames = ["Blue", "Green", "Red", "Orange", "Purple"]
+
+fn arrow_color(i: int) -> Color
+    match i
+        1: return Color(0.08, 0.47, 0.11, 1.0)
+        2: return Color(0.75, 0.16, 0.16, 1.0)
+        3: return Color(0.86, 0.52, 0.10, 1.0)
+        4: return Color(0.50, 0.27, 0.66, 1.0)
+    return Color(0.12, 0.37, 0.69, 1.0)
+
+struct ArrowLook
+    on: bool = true
+    color: int
+    width: f32 = 0.15
+    opacity: f32 = 0.8
+
+    fn color_of(strength: f32) -> Color
+        return arrow_color(color).with_alpha(opacity * strength)
+
+struct ArrowPaint
+    custom: bool
+    color: Color = Color(1.0, 1.0, 1.0, 1.0)
+    opacity: f32 = 0.8
+
+struct Settings
+    data: *DataFolder
+    theme: ThemeName = Charcoal
+    accent: AccentName
+    still: bool
+    three_d: bool
+    database_panel: bool
+    evals_mode: int = 1
+    evals_wdl: bool
+    evals_sort: int
+    cloud_address: [..]u8
+    cloud_share: bool
+    desk_clock: bool = true
+    desk_cards: bool = true
+    flat_arrows: bool
+    board_style: BoardStyle
+    set_style: SetStyle
+    clock_style: ClockStyle
+    card_style: CardStyle
+    plate_style: PlateStyle
+    clock_left: bool
+    room_style: RoomStyle
+    felt_style: FeltStyle
+    knights_sideways: bool
+    free_moves: bool
+    vsync: bool = true
+    msaa: int = 4
+    render_scale: f32 = 1.0
+    shadow_size: int = 2048
+    anisotropy: int = 8
+    palette: BoardPalette
+    pieces: PieceSet
+    costume: Costume
+    finish: PieceFinish
+    backdrop: Backdrop
+    picture: [..]u8
+    backdrop_a: u32 = 0x0E1418
+    backdrop_b: u32 = 0x2B3A4A
+    backdrop_blend: int = 2
+    coordinates: bool = true
+    highlights: bool = true
+    targets: bool = true
+    target_color: u32
+    engine_arrows: ArrowLook
+    arrow_paints: [ArrowKinds]ArrowPaint
+    note_arrows: ArrowLook
+    name: [..]u8
+    threads: int = 1
+    review_engine: int
+    hash_mb: int
+    analysis_hz: int = 10
+    start_with: StartWith
+    sounds: bool
+    volume: f32 = 1.0
+    sound_levels: [SoundCount]f32
+    sound_muted: [SoundCount]bool
+    priority: int
+    effects: [GuiEffectCount]EffectChoice
+    zoom: f32 = 1.0
+    font: int
+    window_known: bool
+    window_x: int
+    window_y: int
+    window_w: int
+    window_h: int
+    maximized: bool
+    column: f32
+    analysis: f32
+    graph: f32
+    evals: f32
+    shift: f32 = 0.5
+    changed_ns: i64
+    saver: BackgroundSave
+
+    fn load(folder: *DataFolder) -> bool
+        data = folder
+        note_arrows.color = 1
+        for k in 0..SoundCount: sound_levels[k] = k == SoundTicking ? 0.7 : 1.0
+        match_board_arrows()
+        var buf: [600]u8
+        let bytes = read_file(data.path("settings.json", &buf).ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len == 0 or read(str(bytes)): return true
+        var aside: [600]u8
+        SDL_RenamePath(data.path("settings.json", &buf).ptr as cstr, data.path("settings.bad.json", &aside).ptr as cstr)
+        return false
+
+    fn read(text: str) -> bool
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(text)
+        if not doc.is(root, JsonObject): return false
+        let a = doc.get(root, "appearance")
+        if doc.is(a, JsonObject)
+            let t = json_text(&doc, a, "theme")
+            theme = t == "porcelain" ? Porcelain : t == "after-hours" ? AfterHours : t == "goo" ? Goo : t == "paper" or t == "ink" ? Paper : t == "circuit" or t == "neon" ? Neon : Charcoal
+            accent = clamp(doc.num_at(a, "accent", 0.0) as int, 0, AccentLabels.len as int - 1) as AccentName
+            still = json_flag(&doc, a, "reduced_motion")
+            zoom = clamp(doc.num_at(a, "zoom", 1.0) as f32, 0.5, 3.0)
+            font = font_named(json_text(&doc, a, "font"))
+        let b = doc.get(root, "board")
+        if doc.is(b, JsonObject)
+            palette = palette_named(json_text(&doc, b, "palette"))
+            pieces = piece_set_named(json_text(&doc, b, "pieces"))
+            costume = costume_named(json_text(&doc, b, "costume"))
+            finish = finish_named(json_text(&doc, b, "finish"))
+            backdrop = backdrop_named(json_text(&doc, b, "backdrop"))
+            set_text(&picture, json_text(&doc, b, "picture"))
+            backdrop_a = doc.num_at(b, "backdrop_a", 922648.0) as u32
+            backdrop_b = doc.num_at(b, "backdrop_b", 2832970.0) as u32
+            backdrop_blend = clamp(doc.num_at(b, "backdrop_blend", 2.0) as int, 0, 2)
+            three_d = json_flag(&doc, b, "three_d")
+            database_panel = json_flag(&doc, b, "database_panel")
+            evals_mode = clamp(doc.num_at(b, "evals_mode", 1.0) as int, 0, 2)
+            evals_wdl = json_flag(&doc, b, "evals_wdl")
+            evals_sort = clamp(doc.num_at(b, "evals_sort", 0.0) as int, 0, 2)
+            let d = doc.get(b, "board3d")
+            if doc.is(d, JsonObject)
+                desk_clock = flag_or(&doc, d, "clock", true)
+                desk_cards = flag_or(&doc, d, "cards", true)
+                flat_arrows = json_text(&doc, d, "arrows") == "flat"
+                board_style = style_named(BoardStyleWords, json_text(&doc, d, "board")) as BoardStyle
+                set_style = style_named(SetStyleWords, json_text(&doc, d, "set")) as SetStyle
+                clock_style = style_named(ClockStyleWords, json_text(&doc, d, "clock_style")) as ClockStyle
+                card_style = style_named(CardStyleWords, json_text(&doc, d, "card_style")) as CardStyle
+                plate_style = style_named(PlateStyleWords, json_text(&doc, d, "plate")) as PlateStyle
+                clock_left = json_text(&doc, d, "clock_side") == "left"
+                room_style = style_named(RoomStyleWords, json_text(&doc, d, "room")) as RoomStyle
+                felt_style = style_named(FeltStyleWords, json_text(&doc, d, "felt")) as FeltStyle
+                knights_sideways = json_text(&doc, d, "knights") == "sideways"
+                free_moves = flag_or(&doc, d, "by_hand", false)
+            coordinates = json_flag(&doc, b, "coordinates")
+            highlights = json_flag(&doc, b, "highlights")
+            targets = json_flag(&doc, b, "targets")
+            target_color = doc.num_at(b, "target_color", 0.0) as u32
+            read_arrows(&doc, doc.get(b, "engine_arrows"), &engine_arrows)
+            read_arrows(&doc, doc.get(b, "note_arrows"), &note_arrows)
+            let p = doc.get(b, "arrow_paints")
+            if doc.is(p, JsonObject)
+                for k in 0..ArrowKinds
+                    let v = doc.get(p, ArrowKindWords[k])
+                    if not doc.is(v, JsonObject): continue
+                    let a = &arrow_paints[k]
+                    a.custom = json_flag(&doc, v, "custom")
+                    a.color = Color.hex(doc.num_at(v, "color", 16777215.0) as u32)
+                    a.opacity = clamp(doc.num_at(v, "opacity", ArrowOpacities[k]) as f32, 0.1, 1.0)
+        let gx = doc.get(root, "graphics")
+        if doc.is(gx, JsonObject)
+            vsync = flag_or(&doc, gx, "vsync", true)
+            msaa = one_of(doc.num_at(gx, "msaa", 4.0) as int, [1, 2, 4, 8])
+            render_scale = clamp(doc.num_at(gx, "render_scale", 1.0) as f32, 0.5, 2.0)
+            shadow_size = one_of(doc.num_at(gx, "shadow_size", 2048.0) as int, [1024, 2048, 4096])
+            anisotropy = one_of(doc.num_at(gx, "anisotropy", 8.0) as int, [1, 2, 4, 8, 16])
+        let s = doc.get(root, "settings")
+        if doc.is(s, JsonObject)
+            set_text(&name, json_text(&doc, s, "name"))
+            threads = max(doc.num_at(s, "threads", 1.0) as int, 1)
+            review_engine = max(doc.num_at(s, "review_engine", 0.0) as int, 0)
+            hash_mb = max(doc.num_at(s, "hash_mb", 0.0) as int, 0)
+            analysis_hz = clamp(doc.num_at(s, "analysis_hz", 10.0) as int, 1, 30)
+            sounds = json_flag(&doc, s, "sounds")
+            volume = clamp(doc.num_at(s, "volume", 1.0) as f32, 0.0, 1.0)
+            let levels = doc.get(s, "sound_levels")
+            if doc.is(levels, JsonObject)
+                for k in 0..SoundCount: sound_levels[k] = clamp(doc.num_at(levels, SoundWords[k], sound_levels[k] as f64) as f32, 0.0, 1.0)
+            let muted = doc.get(s, "sound_muted")
+            if doc.is(muted, JsonObject)
+                for k in 0..SoundCount: sound_muted[k] = json_flag(&doc, muted, SoundWords[k])
+            priority = clamp(doc.num_at(s, "priority", 0.0) as int, 0, 2)
+            let w = json_text(&doc, s, "start_with")
+            for i in 0..StartWords.len
+                if StartWords[i] == w: start_with = i as StartWith
+        let fx = doc.get(root, "effects")
+        if doc.is(fx, JsonObject)
+            for i in 0..GuiEffectCount
+                let e = doc.get(fx, GuiEffectWords[i])
+                if doc.is(e, JsonObject)
+                    effects[i].on = json_flag(&doc, e, "on")
+                    effects[i].intensity = clamp(doc.num_at(e, "intensity", 0.7) as f32, 0.1, 1.0)
+        let win = doc.get(root, "window")
+        if doc.is(win, JsonObject)
+            window_known = true
+            window_x = doc.num_at(win, "x", 0.0) as int
+            window_y = doc.num_at(win, "y", 0.0) as int
+            window_w = doc.num_at(win, "width", 1440.0) as int
+            window_h = doc.num_at(win, "height", 900.0) as int
+            maximized = json_flag(&doc, win, "maximized")
+        let l = doc.get(root, "layout")
+        if doc.is(l, JsonObject)
+            column = doc.num_at(l, "column", 0.0) as f32
+            analysis = doc.num_at(l, "analysis", 0.0) as f32
+            graph = doc.num_at(l, "graph", 0.0) as f32
+            evals = doc.num_at(l, "evals", 0.0) as f32
+            shift = clamp(doc.num_at(l, "shift", 0.5) as f32, 0.0, 1.0)
+        let cl = doc.get(root, "cloud")
+        if doc.is(cl, JsonObject)
+            set_text(&cloud_address, json_text(&doc, cl, "address"))
+            cloud_share = json_flag(&doc, cl, "share")
+        return true
+
+    fn read_arrows(doc: *JsonDoc, v: int, into: *ArrowLook)
+        if not doc.is(v, JsonObject): return
+        into.on = json_flag(doc, v, "on")
+        into.color = clamp(doc.num_at(v, "color", 0.0) as int, 0, 4)
+        into.width = clamp(doc.num_at(v, "width", 0.15) as f32, 0.05, 0.3)
+        into.opacity = clamp(doc.num_at(v, "opacity", 0.8) as f32, 0.1, 1.0)
+
+    fn write(out: *[..]u8)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.object()
+        let a = doc.object()
+        doc.set(a, "theme", doc.text(theme == Porcelain ? "porcelain" : theme == AfterHours ? "after-hours" : theme == Goo ? "goo" : theme == Paper ? "paper" : theme == Neon ? "circuit" : "charcoal"))
+        doc.set(a, "accent", doc.number(accent as f64))
+        doc.set(a, "reduced_motion", doc.boolean(still))
+        doc.set(a, "zoom", doc.number(zoom as f64))
+        doc.set(a, "font", doc.text(FontWords[font]))
+        doc.set(root, "appearance", a)
+        let b = doc.object()
+        doc.set(b, "palette", doc.text(palette_word(palette)))
+        doc.set(b, "pieces", doc.text(piece_set_word(pieces)))
+        doc.set(b, "costume", doc.text(CostumeWords[costume as int]))
+        doc.set(b, "finish", doc.text(FinishWords[finish as int]))
+        doc.set(b, "backdrop", doc.text(BackdropWords[backdrop as int]))
+        doc.set(b, "picture", doc.text(str(picture[0..picture.len])))
+        doc.set(b, "backdrop_a", doc.number(backdrop_a as f64))
+        doc.set(b, "backdrop_b", doc.number(backdrop_b as f64))
+        doc.set(b, "backdrop_blend", doc.number(backdrop_blend as f64))
+        doc.set(b, "three_d", doc.boolean(three_d))
+        doc.set(b, "database_panel", doc.boolean(database_panel))
+        doc.set(b, "evals_mode", doc.number(evals_mode as f64))
+        doc.set(b, "evals_wdl", doc.boolean(evals_wdl))
+        doc.set(b, "evals_sort", doc.number(evals_sort as f64))
+        let d = doc.object()
+        doc.set(d, "clock", doc.boolean(desk_clock))
+        doc.set(d, "cards", doc.boolean(desk_cards))
+        doc.set(d, "arrows", doc.text(flat_arrows ? "flat" : "arc"))
+        doc.set(d, "board", doc.text(BoardStyleWords[board_style as int]))
+        doc.set(d, "set", doc.text(SetStyleWords[set_style as int]))
+        doc.set(d, "clock_style", doc.text(ClockStyleWords[clock_style as int]))
+        doc.set(d, "card_style", doc.text(CardStyleWords[card_style as int]))
+        doc.set(d, "plate", doc.text(PlateStyleWords[plate_style as int]))
+        doc.set(d, "clock_side", doc.text(clock_left ? "left" : "right"))
+        doc.set(d, "room", doc.text(RoomStyleWords[room_style as int]))
+        doc.set(d, "felt", doc.text(FeltStyleWords[felt_style as int]))
+        doc.set(d, "knights", doc.text(knights_sideways ? "sideways" : "ahead"))
+        doc.set(d, "by_hand", doc.boolean(free_moves))
+        doc.set(b, "board3d", d)
+        doc.set(b, "coordinates", doc.boolean(coordinates))
+        doc.set(b, "highlights", doc.boolean(highlights))
+        doc.set(b, "targets", doc.boolean(targets))
+        doc.set(b, "target_color", doc.number(target_color as f64))
+        doc.set(b, "engine_arrows", arrows_value(&doc, &engine_arrows))
+        doc.set(b, "note_arrows", arrows_value(&doc, &note_arrows))
+        let p = doc.object()
+        for k in 0..ArrowKinds
+            let a = &arrow_paints[k]
+            let v = doc.object()
+            doc.set(v, "custom", doc.boolean(a.custom))
+            doc.set(v, "color", doc.number(hex_of(a.color) as f64))
+            doc.set(v, "opacity", doc.number(round(a.opacity as f64 * 100.0) / 100.0))
+            doc.set(p, ArrowKindWords[k], v)
+        doc.set(b, "arrow_paints", p)
+        doc.set(root, "board", b)
+        let gx = doc.object()
+        doc.set(gx, "vsync", doc.boolean(vsync))
+        doc.set(gx, "msaa", doc.number(msaa as f64))
+        doc.set(gx, "render_scale", doc.number(round(render_scale as f64 * 100.0) / 100.0))
+        doc.set(gx, "shadow_size", doc.number(shadow_size as f64))
+        doc.set(gx, "anisotropy", doc.number(anisotropy as f64))
+        doc.set(root, "graphics", gx)
+        let s = doc.object()
+        doc.set(s, "name", doc.text(str(name[0..name.len])))
+        doc.set(s, "threads", doc.number(threads as f64))
+        doc.set(s, "review_engine", doc.number(review_engine as f64))
+        doc.set(s, "hash_mb", doc.number(hash_mb as f64))
+        doc.set(s, "analysis_hz", doc.number(analysis_hz as f64))
+        doc.set(s, "start_with", doc.text(StartWords[start_with as int]))
+        doc.set(s, "sounds", doc.boolean(sounds))
+        doc.set(s, "volume", doc.number(round(volume as f64 * 100.0) / 100.0))
+        let levels = doc.object()
+        for k in 0..SoundCount: doc.set(levels, SoundWords[k], doc.number(round(sound_levels[k] as f64 * 100.0) / 100.0))
+        doc.set(s, "sound_levels", levels)
+        let muted = doc.object()
+        for k in 0..SoundCount: doc.set(muted, SoundWords[k], doc.boolean(sound_muted[k]))
+        doc.set(s, "sound_muted", muted)
+        doc.set(s, "priority", doc.number(priority as f64))
+        doc.set(root, "settings", s)
+        let fx = doc.object()
+        for i in 0..GuiEffectCount
+            let e = doc.object()
+            doc.set(e, "on", doc.boolean(effects[i].on))
+            doc.set(e, "intensity", doc.number(round(effects[i].intensity as f64 * 100.0) / 100.0))
+            doc.set(fx, GuiEffectWords[i], e)
+        doc.set(root, "effects", fx)
+        if window_known
+            let w = doc.object()
+            doc.set(w, "x", doc.number(window_x as f64))
+            doc.set(w, "y", doc.number(window_y as f64))
+            doc.set(w, "width", doc.number(window_w as f64))
+            doc.set(w, "height", doc.number(window_h as f64))
+            doc.set(w, "maximized", doc.boolean(maximized))
+            doc.set(root, "window", w)
+        let l = doc.object()
+        doc.set(l, "column", doc.number(column as f64))
+        doc.set(l, "analysis", doc.number(analysis as f64))
+        doc.set(l, "graph", doc.number(graph as f64))
+        doc.set(l, "evals", doc.number(evals as f64))
+        doc.set(l, "shift", doc.number(shift as f64))
+        doc.set(root, "layout", l)
+        let cl = doc.object()
+        doc.set(cl, "address", doc.text(str(cloud_address[0..cloud_address.len])))
+        doc.set(cl, "share", doc.boolean(cloud_share))
+        doc.set(root, "cloud", cl)
+        doc.write(root, out)
+
+    fn arrows_value(doc: *JsonDoc, a: *ArrowLook) -> int
+        let v = doc.object()
+        doc.set(v, "on", doc.boolean(a.on))
+        doc.set(v, "color", doc.number(a.color as f64))
+        doc.set(v, "width", doc.number(a.width as f64))
+        doc.set(v, "opacity", doc.number(a.opacity as f64))
+        return v
+
+    fn changed()
+        changed_ns = now_ns()
+
+    fn arrow_paint(kind: ArrowKind, c: BoardColors, theme: *GuiTheme) -> Color
+        let p = &arrow_paints[kind as int]
+        let rgb = p.custom ? p.color : arrow_default(kind, c, theme)
+        return rgb.with_alpha(p.opacity)
+
+    fn match_board_arrows()
+        for k in 0..ArrowKinds
+            arrow_paints[k].custom = false
+            arrow_paints[k].opacity = ArrowOpacities[k] as f32
+
+    fn save_when_due() -> f64
+        saver.pump()
+        if changed_ns == 0: return -1.0
+        let wait = changed_ns + SettingsSaveDelayNs - now_ns()
+        if wait > 0: return wait as f64 / 1.0e9
+        changed_ns = 0
+        if not data: return -1.0
+        var out: [..]u8
+        defer out.free()
+        write(&out)
+        var buf: [600]u8
+        saver.save(data.path("settings.json", &buf), out[0..out.len])
+        return -1.0
+
+    fn save() -> bool
+        changed_ns = 0
+        saver.finish()
+        if not data: return false
+        var out: [..]u8
+        defer out.free()
+        write(&out)
+        var buf: [600]u8
+        return save_whole(data.path("settings.json", &buf), out[0..out.len])
+
+    fn person_name() -> str
+        if name.len > 0: return str(name[0..name.len])
+        let user = SDL_getenv("USERNAME")
+        return user ? str(user) : "You"
+
+    fn release()
+        saver.release()
+        name.free()
+        picture.free()
+        cloud_address.free()
+
+fn one_of(n: int, steps: []int) -> int
+    var at = steps[0]
+    for k in steps
+        if k <= n: at = k
+    return at
+
+fn flag_or(doc: *JsonDoc, obj: int, key: str, fallback: bool) -> bool
+    let v = doc.get(obj, key)
+    return doc.is(v, JsonBool) ? doc.flag(v) : fallback

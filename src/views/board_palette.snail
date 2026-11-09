@@ -1,0 +1,102 @@
+use engine/gpu/color
+
+enum BoardPalette: u8
+    Sage
+    Walnut
+    Slate
+    Sand
+    Brown
+    Blue
+    Green
+    Plum
+    MapleWood
+    EbonyWood
+    CherryWood
+    MarbleStone
+    LapisStone
+    OnyxStone
+    LightGlass
+    DarkGlass
+    CircuitBoard
+    GooBoard
+    PaperBoard
+
+const BasicPalettes = 8
+const ThemePalettes = 16
+
+const PaletteShelfStarts = [0, 8, 16, 19]
+const PaletteShelfNames = ["Basic", "Detailed", "Theme"]
+const PaletteShelfNotes = ["Solid colours with low graphics usage", "Wood, polished stone and glass", "Match your detailed theme and accent colour"]
+const MovedTint = Color(0.776, 0.804, 0.478, 0.42)
+const TargetRim = Color(0.02, 0.06, 0.1, 0.6)
+const PaletteWords = ["sage", "walnut", "slate", "sand", "brown", "blue", "green", "plum", "maple", "ebony", "cherry", "marble", "lapis", "onyx", "light-glass", "dark-glass", "circuit", "goo", "paper"]
+const PaletteLabels = ["Sage", "Walnut", "Slate", "Sand", "Brown", "Blue", "Green", "Plum", "Maple and walnut", "Ebony and box", "Cherry", "Marble", "Lapis", "Onyx", "Light glass", "Dark glass", "Circuit", "Goo", "Paper"]
+
+enum BoardSurface: u8
+    FlatSurface
+    WoodSurface
+    StoneSurface
+    GlassSurface
+    CircuitSurface
+    GooSurface
+    PaperSurface
+
+struct BoardColors
+    light: Color
+    dark: Color
+    light_moved: Color
+    dark_moved: Color
+    light_ink: Color
+    dark_ink: Color
+    surface: BoardSurface
+    light_rgb: u32
+    dark_rgb: u32
+    style: f32
+
+    static fn of(p: BoardPalette) -> BoardColors
+        match p
+            Walnut: return board_colors(0xEEE0CA, 0xB28B6A)
+            Slate: return board_colors(0xE1E7E8, 0x8C9DA6)
+            Sand: return board_colors(0xF1E8D7, 0xC3B18B)
+            Brown: return board_colors(0xF0D9B5, 0xB58863)
+            Blue: return board_colors(0xDEE3E6, 0x8CA2AD)
+            Green: return board_colors(0xEEEED2, 0x769656)
+            Plum: return board_colors(0xEDE4F0, 0x9B7FAE)
+            MapleWood: return board_surface(0xE8CA9C, 0x74482A, WoodSurface, 1.0)
+            EbonyWood: return board_surface(0xE9D29E, 0x241B16, WoodSurface, 2.0)
+            CherryWood: return board_surface(0xE8B88A, 0x8A3A24, WoodSurface, 3.0)
+            MarbleStone: return board_surface(0xEEEDEA, 0x8C939B, StoneSurface, 1.0)
+            LapisStone: return board_surface(0xE8E8E4, 0x1C3F8E, StoneSurface, 2.0)
+            OnyxStone: return board_surface(0xEBDDC0, 0x1A1A1E, StoneSurface, 3.0)
+            LightGlass: return board_surface(0xE2EEEB, 0x7DB3AB, GlassSurface, 1.0)
+            DarkGlass: return board_surface(0xE6B46C, 0x3A3050, GlassSurface, 2.0)
+            CircuitBoard: return board_surface(0x8A9BB0, 0x26344A, CircuitSurface, 0.0)
+            GooBoard: return board_surface(0xD6ECCB, 0x5E9A55, GooSurface, 0.0)
+            PaperBoard: return board_surface(0xEFE7D6, 0x9C9385, PaperSurface, 0.0)
+        return board_colors(0xEEF0E3, 0xA2B5A5)
+
+fn board_colors(light: u32, dark: u32) -> BoardColors
+    let l = Color.hex(light)
+    let d = Color.hex(dark)
+    let olive = Color.hex(0xC6CD7A)
+    return BoardColors(l, d, l.lerp(olive, 0.35), d.lerp(olive, 0.35), d.lerp(Color.hex(0x172D22), 0.35), l, FlatSurface, light, dark, 0.0)
+
+fn board_surface(light: u32, dark: u32, surface: BoardSurface, style: f32) -> BoardColors
+    var c = board_colors(light, dark)
+    c.surface = surface
+    c.style = style
+    return c
+
+fn surface_moves(s: BoardSurface) -> bool
+    return s == CircuitSurface or s == GooSurface
+
+fn palette_label(p: BoardPalette) -> str
+    return PaletteLabels[p as int]
+
+fn palette_word(p: BoardPalette) -> str
+    return PaletteWords[p as int]
+
+fn palette_named(word: str) -> BoardPalette
+    for i in 0..PaletteWords.len
+        if PaletteWords[i] == word: return i as BoardPalette
+    return Sage

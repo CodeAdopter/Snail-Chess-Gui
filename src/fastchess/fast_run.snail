@@ -1,0 +1,397 @@
+use engine/platform/files
+use src/chess/notation
+use src/fastchess/fast_place
+use src/fastchess/fast_output
+use src/fastchess/fast_live
+use src/fastchess/fast_args
+
+const FastConsoleMost = 131072
+const FastReadMost: i64 = 4194304
+const FastBlocksKept = 60
+const FastSlideLeastMs: i64 = 200
+const FastSlideMs: i64 = 150
+const FastContinueMs: i64 = 10000
+
+enum FastRunState: u8
+    FastRunning
+    FastEnded
+    FastLost
+
+struct FastBoard
+    thread: int
+    board: Board
+    last: Move
+    start: [..]u8
+    applied: [..]u8
+    plies: int
+    slide_ms: i64
+    slide_for: i64
+    moved_ms: i64
+    gap_ms: i64
+    fit: [2][72]u8
+    fit_len: [2]int
+    fit_room: [2]f32
+    fit_key: [2]u32
+
+    fn follow(s: *FastSlot, now: i64)
+        let start_text = str(s.start[0..s.start.len])
+        let moves = str(s.moves[0..s.moves.len])
+        let held = str(applied[0..applied.len])
+        let fresh = str(start[0..start.len]) != start_text or not starts_with(moves, held) or held.len > 0 and moves.len > held.len and moves[held.len] != ' '
+        if fresh: restart(start_text)
+        var at = applied.len as int
+        var played = 0
+        while at < moves.len
+            while at < moves.len and moves[at] == ' '
+                at += 1
+            let from = at
+            while at < moves.len and moves[at] != ' '
+                at += 1
+            if at == from: break
+            let (m, ok) = parse_move(&board, moves[from..at])
+            if not ok: break
+            board.play(m)
+            last = m
+            plies += 1
+            played += 1
+        applied.clear()
+        push_text(&applied, moves[0..at])
+        if played == 0: return
+        if moved_ms > 0
+            let gap = now - moved_ms
+            gap_ms = gap_ms == 0 ? gap : (gap_ms * 3 + gap) / 4
+        moved_ms = now
+        slide_for = not fresh and played == 1 and gap_ms >= FastSlideLeastMs ? min(FastSlideMs, gap_ms / 2) : 0
+        slide_ms = now
+
+    fn slid(now: i64) -> f32
+        if slide_for <= 0 or last == NoMove: return 1.0
+        return clamp((now - slide_ms) as f32 / slide_for as f32, 0.0, 1.0)
+
+    fn restart(start_text: str)
+        start.clear()
+        push_text(&start, start_text)
+        applied.clear()
+        plies = 0
+        last = NoMove
+        slide_for = 0
+        moved_ms = 0
+        if starts_with(start_text, "fen ") and board.load_fen(start_text[4..start_text.len]): return
+        board.load_fen(StartFen)
+
+    fn release()
+        start.free()
+        applied.free()
+
+struct FastRun
+    id: [64]u8
+    id_len: int
+    folder: [720]u8
+    folder_len: int
+    typed: [..]u8
+    cwd: [..]u8
+    pgn: [..]u8
+    evals_at: i64 = -1
+    uci_names: [..]u8
+    names_read: bool
+    names_ready: bool
+    stop_name: [..]u8
+    version: [64]u8
+    version_len: int
+    args: FastArgs
+    started_ms: i64
+    ended_ms: i64
+    code: int
+    state: FastRunState
+    tally: FastTally
+    out_at: i64
+    carry: [..]u8
+    console: [..]u8
+    ends: [..]int
+    dropped: int
+    blocks: [..]u8
+    block_ends: [..]int
+    in_block: bool
+    live: FastLive
+    live_ns: i64
+    live_ms: i64
+    boards: [..]FastBoard
+    stopping: bool
+    stop_ms: i64
+    continuing: bool
+    continue_ms: i64
+    session_ms: i64
+    lost_checks: int
+    seen: int
+
+    fn id_text() -> str
+        return str(id[0..id_len])
+
+    fn folder_text() -> str
+        return str(folder[0..folder_len])
+
+    fn file(name: str, buf: *[760]u8) -> str
+        return format(buf, "{folder_text()}\\{name}")
+
+    fn running() -> bool
+        return state == FastRunning
+
+    fn open(place: *FastPlace, name: str) -> bool
+        id_len = min(name.len, 63) as int
+        for i in 0..id_len
+            id[i] = name[i]
+        var buf: [720]u8
+        var inside: [96]u8
+        let f = place.path(format(&inside, "fastchess\\runs\\{name}"), &buf)
+        folder_len = f.len as int
+        for i in 0..folder_len
+            folder[i] = f[i]
+        var path: [760]u8
+        var text: [..]u8
+        defer text.free()
+        if not fast_read_whole(file("run.txt", &path), &text): return false
+        let t = str(text[0..text.len])
+        var from = 0
+        for i in 0..t.len
+            if t[i] != '\n': continue
+            let line = t[from..i]
+            from = i as int + 1
+            if starts_with(line, "started "): started_ms = parse_int(line[8..line.len])
+            elif starts_with(line, "version ")
+                version_len = min(line.len - 8, 63) as int
+                for k in 0..version_len
+                    version[k] = line[8 + k]
+            elif starts_with(line, "folder "): fast_set_text(&cwd, line[7..line.len])
+            elif starts_with(line, "pgn "): fast_set_text(&pgn, line[4..line.len])
+            elif starts_with(line, "stop "): fast_set_text(&stop_name, line[5..line.len])
+            elif starts_with(line, "typed "): fast_set_text(&typed, line[6..line.len])
+            elif starts_with(line, "resumed "): session_ms = parse_int(line[8..line.len])
+        session_ms = max(session_ms, started_ms)
+        args.read(str(typed[0..typed.len]))
+        state = FastRunning
+        if not read_end() and not fast_held(file("lock", &path)): lose()
+        update()
+        return true
+
+    fn lose()
+        state = FastLost
+        var path: [760]u8
+        ended_ms = max(modified_time(file("output.txt", &path).ptr as cstr) / 1000000, started_ms)
+
+    fn revive() -> bool
+        if state == FastRunning: return false
+        var path: [760]u8
+        if not fast_held(file("lock", &path)) or file_exists(file("end.txt", &path).ptr as cstr): return false
+        var text: [..]u8
+        defer text.free()
+        if fast_read_whole(file("run.txt", &path), &text)
+            let t = str(text[0..text.len])
+            var from = 0
+            for i in 0..t.len
+                if t[i] != '\n': continue
+                if starts_with(t[from..i], "resumed "): session_ms = parse_int(t[from + 8..i])
+                from = i as int + 1
+        state = FastRunning
+        stopping = false
+        continuing = false
+        lost_checks = 0
+        code = 0
+        ended_ms = 0
+        for i in 0..boards.len
+            boards[i].release()
+        boards.clear()
+        return true
+
+    fn settle() -> bool
+        if revive(): return true
+        if sn_fc_now_ms() - continue_ms < FastContinueMs: return false
+        continuing = false
+        read_end()
+        update()
+        return true
+
+    fn can_continue() -> bool
+        if state == FastRunning or continuing or verdict() != 0: return false
+        if tally.total > 0 and tally.games.len as int >= tally.total: return false
+        var path: [760]u8
+        return file_exists(file("config.json", &path).ptr as cstr)
+
+    fn read_end() -> bool
+        var path: [760]u8
+        var text: [..]u8
+        defer text.free()
+        if not fast_read_whole(file("end.txt", &path), &text): return false
+        let t = str(text[0..text.len])
+        var from = 0
+        for i in 0..t.len
+            if t[i] != '\n': continue
+            let line = t[from..i]
+            from = i as int + 1
+            if starts_with(line, "code "): code = parse_int(line[5..line.len]) as int
+            if starts_with(line, "ended "): ended_ms = parse_int(line[6..line.len])
+        state = FastEnded
+        return true
+
+    fn update() -> bool
+        var changed = false
+        var path: [760]u8
+        let out = file("output.txt", &path)
+        let f = sn_fc_open_read(out.ptr, out.len as int)
+        if f
+            let size = sn_fc_size(f)
+            if size > out_at
+                let want = min(size - out_at, FastReadMost)
+                let chunk = alloc[u8](want as int)
+                let n = sn_fc_read_at(f, out_at, chunk, want as int)
+                if n > 0
+                    out_at += n
+                    take_output(chunk[0..n])
+                    changed = true
+                free(chunk)
+            sn_fc_close(f)
+        let live_path = file("live.txt", &path)
+        let stamp = modified_time(live_path.ptr as cstr)
+        if stamp != live_ns
+            live_ns = stamp
+            var text: [..]u8
+            defer text.free()
+            if fast_read_whole(live_path, &text) and live.read(str(text[0..text.len])) >= 0
+                follow_boards()
+                live_ms = sn_fc_now_ms()
+                changed = true
+        if state == FastRunning
+            if read_end(): changed = true
+            elif not fast_held(file("lock", &path))
+                lost_checks += 1
+                if lost_checks >= 2
+                    lose()
+                    changed = true
+        if changed: seen += 1
+        return changed
+
+    fn take_output(bytes: []u8)
+        for i in 0..bytes.len
+            let c = bytes[i]
+            if c == '\n'
+                let line = str(carry[0..carry.len])
+                tally.feed(line)
+                keep_block(line)
+                carry.clear()
+            elif c != '\r' and carry.len < 16384: carry.push(c)
+        if console.len + bytes.len > FastConsoleMost
+            var drop = console.len as int - min(console.len as int, FastConsoleMost / 2)
+            while drop > 0 and drop < console.len and console[drop - 1] != '\n'
+                drop += 1
+            let keep = console.len as int - drop
+            for k in 0..keep
+                console[k] = console[drop + k]
+            console.resize(keep)
+            let before = ends.len as int
+            ends.clear()
+            for k in 0..keep
+                if console[k] == '\n': ends.push(k as int)
+            dropped += before - ends.len as int
+        for i in 0..bytes.len
+            if bytes[i] == '\r': continue
+            if bytes[i] == '\n': ends.push(console.len as int)
+            console.push(bytes[i])
+
+    fn line_count() -> int
+        return ends.len as int
+
+    fn line(k: int) -> str
+        let from = k == 0 ? 0 : ends[k - 1] + 1
+        return str(console[from..ends[k]])
+
+    fn keep_block(line: str)
+        let t = trim(line)
+        if starts_with(t, "-----")
+            if not in_block
+                in_block = true
+                return
+            in_block = false
+            block_ends.push(blocks.len as int)
+            if block_ends.len > FastBlocksKept
+                let cut = block_ends[0]
+                for k in 0..blocks.len as int - cut
+                    blocks[k] = blocks[cut + k]
+                blocks.resize(blocks.len as int - cut)
+                block_ends.remove(0)
+                for k in 0..block_ends.len
+                    block_ends[k] -= cut
+            return
+        if not in_block: return
+        push_text(&blocks, t)
+        blocks.push('\n')
+
+    fn block_count() -> int
+        return block_ends.len as int
+
+    fn block(k: int) -> str
+        let from = k == 0 ? 0 : block_ends[k - 1]
+        return str(blocks[from..max(block_ends[k] - 1, from)])
+
+    fn follow_boards()
+        let now = sn_fc_now_ms()
+        for i in 0..live.slots.len
+            let s = &live.slots[i]
+            var b: *FastBoard = null
+            for k in 0..boards.len
+                if boards[k].thread == s.thread: b = &boards[k]
+            if b == null
+                boards.push(FastBoard(thread: s.thread))
+                b = &boards[boards.len - 1]
+                b.restart(str(s.start[0..s.start.len]))
+            b.follow(s, now)
+
+    fn stop() -> bool
+        if state != FastRunning or stop_name.len == 0: return false
+        stopping = fast_signal(str(stop_name[0..stop_name.len]))
+        if stopping: stop_ms = sn_fc_now_ms()
+        return stopping
+
+    fn clock_ms() -> i64
+        if state != FastRunning: return max(ended_ms, session_ms)
+        return stopping ? stop_ms : sn_fc_now_ms()
+
+    fn rate() -> f64
+        let seconds = (clock_ms() - session_ms) as f64 / 1000.0
+        let played = tally.games.len as int - tally.session_from
+        return seconds > 1.0 ? played as f64 / seconds : 0.0
+
+    fn games_left() -> (int, int)
+        let most = tally.total > 0 ? max(tally.total - tally.games.len as int, 0) : -1
+        if not tally.sprt or tally.points.len == 0: return (most, most)
+        let p = tally.points[tally.points.len - 1]
+        if p.games <= 0: return (most, most)
+        let slope = p.llr / p.games as f64
+        if abs(slope) < 1.0e-9: return (most, most)
+        let need = slope > 0.0 ? (tally.upper - p.llr) / slope : (tally.lower - p.llr) / slope
+        let likely = max(need, 0.0) as int
+        return (most, most >= 0 ? min(likely, most) : likely)
+
+    fn verdict() -> int
+        if not tally.sprt: return 0
+        if tally.llr >= tally.upper: return 1
+        if tally.llr <= tally.lower: return -1
+        return 0
+
+    fn release()
+        typed.free()
+        cwd.free()
+        pgn.free()
+        stop_name.free()
+        tally.release()
+        carry.free()
+        console.free()
+        ends.free()
+        blocks.free()
+        block_ends.free()
+        live.release()
+        for i in 0..boards.len
+            boards[i].release()
+        boards.free()
+
+fn fast_set_text(into: *[..]u8, s: str)
+    into.clear()
+    push_text(into, s)

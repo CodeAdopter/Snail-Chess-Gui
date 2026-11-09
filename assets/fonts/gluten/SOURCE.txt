@@ -1,0 +1,4 @@
+Gluten, from Google Fonts (fonts.google.com/specimen/Gluten).
+regular.ttf is weight 400 and strong.ttf weight 600, static instances served by the Google Fonts CSS API,
+cut by tools/fonts.py to the characters Snail Chess GUI's own text uses, without hinting or glyph names.
+Licence: OFL.txt, from github.com/google/fonts/tree/main/ofl/gluten.

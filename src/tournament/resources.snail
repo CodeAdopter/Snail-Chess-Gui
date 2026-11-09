@@ -1,0 +1,68 @@
+use src/tournament/event_config
+
+struct ResourceUse
+    threads: int
+    cores: int
+    hash_mb: i64
+    free_mb: i64
+    threads_over: bool
+    hash_over: bool
+
+fn resources_of(c: *EventConfig, lib: *EngineLibrary, free_mb: i64) -> ResourceUse
+    var u: ResourceUse
+    var most_threads = 1
+    var most_hash: i64 = 0
+    for i in 0..c.entrants.len
+        let e = &c.entrants[i]
+        let entry = lib.find(e.engine_id)
+        let profile = entry ? entry.profile(e.profile_id) : null
+        var t: [24]u8
+        let (threads, threads_ok) = uci_number(entrant_value(c, entry, profile, e, "Threads", &t))
+        if threads_ok: most_threads = max(most_threads, threads as int)
+        let (hash, hash_ok) = uci_number(entrant_value(c, entry, profile, e, "Hash", &t))
+        if hash_ok: most_hash = max(most_hash, hash)
+    u.threads = c.at_once * most_threads
+    u.cores = max(cpu_count(), 1)
+    u.hash_mb = most_hash * 2 * c.at_once as i64
+    u.free_mb = free_mb
+    u.threads_over = u.threads > u.cores
+    u.hash_over = u.free_mb > 0 and u.hash_mb > u.free_mb
+    return u
+
+fn entrant_value(c: *EventConfig, entry: *EngineEntry, profile: *EngineProfile, e: *Entrant, option: str, buf: *[24]u8) -> str
+    let (changed, has_change) = e.changes.value_of(option)
+    if has_change: return format(buf, "{changed}")
+    let all = c.all_engines(option)
+    if all > 0 and entry and entry.option_index(option) >= 0: return format(buf, "{all}")
+    if profile
+        let (v, given) = profile.value_of(option)
+        if given: return format(buf, "{v}")
+    let i = entry ? entry.option_index(option) : -1
+    if i >= 0: return format(buf, "{entry.text(entry.options[i].default)}")
+    return format(buf, "")
+
+fn format_label(f: EventFormat) -> str
+    match f
+        Gauntlet: return "Gauntlet"
+        HeadToHead: return "Head-to-head"
+    return "Round robin"
+
+fn event_ids(data: *DataFolder, into: *[..]int)
+    into.clear()
+    var names: [..]u8
+    defer names.free()
+    var buf: [600]u8
+    names_in(data.path("tournaments", &buf), &names)
+    var from = 0
+    for i in 0..names.len
+        if names[i] != '\n': continue
+        let (n, ok) = uci_number(str(names[from..i]))
+        if ok and n > 0: into.push(n as int)
+        from = i as int + 1
+    for i in 1..into.len
+        var j = i as int
+        while j > 0 and into[j] < into[j - 1]
+            let t = into[j]
+            into[j] = into[j - 1]
+            into[j - 1] = t
+            j -= 1

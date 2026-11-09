@@ -1,0 +1,227 @@
+use src/database/eval_recorder
+
+const RunQueueMost = 20000
+const RunRecentMost = 12
+const RunStuckNs: i64 = 180000000000
+const RunPopsAFrame = 200
+const RunBestLine = 0
+const RunWide = 1
+const RunDeeper = 2
+const RunModeWords = ["Best line", "Wide", "Deeper"]
+const RunModePlies = [0, 2, 3]
+
+struct RunNode
+    parent: int = -1
+    move: Move
+    ply: int
+
+struct RunDone
+    node: int
+    kind: ScoreKind
+    score: int
+    depth: int
+
+struct ContributeRun
+    depth: int = 20
+    mode: int = RunWide
+    start: Board
+    has_start: bool
+    start_text: UiEditText
+    start_typed: bool
+    start_bad: bool
+    nodes: [..]RunNode
+    queue: [..]int
+    head: int
+    seen: [..]u64
+    seen_count: int
+    node: int
+    path: [..]int
+    evaluating: bool
+    begun: bool
+    finished: bool
+    evaluated: int
+    skipped: int
+    recent: [..]RunDone
+    position_ns: i64
+    best_depth: int
+    depth_ns: i64
+
+    fn restart()
+        if not has_start
+            start.load_fen(StartFen)
+            has_start = true
+        nodes.clear()
+        queue.clear()
+        head = 0
+        seen.clear()
+        seen_count = 0
+        recent.clear()
+        evaluated = 0
+        skipped = 0
+        evaluating = false
+        finished = false
+        begun = true
+        see(start.key)
+        nodes.push(RunNode())
+        queue.push(0)
+
+    fn start_from(fen: str) -> bool
+        var b: Board
+        if not b.load_fen(fen.len > 0 ? fen : StartFen): return false
+        if has_start and b.key == start.key and b.fullmove == start.fullmove: return true
+        start = b
+        has_start = true
+        if begun: restart()
+        return true
+
+    fn set_mode(m: int)
+        let to = clamp(m, RunBestLine, RunDeeper)
+        if to == mode: return
+        mode = to
+        if begun: restart()
+
+    fn skip()
+        evaluating = false
+
+    fn waiting() -> int
+        return queue.len as int - head
+
+    fn path_of(at: int) -> []int
+        path.clear()
+        var i = at
+        while i > 0
+            path.push(i)
+            i = nodes[i].parent
+        let n = path.len as int
+        for k in 0..n / 2
+            let held = path[k]
+            path[k] = path[n - 1 - k]
+            path[n - 1 - k] = held
+        return path[0..path.len]
+
+    fn board_of(at: int) -> Board
+        var b = start
+        for i in path_of(at)
+            b.play(nodes[i].move)
+        return b
+
+    fn step(game: *Game, a: *EngineAnalysis, rec: *EvalRecorder, name: str) -> bool
+        if not a.on: return false
+        if not begun: restart()
+        let now = now_ns()
+        if evaluating
+            if a.lines_fresh()
+                let l = &a.lines[0]
+                if l.depth > best_depth
+                    best_depth = l.depth
+                    depth_ns = now
+                if l.depth < depth and now - depth_ns < RunStuckNs: return false
+                take(a)
+            elif now - position_ns < RunStuckNs: return false
+            evaluating = false
+        return choose(game, rec, name)
+
+    fn take(a: *EngineAnalysis)
+        var b = board_of(node)
+        let l = &a.lines[0]
+        if l.filled and l.count > 0: wait_for(node, &b, l.moves[0])
+        wait_for_all(node, &b)
+        evaluated += 1
+        let white = b.side == White
+        if recent.len >= RunRecentMost: recent.remove(0)
+        recent.push(RunDone(node: node, kind: l.kind, score: white ? l.score : -l.score, depth: l.depth))
+
+    fn wait_for_all(at: int, b: *Board)
+        if nodes[at].ply >= RunModePlies[clamp(mode, RunBestLine, RunDeeper)]: return
+        var moves: [256]Move
+        let count = legal_moves(b, &moves[0])
+        for i in 0..count
+            wait_for(at, b, moves[i])
+
+    fn wait_for(at: int, b: *Board, m: Move)
+        if waiting() >= RunQueueMost: return
+        var c = *b
+        c.play(m)
+        if not see(c.key): return
+        if head > 4096 and head * 2 > queue.len as int
+            for i in head..queue.len
+                queue[i - head] = queue[i]
+            queue.resize(queue.len - head)
+            head = 0
+        nodes.push(RunNode(parent: at, move: m, ply: nodes[at].ply + 1))
+        queue.push(nodes.len as int - 1)
+
+    fn choose(game: *Game, rec: *EvalRecorder, name: str) -> bool
+        let kept = rec and rec.open
+        let engine = kept ? rec.db.store.known_id(rec.db.engines, name) as u16 : 0
+        var evals: [..]DbEval
+        defer evals.free()
+        var moves: [256]Move
+        for pops in 0..RunPopsAFrame
+            if head >= queue.len as int
+                finished = true
+                return false
+            let at = queue[head]
+            head += 1
+            var b = board_of(at)
+            if legal_moves(&b, &moves[0]) == 0: continue
+            if engine != 0
+                evals.clear()
+                rec.db.evals_at(b.key, &evals)
+                var known = false
+                for e in evals
+                    if e.engine == engine and e.multipv == 1 and e.depth as int >= depth: known = true
+                if known
+                    for e in evals
+                        if e.engine != engine or e.multipv != 1 or e.pv_len == 0: continue
+                        let (m, ok) = db_find_move(&b, e.pv[0])
+                        if ok: wait_for(at, &b, m)
+                    wait_for_all(at, &b)
+                    skipped += 1
+                    continue
+            node = at
+            game.reset(&start)
+            for i in path_of(at)
+                game.play(nodes[i].move)
+            evaluating = true
+            finished = false
+            position_ns = now_ns()
+            depth_ns = position_ns
+            best_depth = 0
+            return true
+        return false
+
+    fn see(key: u64) -> bool
+        let k = key == 0 ? 1 as u64 : key
+        if (seen_count + 1) * 2 > seen.len as int: grow()
+        let mask = seen.len as int - 1
+        var i = ((k * 0x9E3779B97F4A7C15) >> 40) as int & mask
+        while seen[i] != 0
+            if seen[i] == k: return false
+            i = (i + 1) & mask
+        seen[i] = k
+        seen_count += 1
+        return true
+
+    fn grow()
+        var old: [..]u64
+        defer old.free()
+        for v in seen
+            if v != 0: old.push(v)
+        let size = max(seen.len as int * 2, 4096)
+        seen.resize(size)
+        for i in 0..size
+            seen[i] = 0
+        let mask = size - 1
+        for v in old
+            var i = ((v * 0x9E3779B97F4A7C15) >> 40) as int & mask
+            while seen[i] != 0
+                i = (i + 1) & mask
+            seen[i] = v
+
+    fn release()
+        nodes.free()
+        queue.free()
+        seen.free()
+        path.free()
+        recent.free()

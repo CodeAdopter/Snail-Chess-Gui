@@ -1,0 +1,210 @@
+use engine/desktop/command_bar
+use src/views/wrap_rows
+use src/tabs/add_engine
+use src/tabs/profile_editor
+use src/tabs/registry_popup
+use src/engines/releases
+use src/store/github_token
+
+struct EnginesPage
+    search: UiEditText
+    chosen: int
+    shown: [..]int
+    probe: EngineProbe
+    probing_id: int
+    failed_id: int
+    removing: bool
+    confirm_id: int
+    remove_id: int
+    adding: AddFromFile
+    editor: ProfileEditor
+    updates: ReleaseList
+    updates_for: int
+    install_registry: [..]u8
+    token: *GithubToken
+    kit: SettingsKit
+
+    fn update(app: *DesktopApp, lib: *EngineLibrary)
+        adding.update(app, lib)
+        editor.update(app, lib)
+        if updates.update(): app.redraw()
+        if adding.added_id > 0
+            chosen = adding.added_id
+            adding.added_id = 0
+        if probe.state != ProbeRunning or not probe.update(app): return
+        let e = lib.find(probing_id)
+        if probe.state == ProbeDone and e
+            e.learn(&probe.engine)
+            lib.version += 1
+            lib.save()
+        if probe.state == ProbeFailed: failed_id = probing_id
+        app.redraw()
+
+    fn start_probe(lib: *EngineLibrary, id: int)
+        var buf: [600]u8
+        let path = lib.exe_path(id, &buf)
+        probing_id = id
+        failed_id = 0
+        probe.start(path, folder_of(path))
+        if probe.state == ProbeFailed: failed_id = id
+
+    fn forget(id: int)
+        if probing_id == id and probe.state == ProbeRunning: probe.cancel()
+        if failed_id == id: failed_id = 0
+
+    fn draw(app: *DesktopApp, desk: *DesktopLook, lib: *EngineLibrary, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = &app.ui
+        if lib.index_of(chosen) < 0: chosen = lib.chosen_id()
+        let e = lib.find(chosen)
+        if e and not e.probed and probe.state != ProbeRunning and failed_id != chosen: start_probe(lib, chosen)
+        let rail_w = list_rail_width(ui)
+        command_bar_rail(app, desk, rail_w, PageCurve)
+        list(app, lib, theme, fonts, rail_w)
+        kit = SettingsKit(ui, theme, fonts, page_column(ui, rail_w), 0, 0.0)
+        with page_room(ui, "engdetail", chosen, rail_w)
+            details(app, lib, theme, fonts)
+
+    fn list(app: *DesktopApp, lib: *EngineLibrary, theme: *GuiTheme, fonts: *GuiFonts, rail_w: f32)
+        let ui = &app.ui
+        shown.clear()
+        let wanted = search.text()
+        for i in 0..lib.entries.len
+            let e = &lib.entries[i]
+            if wanted.len == 0 or has_folded(e.display_name(), wanted) or has_folded(e.text(e.author), wanted): shown.push(e.id)
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        var count: [40]u8
+        with rail_room(ui, "englist", rail_w, 2.0)
+            ui.text_field("enginesearch", &search, "Search engines", UiNode(width: UiSize.grow()))
+            rail_group(ui, theme, fonts, 0, format(&count, "ENGINES  {lib.entries.len}"), false)
+            with ui.scroll_area("engines", gap: 2.0)
+                if lib.entries.len == 0: ui.paragraph("No engines yet. Add one from a file or the registry.", note, UiNode(width: UiSize.grow(), padding: Vec4(12.0, 4.0, 12.0, 4.0)))
+                elif shown.len == 0: ui.paragraph("No matching engines.", note, UiNode(width: UiSize.grow(), padding: Vec4(12.0, 4.0, 12.0, 4.0)))
+                for id in shown
+                    let e = lib.find(id)
+                    let about = e.author.len > 0 ? e.text(e.author) : source_text(e)
+                    let dot = e.favourite ? theme.accent : Color(0.0, 0.0, 0.0, 0.0)
+                    if rail_entry(ui, theme, fonts, "engine", id, e.display_name(), about, id == lib.default_id ? "default" : "", id == chosen, dot): chosen = id
+
+    fn details(app: *DesktopApp, lib: *EngineLibrary, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = &app.ui
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let body = UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink)
+        let e = lib.find(chosen)
+        if not e
+            kit.title("ENGINES", "No engine selected", "Use the toolbar to add an engine from a file or the registry.")
+            return
+        let id = e.id
+        var by: [200]u8
+        kit.title(source_group(e.source), e.display_name(), e.author.len > 0 ? format(&by, "By {e.text(e.author)}") : "")
+        with page_actions(ui, 1, 2.0)
+            with acts = wrap_rows(ui, "engactions", kit.width - 4.0, 8.0)
+                acts.next(id == lib.default_id ? ui.measure("Default for new analyses", UiTextStyle(face: fonts.strong, size: 12.0)).x + 24.0 : button_width(ui, "Make default"))
+                if id == lib.default_id: tag(ui, theme, fonts, "Default for new analyses")
+                elif ui.button("Make default", true)
+                    lib.default_id = id
+                    lib.save()
+                let favourite = e.favourite ? "Remove from favourites" : "Add to favourites"
+                acts.next(button_width(ui, favourite))
+                if ui.button(favourite)
+                    e.favourite = not e.favourite
+                    lib.save()
+                acts.next(button_width(ui, "Detect engine again"))
+                if ui.button("Detect engine again") and probe.state != ProbeRunning: start_probe(lib, id)
+                acts.next(button_width(ui, "Uninstall"))
+                ui.spacer()
+                if ui.button("Uninstall")
+                    confirm_id = id
+                    removing = true
+        var path: [600]u8
+        with kit.card(2, "Engine source")
+            fact_row(&kit, 20, "Program", lib.exe_path(id, &path))
+            fact_row(&kit, 21, "Source", source_text(e))
+            let o = &e.origin
+            if o.known()
+                var line: [500]u8
+                fact_row(&kit, 22, "Release", format(&line, "Release {o.text(o.tag)} · {o.text(o.repository)} · {o.codeberg ? "Codeberg" : "GitHub"} · {o.text(o.asset)}"))
+                fact_row(&kit, 23, "SHA-256", o.text(o.sha256))
+                if o.needs_setup
+                    with kit.row(24, "Engine setup required", "The engine supports UCI but did not become ready. It may need additional setup, such as a neural network file for Lc0.")
+                        if o.documentation.len > 0 and ui.button("Setup instructions"): open_link(o.text(o.documentation))
+                update_row(ui, lib, e, theme, fonts)
+        if probing_id == id and probe.state == ProbeRunning
+            ui.paragraph("Detecting engine...", note, UiNode(width: UiSize.grow(), padding: Vec4(2.0, 14.0, 0.0, 0.0)))
+            return
+        if failed_id == id
+            with kit.card(3, "The engine did not respond")
+                with ui.open(UiNode(width: UiSize.grow(), padding: Vec4(18.0, 14.0, 18.0, 14.0), gap: 10.0))
+                    ui.paragraph(probe.engine.failure_text(), body, UiNode(width: UiSize.grow()))
+                    let out = probe.output_text()
+                    if out.len > 0
+                        with ui.scroll_area("printed", node: UiNode(width: UiSize.grow(), height: UiSize.fit(0.0, 220.0), padding: Vec4.splat(10.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(6.0))))
+                            ui.paragraph(out, UiTextStyle(face: fonts.mono, size: 11.5, color: theme.ink))
+            return
+        var heading: [60]u8
+        with kit.card(4, format(&heading, "Profiles and options  ·  {e.options.len}"))
+            editor.bar(app, lib, e, theme, fonts)
+            editor.rows(app, lib, e, theme, fonts)
+
+    fn new_profile(lib: *EngineLibrary)
+        let e = lib.find(chosen)
+        if e: editor.new_profile(lib, e)
+
+    fn update_row(ui: *UiCanvas, lib: *EngineLibrary, e: *EngineEntry, theme: *GuiTheme, fonts: *GuiFonts)
+        let o = &e.origin
+        if updates_for != e.id
+            updates_for = e.id
+            updates.choose_by(o.text(o.registry_id), o.text(o.repository), o.codeberg, lib.data)
+        let s = &updates.set
+        let newer = s.newer_than(o.text(o.tag))
+        var line: [300]u8
+        var age: [40]u8
+        var title = "Updates have not been checked yet."
+        if updates.fetching: title = "Checking releases..."
+        elif newer >= 0: title = format(&line, "Update available: {s.text(s.releases[newer].tag)} · Published {s.text(s.releases[newer].published)}")
+        elif updates.fetched_ns > 0: title = format(&line, "Up to date · Checked {age_text(wall_ns() - updates.fetched_ns, &age)}")
+        with kit.row(25, title, updates.failure_len > 0 ? updates.failure_text() : "")
+            with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                if newer >= 0 and not updates.fetching and ui.button("Install update", true): hold_text(&install_registry, o.text(o.registry_id))
+                if not updates.fetching and ui.button("Check for updates"): updates.refresh(token ? token.text() : "")
+
+    fn draw_popups(app: *DesktopApp, lib: *EngineLibrary, theme: *GuiTheme, fonts: *GuiFonts)
+        adding.draw(app, lib, theme, fonts)
+        editor.draw_popups(app, lib, lib.find(chosen), theme, fonts)
+        if not removing: return
+        let ui = &app.ui
+        let e = lib.find(confirm_id)
+        if not e
+            removing = false
+            return
+        var line: [700]u8
+        var path: [600]u8
+        with ui.modal("removeengine", ref removing, 440.0)
+            ui.label(format(&line, "Uninstall {e.display_name()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+            if e.copied: ui.paragraph("Delete this engine's files and profiles from the data folder. Existing tournament games will be kept.", note)
+            else: ui.paragraph(format(&line, "Remove this engine and its profiles from the library. The executable will remain at {lib.exe_path(confirm_id, &path)}"), note)
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5), padding: Vec4(0.0, 6.0, 0.0, 0.0)))
+                ui.spacer()
+                if ui.button("Cancel"): removing = false
+                if ui.button("Uninstall", true)
+                    remove_id = confirm_id
+                    removing = false
+
+    fn release()
+        probe.release()
+        adding.release()
+        editor.release()
+        shown.free()
+        updates.release()
+        install_registry.free()
+
+fn source_text(e: *EngineEntry) -> str
+    if e.source == FromBundle: return "Bundled with Snail Chess GUI"
+    if e.source == FromRegistry: return "Installed from the registry"
+    return e.copied ? "Local engine copied to the data folder" : "Local engine using its original location"
+
+fn source_group(s: EngineSource) -> str
+    match s
+        FromBundle: return "BUNDLED ENGINE"
+        FromRegistry: return "FROM THE REGISTRY"
+    return "FROM A FILE"

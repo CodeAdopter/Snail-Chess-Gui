@@ -1,0 +1,189 @@
+use engine/core/json
+use engine/desktop/http_stream
+use src/chess/short_text
+
+const LichessSite = "https://lichess.org"
+const LichessAgent = "SnailChessGui/1"
+const LichessQuietNs: i64 = 60000000000
+const LichessStreamWaitMs = 30000
+
+struct LichessCall
+    tag: int
+    posting: bool
+    removing: bool
+    path: ShortText
+    form: [640]u8
+    form_len: int
+    bearer: [256]u8
+    bearer_len: int
+
+    fn form_text() -> str
+        return str(form[0..form_len])
+
+struct LichessReply
+    tag: int
+    status: int
+    ok: bool
+    text: [..]u8
+    error: [..]u8
+
+    fn text_of() -> str
+        return str(text[0..text.len])
+
+    fn error_text() -> str
+        return str(error[0..error.len])
+
+    fn release()
+        text.free()
+        error.free()
+
+struct LichessClient
+    site: ShortText
+    token: [..]u8
+    quiet_ns: i64 = LichessQuietNs
+    quiet_until: i64
+    calls: [..]LichessCall
+    one: HttpStream
+    one_busy: bool
+    events: HttpStream
+    seek: HttpStream
+    game: HttpStream
+
+    fn set_site(at: str)
+        site.clear()
+        site.add_str(at)
+
+    fn site_text() -> str
+        return site.len > 0 ? site.text() : LichessSite
+
+    fn set_token(t: str)
+        token.clear()
+        for k in 0..t.len
+            token.push(t[k])
+
+    fn get(tag: int, path: str)
+        add_call(tag, false, path, "")
+
+    fn post(tag: int, path: str, form: str = "")
+        add_call(tag, true, path, form)
+
+    fn revoke(tag: int, t: str)
+        add_call(tag, false, "/api/token", "")
+        let c = &calls[calls.len - 1]
+        c.removing = true
+        c.bearer_len = min(t.len, 256) as int
+        for k in 0..c.bearer_len
+            c.bearer[k] = t[k]
+
+    fn drop_waiting()
+        let keep = one_busy ? 1 : 0
+        while calls.len as int > keep
+            calls.remove(calls.len - 1)
+
+    fn add_call(tag: int, posting: bool, path: str, form: str)
+        let c = calls.add()
+        c.tag = tag
+        c.posting = posting
+        c.removing = false
+        c.bearer_len = 0
+        c.path.clear()
+        c.path.add_str(path)
+        c.form_len = min(form.len, 640) as int
+        for k in 0..c.form_len
+            c.form[k] = form[k]
+
+    fn waiting() -> int
+        return calls.len as int
+
+    fn quiet_left_ns() -> i64
+        return max(quiet_until - now_ns(), 0)
+
+    fn heed(s: *HttpStream)
+        if s.answered() == 429: quiet_until = now_ns() + quiet_ns
+
+    fn poll(reply: *LichessReply) -> bool
+        var got = false
+        if one_busy and one.finished()
+            one_busy = false
+            if one.answered() == 429
+                quiet_until = now_ns() + quiet_ns
+            else
+                take_reply(reply)
+                calls.remove(0)
+                got = true
+        if not one_busy and calls.len > 0 and quiet_left_ns() == 0
+            let c = &calls[0]
+            var url: [600]u8
+            var lines: [512]u8
+            let t = c.bearer_len > 0 ? str(c.bearer[0..c.bearer_len]) : str(token[0..token.len])
+            one.start(format(&url, "{site_text()}{c.path.text()}"), LichessAgent, header_lines(&lines, c.form_len > 0, t), c.posting, c.form_text(), remove: c.removing)
+            one_busy = true
+        return got
+
+    fn take_reply(reply: *LichessReply)
+        reply.tag = calls[0].tag
+        reply.status = one.answered()
+        reply.ok = one.done()
+        reply.text.clear()
+        reply.error.clear()
+        var line: [..]u8
+        defer line.free()
+        while one.next(&line)
+            if reply.text.len > 0: reply.text.push('\n')
+            for k in 0..line.len
+                reply.text.push(line[k])
+        if reply.ok: return
+        var doc: JsonDoc
+        defer doc.free_all()
+        let said = doc.get(doc.parse(reply.text_of()), "error")
+        let why = doc.is(said, JsonString) ? doc.str_of(said) : one.error_text()
+        for k in 0..why.len
+            reply.error.push(why[k])
+
+    fn header_lines(buf: *[512]u8, form: bool, t: str) -> str
+        let kind = form ? "Content-Type: application/x-www-form-urlencoded\n" : ""
+        if t.len == 0 or not token_goes(): return format(buf, "{kind}")
+        return format(buf, "Authorization: Bearer {t}\n{kind}")
+
+    fn token_goes() -> bool
+        let s = site_text()
+        return s == LichessSite or starts_with(s, "http://127.0.0.1:") or starts_with(s, "http://localhost:")
+
+    fn open_stream(s: *HttpStream, path: str, posting: bool, form: str, wait: int) -> bool
+        if quiet_left_ns() > 0 or s.running(): return false
+        var url: [600]u8
+        var lines: [512]u8
+        return s.start(format(&url, "{site_text()}{path}"), LichessAgent, header_lines(&lines, form.len > 0, str(token[0..token.len])), posting, form, wait)
+
+    fn open_events() -> bool
+        return open_stream(&events, "/api/stream/event", false, "", LichessStreamWaitMs)
+
+    fn open_seek(form: str) -> bool
+        return open_stream(&seek, "/api/board/seek", true, form, -1)
+
+    fn open_game(id: str, bot: bool) -> bool
+        var path: [120]u8
+        let p = bot ? format(&path, "/api/bot/game/stream/{id}") : format(&path, "/api/board/game/stream/{id}")
+        return open_stream(&game, p, false, "", LichessStreamWaitMs)
+
+    fn release()
+        one.release()
+        events.release()
+        seek.release()
+        game.release()
+        calls.free()
+        token.free()
+
+fn lichess_form_escape(s: str, out: *[..]u8)
+    let hex = "0123456789ABCDEF"
+    for k in 0..s.len
+        let c = s[k]
+        if c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z' or c >= '0' and c <= '9' or c == '-' or c == '_' or c == '.' or c == '~': out.push(c)
+        else
+            out.push('%')
+            out.push(hex[c >> 4])
+            out.push(hex[c & 15])
+
+fn lichess_game_path(buf: *[160]u8, bot: bool, id: str, action: str) -> str
+    let api = bot ? "bot" : "board"
+    return format(buf, "/api/{api}/game/{id}/{action}")

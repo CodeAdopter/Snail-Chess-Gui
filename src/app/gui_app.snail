@@ -1,0 +1,1614 @@
+use engine/desktop/window_icon
+use engine/desktop/crash_report
+use src/views/snail_logo
+use src/app/event_space
+use src/app/lichess_space
+use src/app/fast_space
+use src/app/contribute_space
+use src/play/play_history
+use src/app/commands
+use src/tabs/analysis_tab
+use src/tabs/engines_page
+use src/views/engine_log_view
+use src/tabs/install_popup
+use src/tabs/books_page
+use src/tabs/tournament_index
+use src/tabs/profile_page
+use src/tabs/database_page
+use src/tabs/settings_page
+
+const BandIconWidth: f32 = 38.0
+
+struct GuiApp
+    app: DesktopApp
+    theme: GuiTheme
+    look: DesktopLook
+    fonts: GuiFonts
+    tabs: TabSet
+    strip: TabStrip
+    strip_tabs: [..]StripTab
+    workspace: Workspace
+    menu_at: Vec2
+    menu_asked: bool
+    step_in_ns: i64
+    games: [..]*Game
+    palette: BoardPalette
+    pieces: PieceSet
+    costume: Costume
+    finish: PieceFinish
+    backdrop: Backdrop
+    sheet: PieceSheet
+    picker: PastePicker
+    clip: [..]u8
+    show_arrows: bool = true
+    data: DataFolder
+    library: EngineLibrary
+    choices: EngineChoices
+    engines_page: EnginesPage
+    log_view: EngineLogView
+    registry: Registry
+    registry_popup: RegistryPopup
+    install_popup: InstallPopup
+    play_setup: PlaySetup
+    play_asked: PlayPanelAsk
+    events: [..]*EventRunner
+    index: TournamentIndex
+    books: BookLibrary
+    books_page: BooksPage
+    makers: [..]*BookMaker
+    settings: Settings
+    profile_page: ProfilePage
+    database_page: DatabasePage
+    settings_page: SettingsPage
+    record: PlayerRecord
+    quick: QuickMatch
+    quick_tab: int
+    session_seen: u64
+    fast_back: [..]u8
+    fast_back_run: FastRun
+    fast_back_open: bool
+    fast_probe: EngineProbe
+    fast_probing: bool
+    fast_probe_for: *FastRun
+    session_saver: BackgroundSave
+    played: PlayedIndex
+    sounds: GuiSounds
+    sound_tab: int
+    sound_game: *Game
+    sound_node: int
+    clock_tab: int
+    clock_side: Side
+    vsync_on: bool = true
+    game_dbs: DatabaseLibrary
+    lichess: LichessPlay
+    lichess_chat: UiEditText
+    lichess_resigning: bool
+    lichess_was_playing: bool
+    fast_runs: FastRuns
+    fast_ext: FastExtension
+    recorder: EvalRecorder
+    cloud: CloudDb
+    effects: Effects
+    surfaces: Surfaces
+    scene: BoardScene
+    icons: LineIcons
+    logo: SnailLogo
+    icon_key: int = -1
+
+    fn run()
+        let folder_made = data.open()
+        var crashes: [600]u8
+        start_crash_reports(data.path("crashes", &crashes), "Snail Chess GUI")
+        let settings_read = settings.load(&data)
+        let known = settings.window_known
+        app.open("Snail Chess", known ? max(settings.window_w, 640) : 1440, known ? max(settings.window_h, 480) : 900)
+        place_window()
+        crash_note("gpu", app.gpu.device_name())
+        fonts = load_fonts(&app.ui)
+        effects.renderer = &app.ui_gpu
+        surfaces.renderer = &app.ui_gpu
+        settings_page.scene = &scene
+        scene.data = &data
+        settings_page.library = &library
+        settings_page.lichess = &lichess
+        settings_page.sounds = &sounds
+        app.hold_presents(app.refresh_ns() as f64 / 1.0e9)
+        effect_tick_ns = app.refresh_ns()
+        apply_settings()
+        effects.forced = has_arg("--effects")
+        effects.clock.length_scale = clamp(arg_number("--effect-length", 1.0) as f32, 0.01, 10.0)
+        if settings.zoom != 1.0: app.set_zoom(settings.zoom)
+        let w = &workspace
+        if settings.column > 0.0
+            w.column.pos = settings.column
+            w.analysis.pos = settings.analysis
+            w.graph.pos = settings.graph
+            w.ready = true
+        if settings.evals > 0.0: w.evals_most = settings.evals
+        w.shift = settings.shift
+        if not folder_made: app.ui.toast("Could not create the data folder. Changes will not be saved.")
+        if not settings_read: app.ui.toast("Could not read settings.json. The original file was saved as settings.bad.json.")
+        open_data()
+        start_fastchess()
+        let analysis_asked = has_arg("--analyse") or has_arg("--flip") or has_arg("--edit") or has_arg("--log") or has_arg("--log-all") or arg_word("--paste").len > 0 or arg_word("--select").len > 0 or arg_int("--engine", 0) > 0
+        let restored = settings.start_with == StartSession and not analysis_asked and restore_session()
+        if not restored
+            tabs.open(NewTab)
+            if settings.start_with != StartNewTab or analysis_asked: open_new(Analysis)
+        let first = tabs.current()
+        if has_arg("--analyse"): first.analysis.on = true
+        if has_arg("--flip"): first.flipped = true
+        let pasted = arg_word("--paste")
+        if pasted.len > 0: picker.paste(&app.ui, first.game, pasted)
+        let step_in = arg_int("--step-in", 0)
+        if step_in > 0 and first.game.at != NoNode and first.game.nodes[first.game.at].parent != NoNode
+            first.game.back()
+            step_in_ns = now_ns() + step_in as i64 * 1000000
+        if has_arg("--review"): start_review(first)
+        let chosen = arg_word("--select")
+        if chosen.len == 2 and chosen[0] >= 'a' and chosen[0] <= 'h' and chosen[1] >= '1' and chosen[1] <= '8': first.board.select(first.game.board(), Square(chosen[0] as int - 'a', chosen[1] as int - '1'))
+        if has_arg("--edit")
+            first.editor.load(first.game.board())
+            first.editing = true
+        if first.kind == Analysis
+            first.database.find.set(arg_word("--evals-find"))
+            if has_arg("--evals-all"): settings.evals_mode = DbModeAll
+            if has_arg("--evals-wdl"): settings.evals_wdl = true
+            if arg_word("--evals-sort") == "white": settings.evals_sort = DbSortWhite
+            if arg_word("--evals-sort") == "black": settings.evals_sort = DbSortBlack
+        let engine_asked = arg_int("--engine", 0)
+        let profile_asked = arg_int("--profile", 0)
+        let entry_asked = library.find(engine_asked)
+        if entry_asked
+            engines_page.chosen = engine_asked
+            engines_page.editor.loaded_engine = engine_asked
+            engines_page.editor.profile_id = profile_asked
+            first.analysis.switch_engine(engine_asked)
+            first.analysis.switch_profile(profile_asked, entry_asked.profile(profile_asked))
+        if has_arg("--engine-picker"): first.panel.picker.open(arg_word("--engine-search"))
+        if has_arg("--threads-pop"): first.panel.threads_open = true
+        if has_arg("--log") or has_arg("--log-all"): log_view.open_for(first.id)
+        if has_arg("--registry")
+            open_new(Engines)
+            registry_popup.search.set(arg_word("--registry-search"))
+            registry_popup.open(&registry, &data)
+            let releases = arg_word("--releases-source")
+            if releases.len > 0: hold_text(&install_popup.list.test, releases)
+            if has_arg("--install")
+                registry_popup.refresh_results(&registry)
+                registry_popup.shown = false
+                install_popup.open(&registry, registry_popup.chosen, &data)
+                install_popup.go_when_listed = has_arg("--install-go")
+                install_popup.token_open = has_arg("--install-token")
+        log_view.search_lines = has_arg("--log-all")
+        if has_arg("--play") or has_arg("--play-go"): play_from_args()
+        if has_arg("--event") or arg_int("--event-open", 0) > 0: event_from_args()
+        if arg_word("--page") == "newtab": tabs.active = 0
+        elif arg_word("--page") == "engines": open_new(Engines)
+        elif arg_word("--page") == "lichess": open_new(Lichess)
+        elif arg_word("--page") == "contribute"
+            open_new(Contribute)
+            let t = tabs.current()
+            if has_arg("--analyse"): t.analysis.on = true
+            if t.run
+                t.run.depth = arg_int("--run-depth", t.run.depth)
+                t.run.set_mode(arg_int("--run-mode", t.run.mode))
+                start_run_at(t, arg_word("--run-fen"))
+        elif arg_word("--page") == "tournaments": open_new(Tournaments)
+        elif arg_word("--page") == "books": open_new(Books)
+        elif arg_word("--page") == "database"
+            open_new(Database)
+            database_page.chosen = arg_int("--database-game", -1)
+            database_page.open_game = arg_int("--database-open", -1)
+            database_page.open_ply = arg_int("--database-ply", 0)
+        elif arg_word("--page") == "profile"
+            open_new(Profile)
+            profile_page.section = profile_section_named(arg_word("--profile-section"))
+        elif arg_word("--page") == "settings"
+            open_new(Settings)
+            settings_page.section = settings_section_named(arg_word("--settings-section"))
+        elif arg_word("--page") == "newtour"
+            open_new(NewTournament)
+            tabs.current().draft.step = clamp(arg_int("--draft-step", 0), 0, 2)
+            if has_arg("--draft-consensus")
+                if not tabs.current().draft.ready: tabs.current().draft.start(&library)
+                tabs.current().draft.config.book = ConsensusBook
+            let wanted = books.find(arg_int("--draft-book", 0))
+            if wanted
+                if not tabs.current().draft.ready: tabs.current().draft.start(&library)
+                tabs.current().draft.config.use_book(wanted.id, wanted.made, wanted.name_text())
+            if has_arg("--draft-add")
+                if not tabs.current().draft.ready: tabs.current().draft.start(&library)
+                tabs.current().draft.fill_counts(&library)
+                tabs.current().draft.picker.open_adding()
+            if has_arg("--draft-go"): start_tournament(tabs.current())
+        if has_arg("--quick-search")
+            find_match()
+            quick_tab = tabs.current().id
+        let adding = arg_word("--add-engine")
+        if adding.len > 0
+            open_new(Engines)
+            engines_page.adding.take(&app, adding)
+            if has_arg("--add-copy"): engines_page.adding.copy_in = 1
+            if has_arg("--add-go"): engines_page.adding.begin(&app.ui, &library)
+        if has_arg("--book-generate") or has_arg("--book-generate-go")
+            open_new(Books)
+            choices.make(&library)
+            books_page.generating.open(&library)
+            if has_arg("--book-generate-go"): books_page.generating.start(&books, library.find(library.chosen_id()))
+        let database = arg_word("--database-import")
+        if database.len > 0
+            open_new(Database)
+            database_page.import_file(&app, &recorder.db, database)
+        let importing = arg_word("--book-import")
+        if importing.len > 0
+            open_new(Books)
+            books_page.importing.take(&app, importing)
+            if has_arg("--book-read"): books_page.importing.read()
+        if has_arg("--book-registry")
+            open_new(Books)
+            books_page.fetching.search.set(arg_word("--book-registry-search"))
+            hold_text(&books_page.fetching.mirror, arg_word("--book-mirror"))
+            books_page.fetching.open(&data)
+            if has_arg("--book-registry-go")
+                books_page.fetching.refresh_results()
+                books_page.fetching.download()
+                books_page.importing.auto = true
+        menu_asked = has_arg("--menu")
+        let crash_test = arg_int("--crash-test", 0)
+        if crash_test == 4: panic("--crash-test 4")
+        if crash_test == 5
+            loop
+                sleep_ms(100)
+        if crash_test > 0: crash_on_purpose(crash_test)
+        start_stress()
+        app.live_frames(gui_live_step, self)
+        while app.next()
+            step()
+        stress_report()
+        keep_window()
+        settings.save()
+        keep_session()
+        if has_arg("--print-session")
+            var text: [..]u8
+            session_text(&text)
+            print(str(text[0..text.len]))
+            text.free()
+        for i in 0..tabs.tabs.len
+            keep_review(&tabs.tabs[i])
+        for t in tabs.tabs
+            if t.analysis: t.analysis.release()
+            if t.review: t.review.release()
+            if t.play: end_play(t.play)
+            t.event_view.release(&app.gpu)
+            if t.draft: t.draft.release()
+        index.release()
+        profile_page.release()
+        settings_page.release(&app.gpu)
+        workspace.release(&app.gpu)
+        played.release()
+        sounds.release()
+        game_dbs.release()
+        lichess.release()
+        release_fastchess()
+        database_page.release()
+        recorder.stop()
+        cloud.release()
+        settings.release()
+        session_saver.release()
+        for r in events
+            r.release()
+        events.free()
+        if library.changed_ns != 0: library.save()
+        engines_page.release()
+        books_page.release()
+        for m in makers
+            m.stop()
+            m.release()
+        makers.free()
+        books.release()
+        log_view.release()
+        registry.release()
+        registry_popup.release()
+        install_popup.release()
+        choices.release()
+        library.release()
+        sheet.release(&app.gpu)
+        surfaces.release(&app.gpu)
+        scene.release(&app.gpu)
+        icons.release()
+        logo.release()
+        app.close()
+        end_crash_reports()
+
+    fn open_data()
+        if library.open(&data) == LibraryUnreadable: app.ui.toast("Could not read engines.json. The original file was saved as engines.bad.json.")
+        install_popup.token.load(&data)
+        books.open(&data)
+        game_dbs.open(&data)
+        record.open(&data)
+        open_recorder()
+        let site = arg_word("--lichess-site")
+        if site.len > 0: lichess.client.set_site(site)
+        lichess.queue_asked = arg_int("--lichess-queue", -1)
+        lichess.load(&data)
+        engines_page.token = &install_popup.token
+        load_events()
+
+    fn open_recorder()
+        registry.load(&data)
+        registry_popup.ratings.load(&data)
+        recorder.lib = &library
+        recorder.registry = &registry
+        recorder.ratings = &registry_popup.ratings
+        data.make_folder("positiondb")
+        var buf: [600]u8
+        if not recorder.start(data.path("positiondb", &buf)): app.ui.toast("Database in use by another window. Engine lines won't be saved.")
+        cloud.start(&data)
+
+    fn load_events()
+        var ids: [..]int
+        defer ids.free()
+        event_ids(&data, &ids)
+        for id in ids
+            let r = new EventRunner
+            if r.open(&data, id): events.push(r)
+            else: r.release()
+
+    fn set_theme(name: ThemeName)
+        theme = GuiTheme.of(name).with_accent(settings.accent)
+        let key = name as int * 16 + settings.accent as int
+        if key != icon_key
+            app.set_icon_in(embed("../../assets/logo/icon.png"), theme.accent)
+            icon_key = key
+        app.ui.theme = theme.widgets(fonts.text, fonts.strong)
+        look = DesktopLook.of(app.ui.theme, theme.band)
+        if theme.detailed()
+            theme.material = surfaces.theme_material(name, PanelPart)
+            look.sheet_material = surfaces.theme_material(name, SheetPart)
+            look.page_material = surfaces.theme_material(name, PagePart)
+            if name == Neon: look.page_reach = NeonSpill
+        app.background = theme.page
+        app.edge = theme.line.lerp(theme.muted, 0.35)
+        app.redraw()
+
+    fn material_frame()
+        let ui = &app.ui
+        theme.feel(ui)
+        let c = theme.accent
+        let packed = floor(c.r * 255.0 + 0.5) * 65536.0 + floor(c.g * 255.0 + 0.5) * 256.0 + floor(c.b * 255.0 + 0.5)
+        surfaces.tick(packed, ui.still ? 0.0 : ui.time)
+        sheet.finish = surfaces.finish_material(finish)
+        if sheet.finish == 0 and piece_art(sheet.set).paper: sheet.finish = surfaces.fold_material()
+        sheet.finish_values = surfaces.finish_values()
+        let animated = piece_art(sheet.set).motions.len > 0
+        sheet.clock = ui.still ? 0.0 : ui.time
+        if not ui.still and (animated or finish_moves(finish) or surface_moves(BoardColors.of(palette).surface)): ui.wake_in(0.0)
+        if theme.material == 0: return
+        look.sheet_values = Vec4(theme.motion.x, theme.motion.y, theme.motion.z, packed)
+        look.page_values = look.sheet_values
+        if theme.moving(): ui.wake_in(0.0)
+
+    fn step()
+        if app.holding()
+            if lichess.tick(now_ns()): app.redraw()
+            run_engines(tabs.current())
+            run_events()
+            run_fastchess()
+            run_consensus()
+            run_makers()
+            app.rest()
+            return
+        frame()
+        if menu_asked
+            app.ui.memory(strip.menu_id).open = true
+            menu_at = Vec2(4.0, TabRowHeight)
+            menu_asked = false
+            app.redraw()
+        app.show()
+
+    fn frame()
+        let ui = &app.ui
+        effects.begin(now_ns(), ui.still, settings.effects[0..GuiEffectCount])
+        material_frame()
+        if step_in_ns > 0
+            if now_ns() >= step_in_ns
+                tabs.current().game.forward()
+                step_in_ns = 0
+            else: ui.wake_in((step_in_ns - now_ns()) as f64 / 1.0e9)
+        shortcuts()
+        stress_step()
+        strip_tabs.clear()
+        for i in 0..tabs.tabs.len
+            let t = &tabs.tabs[i]
+            strip_tabs.push(StripTab(t.id, t.title_text(), t.live))
+        strip.side_room = BandIconWidth * 2.0 + 6.0
+        strip.logo = logo.for_strip(theme.accent)
+        let ev = strip.draw(&app, &look, strip_tabs, tabs.active)
+        band_buttons()
+        let before = tabs.current().id
+        let count = tabs.tabs.len
+        if ev.menu
+            let m = ui.memory(strip.menu_id)
+            m.open = not m.open
+            menu_at = ev.menu_at
+        if ev.selected >= 0: tabs.active = ev.selected
+        if ev.moved_from >= 0: tabs.move(ev.moved_from, ev.moved_to)
+        if ev.closed >= 0: close_tab(ev.closed)
+        if ev.added: open_new(NewTab)
+
+        var tab = tabs.current()
+        let tab_id = tab.id
+        engines_page.update(&app, &library)
+        books_page.update(&app, &books)
+        database_page.update(&app, &recorder.db)
+        if registry.update(): app.redraw()
+        if registry_popup.ratings.update(): app.redraw()
+        install_popup.update(&app, &registry, &library)
+        if engines_page.install_registry.len > 0: install_from_registry()
+        run_lichess()
+        if install_popup.added_id > 0
+            engines_page.chosen = install_popup.added_id
+            install_popup.added_id = 0
+        choices.make(&library)
+        run_engines(tab)
+        run_queue()
+        run_events()
+        run_fastchess()
+        run_consensus()
+        run_makers()
+        if tab.kind == Analysis and not tab.editing: space_plays_best(tab)
+        board_keys(tab)
+        var asked = draw_commands(&app, &look, &icons, tab, settings.three_d or has_arg("--board3d"), settings.database_panel, lichess.state == LichessOver)
+        command_bar_page(&app, &look)
+        app.ui.arrows_kept = tab.kind == Analysis and not tab.editing or tab.kind == Play or tab.kind == Lichess
+        if app.ui.arrows_kept: analysis_keys(&app, tab.game)
+        play_asked = PanelAsksNothing
+        let chosen = content(tab)
+        tab = tabs.by_id(tab_id)
+        if play_asked == PanelAsksStart: asked = StartGame
+        elif play_asked == PanelAsksAnalyze: asked = AnalyzeGame
+        elif play_asked == PanelAsksNewGame: asked = NewGame
+        elif play_asked == PanelAsksCancelSearch: quick.cancel()
+        elif play_asked == PanelAsksTournament: asked = StartTournament
+        if tab.play: draw_resign(&app, &theme, &fonts, tab.play, &tab.resigning)
+        if tab.kind == Lichess: draw_lichess_resign(&app, &theme, &fonts, &lichess, &lichess_resigning)
+        if tab.event
+            tab.event_view.draw_stop(&app, &theme, &fonts, tab.event)
+            if tab.event_view.play_found
+                tab.event_view.play_found = false
+                var at: [640]u8
+                let lines = read_file(books.file(tab.event.config.book_id, "openings.txt", &at).ptr as cstr)
+                defer free_file(lines)
+                tab.event.take_openings(str(lines))
+            if tab.event_view.open_game >= 0
+                let wanted = tab.event_view.open_game
+                tab.event_view.open_game = -1
+                analyze_finished(tab.event, wanted)
+                tab = tabs.by_id(tab_id)
+        act(tab, asked)
+        if chosen != NewTab: choose_from_page(chosen)
+        main_menu()
+        picker.draw(&app, &theme, &fonts)
+        show_log()
+        engines_page.draw_popups(&app, &library, &theme, &fonts)
+        var popup_look = board_look_now()
+        books_page.draw_popups(&app, &books, &choices, &popup_look)
+        database_page.legacy.draw_popups(&app, &game_dbs, &theme, &fonts)
+        run_books_asked()
+        registry_popup.draw(&app, &registry, &theme, &fonts)
+        if registry_popup.install_wanted >= 0
+            install_popup.open(&registry, registry_popup.install_wanted, &data)
+            registry_popup.install_wanted = -1
+        install_popup.draw(&app, &registry, &library, &theme, &fonts)
+        if install_popup.back
+            install_popup.back = false
+            registry_popup.shown = true
+        if engines_page.remove_id > 0: remove_engine(engines_page.remove_id)
+        if engines_page.editor.press_engine > 0: press_option()
+        let due = library.save_when_due()
+        if due >= 0.0: app.wake_in(due)
+        keep_layout()
+        keep_zoom()
+        play_sounds(tabs.current())
+        let settings_due = settings.save_when_due()
+        if settings_due >= 0.0: app.wake_in(settings_due)
+        keep_session_when_due()
+        effects.finish(ui)
+        ui.draw_toasts()
+        if tabs.current().id != before or tabs.tabs.len != count: app.redraw()
+
+    fn content(tab: *GuiTab) -> TabKind
+        match tab.kind
+            NewTab
+                played.refresh(&data, settings.person_name())
+                var asks: HomeAsks
+                let kind = draw_new_tab_page(&app, &theme, &fonts, &icons, &record, &quick, &played, settings.person_name(), &lichess, &asks)
+                take_home_asks(tab, &asks)
+                history_asked()
+                return kind
+            Analysis, Play, Event
+                var board_look = board_look_now()
+                let seen = tab.game ? tab.game.version : 0
+                if tab.play: play_asked = workspace.draw_play(&app, &look, &theme, &fonts, tab, &board_look, &choices)
+                elif tab.event: workspace.draw_event(&app, &look, &theme, &fonts, tab, &board_look, &library)
+                elif tab.kind == Event: placeholder(tab.kind)
+                else
+                    workspace.review_engine = library.review_id(settings.review_engine)
+                    tab.database.mode = settings.evals_mode
+                    tab.database.show_wdl = settings.evals_wdl
+                    tab.database.sort = settings.evals_sort
+                    workspace.draw(&app, &look, &theme, &fonts, tab, &board_look, &choices, settings.database_panel)
+                    if tab.database.mode != settings.evals_mode or tab.database.show_wdl != settings.evals_wdl or tab.database.sort != settings.evals_sort
+                        settings.evals_mode = tab.database.mode
+                        settings.evals_wdl = tab.database.show_wdl
+                        settings.evals_sort = tab.database.sort
+                        settings.changed()
+                    take_review_asks(tab)
+                if tab.game and tab.game.version != seen: app.redraw()
+            Contribute
+                var board_look = board_look_now()
+                let seen = tab.game ? tab.game.version : 0
+                if workspace.draw_contribute(&app, &look, &theme, &fonts, tab, &board_look, &choices, settings.cloud_share)
+                    open_new(Settings)
+                    settings_page.section = SectionCloud
+                if tab.game and tab.game.version != seen: app.redraw()
+            Lichess
+                var board_look = board_look_now()
+                let seen = lichess.view.version
+                if workspace.draw_lichess(&app, &look, &theme, &fonts, &icons, tab, &board_look, &lichess, &lichess_chat, &lichess_resigning) == LichessAsksAnalyze: play_asked = PanelAsksAnalyze
+                if lichess.view.version != seen: app.redraw()
+            FastChess
+                if tab.fast
+                    var board_look = board_look_now()
+                    workspace.draw_fast(&app, &look, tab, &board_look)
+                else: placeholder(tab.kind)
+            Tournaments
+                var board_look = board_look_now()
+                let asked = index.draw(&app, &look, &board_look, events[0..events.len])
+                if asked == IndexNew: return NewTournament
+                if asked == IndexOpen and index.chosen >= 0 and index.chosen < events.len: show_event(events[index.chosen])
+            NewTournament
+                var board_look = board_look_now()
+                if tab.draft and tab.draft.draw(&app, &look, &board_look, &icons, &library, &books): play_asked = PanelAsksTournament
+            Engines: engines_page.draw(&app, &look, &library, &theme, &fonts)
+            Profile
+                var board_look = board_look_now()
+                played.refresh(&data, settings.person_name())
+                profile_page.draw(&app, &look, &board_look, &record, events[0..events.len], &played, settings.person_name(), settings.cloud_share)
+                history_asked()
+                if profile_page.open_cloud
+                    profile_page.open_cloud = false
+                    open_new(Settings)
+                    settings_page.section = SectionCloud
+            Settings
+                var board_look = board_look_now()
+                if settings_page.draw(&app, &look, &settings, &board_look, &data, &install_popup.token)
+                    apply_settings()
+                    settings.changed()
+            Database
+                var board_look = board_look_now()
+                database_page.draw(&app, &look, &board_look, &recorder.db, &game_dbs)
+                database_asked()
+                database_page_asked()
+            Books
+                var board_look = board_look_now()
+                books_page.draw(&app, &look, &books, events[0..events.len], makers[0..makers.len], &board_look)
+                if books_page.use_id > 0: use_book(books_page.use_id)
+            else: placeholder(tab.kind)
+        return NewTab
+
+    fn take_home_asks(tab: *GuiTab, asks: *HomeAsks)
+        if asks.changed: record.save()
+        if asks.search
+            find_match()
+            quick_tab = tab.id
+            app.wake_in(0.0)
+        if asks.cancel: quick.cancel()
+        if asks.lichess: choose_from_page(Lichess)
+        if asks.open_game >= 0: profile_page.history.analyse_at = asks.open_game
+        if asks.engine
+            choose_from_page(Analysis)
+            let t = tabs.current()
+            if t.analysis: t.analysis.on = true
+
+    fn find_match()
+        let elo = record.chosen ? record.chosen_elo : 0
+        let speed = record.quick_speed()
+        quick.search(now_ns(), record.near(speed).rating, speed, record.rated and speed != SpeedInfinite, elo, record.chosen_style)
+
+    fn run_queue()
+        for i in 0..tabs.tabs.len
+            let p = tabs.tabs[i].play
+            if not p: continue
+            p.queue_note_len = 0
+            if quick.searching() and tabs.tabs[i].id == quick_tab: queue_note(p)
+        if not quick.searching(): return
+        if not quick.step(now_ns())
+            app.wake_in(0.05)
+            return
+        for i in 0..tabs.tabs.len
+            if tabs.tabs[i].id != quick_tab: continue
+            tabs.active = i as int
+            if tabs.tabs[i].kind == NewTab: choose_from_page(Play)
+            start_quick(tabs.current())
+            return
+
+    fn queue_note(p: *PlayGame)
+        let t = &quick.terms
+        var line: [120]u8
+        var elo: [16]u8
+        if quick.state == QueueSearching: p.queue_note_len = keep_text(format(&line, "Finding {t.speed == SpeedInfinite ? "an" : "a"} {SpeedWords[t.speed]} opponent within {quick.window(now_ns())} of {record.near(t.speed).shown()}"), p.queue_note[0..120])
+        else: p.queue_note_len = keep_text(format(&line, "Found {t.name_text()}, {t.full() ? "full strength" : format(&elo, "{t.elo}")}, {StyleNames[t.style]}"), p.queue_note[0..120])
+
+    fn start_quick(t: *GuiTab)
+        let p = t.play
+        if not p: return
+        let terms = quick.terms
+        p.take_start()
+        p.setup.engine_id = library.bundled_id()
+        p.setup.profile_id = 0
+        p.setup.side = ChooseRandom
+        p.setup.time = record.clock_at(terms.speed)
+        p.setup.show_eval = false
+        p.setup.natural = record.natural
+        p.setup.terms = terms
+        p.rating_before = record.near(terms.speed).shown()
+        if not p.begin(&library, settings.person_name()): return
+        var title: [48]u8
+        var clock: [16]u8
+        t.set_title(format(&title, "{SpeedNames[terms.speed]} {record.clock_text_at(terms.speed, &clock)}"))
+        t.flipped = p.human == Black
+        if t.analysis and terms.rated: t.analysis.on = false
+        app.redraw()
+
+    fn space_plays_best(tab: *GuiTab)
+        let a = tab.analysis
+        if not a or not a.on or app.ui.wants_text or not app.pointer.pressed(Space): return
+        app.ui.focus = 0
+        if a.lines_fresh() and a.lines[0].count > 0: tab.game.play(a.lines[0].moves[0])
+
+    fn board_keys(tab: *GuiTab)
+        let i = &app.pointer
+        if app.ui.wants_text or i.ctrl: return
+        let board = tab.kind == Analysis and not tab.editing or tab.kind == Play or tab.kind == Event or tab.kind == Lichess or tab.kind == Contribute
+        if board and i.pressed(F): tab.flipped = not tab.flipped
+        if tab.play and tab.play.pressing and i.pressed(Space)
+            app.ui.focus = 0
+            tab.play.hit_clock()
+        elif tab.play and tab.play.by_hand and tab.play.can_move() and i.pressed(Space)
+            app.ui.focus = 0
+            tab.board.space_hit = true
+        elif tab.kind == Lichess and tab.board.free_on and lichess.my_turn() and i.pressed(Space)
+            app.ui.focus = 0
+            tab.board.space_hit = true
+
+    fn act(tab: *GuiTab, asked: TabAction)
+        let ui = &app.ui
+        let i = &app.pointer
+        var action = asked
+        if tab.kind == Analysis and i.ctrl and i.pressed(V) and not ui.wants_text: action = PasteText
+        match action
+            OpenPlay
+                if tab.kind == Analysis: play_from(tab.game)
+                else: open_new(Play)
+            OpenTournamentSetup: open_new(NewTournament)
+            PasteText
+                if tab.editing: tab.editor.read(clipboard_text(&clip))
+                else: picker.paste(ui, tab.game, clipboard_text(&clip))
+            CopyFen: copy_fen(ui, tab.game, &clip)
+            CopyPgn: copy_pgn(ui, tab.game, &clip)
+            ToggleEngine
+                if tab.analysis: tab.analysis.on = not tab.analysis.on
+            EditBoard
+                if not tab.editing: tab.editor.load(tab.game.board())
+                tab.editing = not tab.editing
+            AddEngineFile: engines_page.adding.pick(&app)
+            ImportBook: books_page.importing.pick(&app)
+            AddBookRegistry: books_page.fetching.open(&data)
+            GenerateBook: books_page.generating.open(&library)
+            ImportGames: database_page.pick_import(&app)
+            ImportLichess: database_page.lichess_open = true
+            ExportGames: database_page.pick_export(&app)
+            ToggleDatabase
+                settings.database_panel = not settings.database_panel
+                settings.changed()
+            ShowFlat, ShowThreeD
+                settings.three_d = action == ShowThreeD
+                apply_settings()
+                settings.changed()
+            NewProfile: engines_page.new_profile(&library)
+            ShowEngineLog
+                if tab.analysis: log_view.open_for(tab.id)
+            SkipPosition
+                if tab.run: tab.run.skip()
+            RestartRun
+                if tab.run: tab.run.restart()
+            AddEngineRegistry: registry_popup.open(&registry, &data)
+            StartGame: start_game(tab)
+            NewGame
+                if tab.play and tab.play.setup.terms.quick
+                    let t = &tab.play.setup.terms
+                    quick.search(now_ns(), record.near(t.speed).rating, t.speed, t.rated, t.chosen ? t.elo : 0, t.style)
+                    quick_tab = tab.id
+                elif tab.play: tab.play.choose_again()
+            TakeBack
+                if tab.play: tab.play.take_back()
+            OfferDraw
+                if tab.play: tab.play.offer_draw()
+            ResignGame: tab.resigning = true
+            AnalyzeGame
+                if tab.play: analyze_play(tab.play)
+                elif tab.kind == Lichess: analyze_lichess()
+            PauseEvent
+                if tab.event: tab.event.pause()
+            ResumeEvent
+                if tab.event: tab.event.resume()
+            StopEvent: tab.event_view.stopping = true
+            StopFastchess: tab.fast_view.stopping = true
+            ContinueFastchess: continue_fast(tab)
+            ShowFastBoards: show_fast_eco(tab, false)
+            ShowFastEco: show_fast_eco(tab, true)
+            StartTournament: start_tournament(tab)
+
+    fn placeholder(kind: TabKind)
+        let ui = &app.ui
+        let top = TabRowHeight + CommandBarHeight
+        let x = 32.0
+        ui.text(x, top + 28.0, kind_title(kind), UiTextStyle(face: fonts.strong, size: 15.0, color: theme.ink))
+        ui.text(x, top + 54.0, phase_of(kind), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+
+    fn open_new(kind: TabKind)
+        tabs.open(kind)
+        give_game(tabs.current())
+        app.redraw()
+
+    fn start_run_at(tab: *GuiTab, fen: str)
+        if not tab.run or fen.len == 0 or not tab.run.start_from(fen): return
+        tab.run.start_text.set(fen)
+        tab.game.reset(&tab.run.start)
+
+    fn give_game(tab: *GuiTab)
+        if not tab.game and (tab.kind == Analysis or tab.kind == Play or tab.kind == Contribute)
+            let g = new Game
+            g.reset_to_start()
+            games.push(g)
+            tab.game = g
+        if not tab.analysis and (tab.kind == Analysis or tab.kind == Play or tab.kind == Contribute)
+            tab.analysis = new EngineAnalysis
+            tab.analysis.threads = tab.kind == Play ? 1 : settings.threads
+            tab.analysis.hash_mb = settings.hash_mb
+            tab.analysis.engine_id = library.chosen_id()
+        if not tab.run and tab.kind == Contribute: tab.run = new ContributeRun
+        if not tab.draft and tab.kind == NewTournament
+            tab.draft = new TournamentDraft
+            tab.draft.start(&library)
+        if tab.kind == Lichess: tab.game = &lichess.view
+        if not tab.play and tab.kind == Play
+            let p = new PlayGame
+            p.game = tab.game
+            p.setup = play_setup
+            if library.index_of(p.setup.engine_id) < 0: p.setup.engine_id = library.chosen_id()
+            p.take_start()
+            p.lay_out()
+            tab.play = p
+
+    fn start_game(tab: *GuiTab)
+        let p = tab.play
+        if not p or not p.begin(&library, settings.person_name()): return
+        play_setup = p.setup
+        tab.flipped = p.human == Black
+        app.redraw()
+
+    fn play_from(from: *Game)
+        open_new(Play)
+        let p = tabs.current().play
+        p.take_opening(from)
+        p.lay_out()
+
+    fn analyze_finished(r: *EventRunner, i: int)
+        let g = new Game
+        if not r.read_finished(i, g)
+            app.ui.toast("Could not read the game from the tournament's games.pgn file.")
+            return
+        g.to_end()
+        games.push(g)
+        tabs.open(Analysis)
+        let t = tabs.current()
+        t.game = g
+        give_game(t)
+        app.redraw()
+
+    fn start_tournament(tab: *GuiTab)
+        let d = tab.draft
+        if not d or d.config.problem().len > 0: return
+        let gone = d.book_problem(&books)
+        if gone.len > 0
+            app.ui.toast(gone)
+            return
+        var at: [640]u8
+        let lines = read_file(books.file(max(d.config.book_id, 0), "openings.txt", &at).ptr as cstr)
+        defer free_file(lines)
+        if d.config.book == CollectionBook and lines.len == 0
+            app.ui.toast("Could not read the opening book.")
+            return
+        var consensus: *BookEntry = null
+        if d.config.book == ConsensusBook
+            consensus = d.consensus_book(&books)
+            if not books.add(consensus, "")
+                app.ui.toast("Could not save the consensus book to the data folder.")
+                return
+            d.config.use_consensus(consensus.id, consensus.made, consensus.name_text())
+        let r = new EventRunner
+        r.config = d.config
+        d.config = EventConfig()
+        if not r.create(&data, str(lines))
+            d.config = r.config
+            r.config = EventConfig()
+            r.release()
+            app.ui.toast("Could not save the tournament folder.")
+            return
+        events.push(r)
+        if consensus
+            consensus.event_id = r.id
+            books.save(consensus)
+        d.release()
+        tab.draft = null
+        tab.kind = Event
+        tab.event = r
+        tab.set_title(r.config.name_text())
+        app.redraw()
+
+    fn run_makers()
+        for m in makers
+            m.update(&app, &library)
+
+    fn run_consensus()
+        for r in events
+            if not r.waiting_for_book() or r.state == EventStopped or r.state == EventFinished: continue
+            let e = books.find(r.config.book_id)
+            if not e or e.made != r.config.book_made
+                r.book_maker = null
+                continue
+            if not r.book_maker
+                for m in makers
+                    if m.book == e: r.book_maker = m
+            if not r.book_maker
+                let m = new BookMaker
+                m.open(&books, e, &library)
+                var over: EngineProfile
+                defer over.release()
+                for k in 0..r.config.entrants.len
+                    let n = &r.config.entrants[k]
+                    r.config.overrides(k as int, library.find(n.engine_id), &over)
+                    m.add_searcher(&library, n.engine_id, n.profile_id, &over)
+                makers.push(m)
+                r.book_maker = m
+            let m = r.book_maker
+            if m.state == MakerDone
+                var at: [640]u8
+                let lines = read_file(books.file(e.id, "openings.txt", &at).ptr as cstr)
+                defer free_file(lines)
+                if not r.take_openings(str(lines)): app.ui.toast("Could not save the openings in the consensus book.")
+                continue
+            let running = r.state == EventRunning
+            if running and m.state == MakerStopped: m.start()
+            elif not running and m.state == MakerRunning: m.stop()
+
+    fn run_books_asked()
+        let p = &books_page
+        if p.generating.asked
+            let e = p.generating.asked
+            p.generating.asked = null
+            if not books.add(e, "")
+                app.ui.toast("Could not save the book to the data folder.")
+                return
+            p.chosen = e.id
+            make_book(e)
+        if p.stop_id > 0
+            for m in makers
+                if m.book.id == p.stop_id: m.stop()
+            p.stop_id = 0
+        if p.resume_id > 0
+            let e = books.find(p.resume_id)
+            p.resume_id = 0
+            if e: make_book(e)
+        if p.remove_id > 0
+            let id = p.remove_id
+            p.remove_id = 0
+            for i in 0..makers.len
+                if makers[i].book.id != id: continue
+                for r in events
+                    if r.book_maker == makers[i]: r.book_maker = null
+                makers[i].stop()
+                makers[i].release()
+                makers.remove(i)
+                break
+            if not books.remove(id): app.ui.toast("Could not remove the book folder.")
+
+    fn make_book(e: *BookEntry)
+        for m in makers
+            if m.book == e
+                m.tries = 0
+                m.start()
+                return
+        let m = new BookMaker
+        m.open(&books, e, &library)
+        m.tries = 0
+        m.start()
+        makers.push(m)
+        app.redraw()
+
+    fn apply_settings()
+        let s = &settings
+        let asked_font = arg_word("--font")
+        let font = asked_font.len > 0 ? font_named(asked_font) : s.font
+        if font != fonts.font: fonts.choose(&app.ui, font)
+        let asked_theme = arg_word("--theme")
+        set_theme(asked_theme.len > 0 ? theme_named(asked_theme) : s.theme)
+        let asked_board = arg_word("--board")
+        palette = asked_board.len > 0 ? palette_named(asked_board) : s.palette
+        let asked_pieces = arg_word("--pieces")
+        pieces = asked_pieces.len > 0 ? piece_set_named(asked_pieces) : s.pieces
+        let asked_costume = arg_word("--costume")
+        costume = asked_costume.len > 0 ? costume_named(asked_costume) : s.costume
+        let asked_finish = arg_word("--finish")
+        finish = asked_finish.len > 0 ? finish_named(asked_finish) : s.finish
+        let asked_backdrop = arg_word("--backdrop")
+        backdrop = asked_backdrop.len > 0 ? backdrop_named(asked_backdrop) : s.backdrop
+        let asked_picture = arg_word("--picture")
+        let picture = asked_picture.len > 0 ? asked_picture : str(s.picture[0..s.picture.len])
+        if backdrop == Picture and not surfaces.load_picture(&app.gpu, picture): backdrop = ThemeBackdrop
+        surfaces.colour_a = s.backdrop_a
+        surfaces.colour_b = s.backdrop_b
+        surfaces.blend = s.backdrop_blend
+        show_arrows = s.engine_arrows.on
+        app.ui.still = s.still or has_arg("--still")
+        analysis_hz = s.analysis_hz
+        engine_priority = s.priority
+        sounds.volume = s.volume
+        for k in 0..SoundCount
+            sounds.levels[k] = s.sound_levels[k]
+            sounds.muted[k] = s.sound_muted[k]
+        sounds.ready(s.sounds)
+        if s.vsync != vsync_on and app.set_vsync(s.vsync): vsync_on = s.vsync
+        scene.set_quality(&app.gpu, SceneQuality(samples: min(s.msaa, scene.most_samples(&app.gpu)), scale: s.render_scale, shadow: s.shadow_size, aniso: s.anisotropy as f32))
+        app.redraw()
+
+    fn board_look_now() -> BoardLook
+        let s = &settings
+        var look = BoardLook(BoardColors.of(palette), &theme, &fonts, &sheet, pieces, show_arrows)
+        look.costume = costume
+        look.coordinates = s.coordinates
+        look.highlights = s.highlights
+        look.targets = s.targets
+        look.target_rgb = s.target_color
+        for k in 0..ArrowKinds: look.arrow_colors[k] = s.arrow_paint(k as ArrowKind, look.colors, &theme)
+        look.engine_width = s.engine_arrows.width
+        look.notes = s.note_arrows.on
+        look.note_arrow = s.note_arrows.color_of(1.0)
+        look.note_width = s.note_arrows.width
+        look.effects = &effects
+        look.surfaces = &surfaces
+        look.backdrop = backdrop
+        if s.three_d or has_arg("--board3d"): look.scene = &scene
+        look.desk_clock = s.desk_clock
+        look.desk_cards = s.desk_cards
+        look.flat_arrows = s.flat_arrows
+        look.free_moves = s.free_moves
+        look.style = SceneStyle(s.board_style, s.set_style, s.clock_style, s.card_style, s.room_style, s.felt_style, s.knights_sideways, s.plate_style, s.clock_left)
+        if has_arg("--room"): look.style.room = style_named(RoomStyleWords, arg_word("--room")) as RoomStyle
+        return look
+
+    fn play_sounds(tab: *GuiTab)
+        clock_sounds(tab)
+        let g = sounding_game(tab)
+        if not g
+            sound_tab = 0
+            return
+        let at = g.at
+        let parent = at > 0 and at < g.nodes.len ? g.nodes[at].parent : 0
+        let stepped = tab.id == sound_tab and g == sound_game and at != sound_node and at > 0 and at < g.nodes.len and (parent == sound_node or parent > 0 and g.nodes[parent].parent == sound_node)
+        sound_tab = tab.id
+        sound_game = g
+        sound_node = at
+        let free = &tab.board.free
+        let landed = free.landed > 0
+        let by_hand = stepped and free.made == g.nodes[at].board.key
+        free.landed = 0
+        if stepped: free.made = 0
+        if not settings.sounds: return
+        if landed: sounds.play(SoundMove)
+        if stepped and not by_hand
+            let n = &g.nodes[at]
+            sounds.play(n.move.is_capture ? SoundCapture : n.move.is_castle ? SoundCastle : SoundMove)
+
+    fn sounding_game(tab: *GuiTab) -> *Game
+        if tab.kind == Analysis or tab.kind == Play or tab.kind == Lichess: return tab.game
+        if tab.kind != Event or not tab.event or tab.event.slots.len == 0: return null
+        let s = tab.event_view.focused(tab.event)
+        return &s.game
+
+    fn clock_sounds(tab: *GuiTab)
+        let play = tab.play
+        let running = settings.sounds and (settings.three_d or has_arg("--board3d")) and settings.desk_clock and tab.kind == Play and play != null and play.state == PlayRunning and play.clock.running
+        sounds.tick(running)
+        if running and tab.id == clock_tab and play.clock.side != clock_side
+            if play.clock.side == play.human: sounds.play_late_press()
+            else: sounds.play(SoundClockPress)
+        clock_tab = running ? tab.id : 0
+        clock_side = running ? play.clock.side : White
+
+    fn keep_zoom()
+        if settings.zoom == app.zoom_goal: return
+        settings.zoom = app.zoom_goal
+        settings.changed()
+
+    fn keep_layout()
+        let w = &workspace
+        let s = &settings
+        if not w.ready: return
+        let evals = w.evals_most >= EvalsUnlimited ? 0.0 : w.evals_most
+        if w.column.pos == s.column and w.analysis.pos == s.analysis and w.graph.pos == s.graph and evals == s.evals and w.shift == s.shift: return
+        s.column = w.column.pos
+        s.analysis = w.analysis.pos
+        s.graph = w.graph.pos
+        s.evals = evals
+        s.shift = w.shift
+        s.changed()
+
+    fn place_window()
+        let s = &settings
+        if not s.window_known: return
+        var r = SDL_Rect(x: s.window_x, y: s.window_y, w: max(s.window_w, 640), h: max(s.window_h, 480))
+        if SDL_GetDisplayForRect(&r) != 0 and has_arg("--width") == false: SDL_SetWindowPosition(app.window.handle, s.window_x, s.window_y)
+        if s.maximized: SDL_MaximizeWindow(app.window.handle)
+
+    fn keep_window()
+        let s = &settings
+        let flags = SDL_GetWindowFlags(app.window.handle)
+        if flags & SDL_WINDOW_MINIMIZED != 0: return
+        s.maximized = flags & SDL_WINDOW_MAXIMIZED != 0
+        s.window_known = true
+        if s.maximized: return
+        SDL_GetWindowPosition(app.window.handle, &s.window_x, &s.window_y)
+        SDL_GetWindowSize(app.window.handle, &s.window_w, &s.window_h)
+
+    fn history_asked()
+        let h = &profile_page.history
+        if h.resume_event >= 0 and h.resume_event < events.len
+            events[h.resume_event].resume()
+            h.open_event = h.resume_event
+        h.resume_event = -1
+        if h.open_event >= 0 and h.open_event < events.len: show_event(events[h.open_event])
+        h.open_event = -1
+        if h.analyse_at < 0: return
+        let at = h.analyse_at
+        h.analyse_at = -1
+        var buf: [600]u8
+        let bytes = read_file(data.path("history\\games.pgn", &buf).ptr as cstr)
+        defer free_file(bytes)
+        if at >= bytes.len: return
+        var g: Game
+        read_pgn(str(bytes), at, &g)
+        analyze(&g)
+        free_game(&g)
+
+    fn database_asked()
+        let v = &database_page.legacy
+        if v.open_at < 0: return
+        let at = v.open_at
+        v.open_at = -1
+        var path: [640]u8
+        var text: [..]u8
+        defer text.free()
+        if not read_game_text(game_dbs.file(v.open_db, "games.pgn", &path), at, v.open_len, &text)
+            app.ui.toast("Could not read the game from the imported database.")
+            return
+        var g: Game
+        read_pgn(str(text[0..text.len]), 0, &g)
+        analyze(&g)
+        free_game(&g)
+
+    fn database_page_asked()
+        let p = &database_page
+        if p.open_game < 0: return
+        let id = p.open_game as u32
+        let ply = p.open_ply
+        p.open_game = -1
+        var meta: DbGame
+        var tags: [..]u8
+        var moves: [..]u16
+        var text: [..]u8
+        defer tags.free()
+        defer moves.free()
+        defer text.free()
+        if not recorder.db.read_game(id, &meta, &tags, &moves)
+            app.ui.toast("Could not read the game.")
+            return
+        db_write_pgn(&text, str(tags[0..tags.len]), &moves, meta.result)
+        var g: Game
+        read_pgn(str(text[0..text.len]), 0, &g)
+        var at = 0
+        for k in 0..ply
+            let next = g.nodes[at].first
+            if next == NoNode: break
+            at = next
+        g.go(at)
+        analyze(&g)
+        free_game(&g)
+
+    fn use_book(id: int)
+        books_page.use_id = 0
+        let b = books.find(id)
+        if not b: return
+        open_new(NewTournament)
+        let d = tabs.current().draft
+        if not d: return
+        if not d.ready: d.start(&library)
+        d.config.use_book(b.id, b.made, b.name_text())
+        d.step = 1
+
+    fn show_event(r: *EventRunner)
+        for i in 0..tabs.tabs.len
+            if tabs.tabs[i].event == r
+                tabs.active = i as int
+                app.redraw()
+                return
+        open_event(r)
+
+    fn open_event(r: *EventRunner)
+        tabs.open(Event)
+        let t = tabs.current()
+        t.event = r
+        t.set_title(r.config.name_text())
+        app.redraw()
+
+    fn event_from_args()
+        let id = arg_int("--event-open", 0)
+        if id > 0
+            for loaded in events
+                if loaded.id == id
+                    show_event(loaded)
+                    tabs.current().event_view.panel = clamp(arg_int("--event-panel", 0), 0, 3)
+                    tabs.current().event_view.made_graph().kind = clamp(arg_int("--event-graph", 0), 0, 4)
+                    return
+            app.ui.toast("Tournament not found.")
+            return
+        let r = new EventRunner
+        let c = &r.config
+        let engine = library.chosen_id()
+        let entry = library.find(engine)
+        let engine_name = entry ? entry.display_name() : "Engine"
+        var name: [100]u8
+        let mix = has_arg("--event-mix") and library.entries.len > 0
+        for i in 0..arg_int("--event-engines", 3)
+            let e = mix ? &library.entries[i % library.entries.len] : entry
+            c.add_entrant(e ? e.id : engine, 0, format(&name, "{e ? e.display_name() : engine_name} {i + 1}"))
+        c.set_name(format(&name, "{engine_name} self-play"))
+        c.at_once = arg_int("--event-at-once", 1)
+        c.games_per_pairing = arg_int("--event-games", 2)
+        let depth = arg_int("--event-depth", 0)
+        let (tc, tc_ok) = read_time_control(arg_word("--event-time"))
+        if depth > 0
+            c.control.kind = FixedDepth
+            c.control.depth = depth
+        elif tc_ok: c.control = tc
+        let book = books.find(arg_int("--event-book", 0))
+        if book: c.use_book(book.id, book.made, book.name_text())
+        var consensus: *BookEntry = null
+        if has_arg("--event-consensus")
+            consensus = new BookEntry
+            set_text(&consensus.name, format(&name, "Consensus for {c.name_text()} {next_event_id(&data)}"))
+            consensus.kind = BookConsensus
+            set_text(&consensus.origin, format(&name, "Generated by {c.entrants.len} engines in {c.name_text()}"))
+            consensus.depth = 6
+            consensus.agree_depth = 7
+            consensus.band_low = 0
+            consensus.band_high = 100
+            consensus.wanted = openings_needed(c)
+            consensus.seed = c.seed
+            consensus.state = BookMaking
+            if books.add(consensus, ""): c.use_consensus(consensus.id, consensus.made, consensus.name_text())
+        var at: [640]u8
+        let lines = read_file(books.file(book ? book.id : 0, "openings.txt", &at).ptr as cstr)
+        defer free_file(lines)
+        if not r.create(&data, str(lines))
+            app.ui.toast("Could not save the tournament folder.")
+            r.release()
+            return
+        events.push(r)
+        if consensus
+            consensus.event_id = r.id
+            books.save(consensus)
+        open_event(r)
+        tabs.current().event_view.panel = clamp(arg_int("--event-panel", 0), 0, 3)
+        tabs.current().event_view.made_graph().kind = clamp(arg_int("--event-graph", 0), 0, 4)
+
+    fn run_events()
+        for r in events
+            r.update(&app, &library)
+        for i in 0..tabs.tabs.len
+            let t = &tabs.tabs[i]
+            if t.event: t.live = t.event.state == EventRunning or t.event.state == EventPausing
+
+    fn analyze(played: *Game)
+        open_new(Analysis)
+        tabs.current().game.copy_from(played)
+        recall_review(tabs.current())
+
+    fn run_lichess()
+        let now = now_ns()
+        if lichess.tick(now): app.redraw()
+        let wait = lichess.next_wake_s(now)
+        if wait >= 0.0: app.wake_in(wait)
+        let playing = lichess.playing()
+        if playing and not lichess_was_playing
+            open_new(Lichess)
+            tabs.current().flipped = not lichess.white
+        lichess_was_playing = playing
+        if lichess.take_ended(): keep_lichess_game()
+
+    fn keep_lichess_game()
+        if lichess.result() == Unfinished: return
+        var kept: Game
+        defer free_game(&kept)
+        kept.copy_from(&lichess.view)
+        let g = &lichess.game
+        var line: [120]u8
+        var date: [16]u8
+        let speed = g.speed.text()
+        kept.set_tag("Event", format(&line, "{g.rated ? "Rated" : "Casual"} {speed} game"))
+        kept.set_tag("Site", format(&line, "https://lichess.org/{g.id.text()}"))
+        kept.set_tag("Date", today_text(&date))
+        kept.set_tag("White", g.white.name.text())
+        kept.set_tag("Black", g.black.name.text())
+        kept.set_tag("Result", result_text(kept.result))
+        if g.white.rating > 0: kept.set_tag("WhiteElo", format(&line, "{g.white.rating}"))
+        if g.black.rating > 0: kept.set_tag("BlackElo", format(&line, "{g.black.rating}"))
+        if g.initial_ms >= 0: kept.set_tag("TimeControl", format(&line, "{g.initial_ms / 1000}+{g.increment_ms / 1000}"))
+        kept.set_tag("Rated", g.rated ? "Yes" : "No")
+        kept.set_tag(lichess.white ? "WhiteType" : "BlackType", "human")
+        var text: [..]u8
+        defer text.free()
+        write_pgn(&kept, &text)
+        text.push('\n')
+        recorder.keep_game(str(text[0..text.len]), false, DbFromLichess)
+        if not save_history(&data, str(text[0..text.len])): app.ui.toast("Could not save the game to your history.")
+
+    fn analyze_lichess()
+        if lichess.state != LichessOver: return
+        open_new(Analysis)
+        let t = tabs.current()
+        t.game.copy_from(&lichess.view)
+        t.flipped = not lichess.white
+        start_review(t)
+
+    fn analyze_play(p: *PlayGame)
+        let from = tabs.current().id
+        let over = p.state == PlayOver
+        open_new(Analysis)
+        let t = tabs.current()
+        t.game.copy_from(p.game)
+        if over: start_review(t)
+        else
+            t.analysis.on = false
+            for i in 0..tabs.tabs.len
+                if tabs.tabs[i].id == from: tabs.active = i as int
+
+    fn start_review(t: *GuiTab)
+        if not t.game: return
+        if not t.review: t.review = new GameReview
+        let id = library.review_id(settings.review_engine)
+        let entry = library.find(id)
+        t.review.start(t.game, id, settings.threads, entry ? entry.display_name() : "")
+        app.redraw()
+
+    fn keep_review(t: *GuiTab)
+        if not t.game or not t.review or t.review.by_len == 0: return
+        if not save_review(&data, t.game, t.review.by_text(), t.review.complete): app.ui.toast("Could not save the game review.")
+
+    fn recall_review(t: *GuiTab)
+        if not t.game: return
+        var name: [96]u8
+        let (by, done) = load_review(&data, t.game, &name)
+        if by.len == 0: return
+        if not t.review: t.review = new GameReview
+        t.review.take(by, done)
+
+    fn take_review_asks(tab: *GuiTab)
+        let w = &workspace
+        if w.review_picked > 0
+            settings.review_engine = w.review_picked
+            settings.changed()
+            w.review_picked = 0
+        if w.review_ask == ReviewStart: start_review(tab)
+        if w.review_ask == ReviewStop and tab.review
+            tab.review.stop()
+            keep_review(tab)
+        w.review_ask = NoReviewAsk
+
+    fn end_play(p: *PlayGame)
+        p.abandon()
+        if p.unsaved: keep_played(p)
+        p.release()
+
+    fn keep_played(p: *PlayGame)
+        p.unsaved = false
+        rate(p)
+        var kept: Game
+        p.copy_for_history(&kept)
+        if not save_played(&data, &kept): app.ui.toast("Could not save the game to your history.")
+        free_game(&kept)
+
+    fn rate(p: *PlayGame)
+        let t = &p.setup.terms
+        if not t.rated or p.rated_done or p.state != PlayOver or not p.person_moved(): return
+        let score = p.person_score()
+        if score < 0.0: return
+        p.rated_done = true
+        let r = &record.ratings[t.speed]
+        let next = r.after(t.elo as f64, score)
+        p.rating_change = next.shown() - r.shown()
+        var shown: [16]u8
+        p.rating_after_len = keep_text(next.text(&shown), p.rating_after[0..16])
+        record.take(t.speed, next)
+        var n: [16]u8
+        p.game.set_tag(p.human == White ? "WhiteRatingDiff" : "BlackRatingDiff", format(&n, "{p.rating_change >= 0 ? "+" : ""}{p.rating_change}"))
+        p.version += 1
+        app.redraw()
+
+    fn play_from_args()
+        open_new(Play)
+        let tab = tabs.current()
+        let p = tab.play
+        let (tc, tc_ok) = read_time_control(arg_word("--play-time"))
+        if tc_ok: p.setup.time = tc
+        if has_arg("--play-black"): p.setup.side = ChooseBlack
+        let depth = arg_int("--play-depth", 0)
+        if depth > 0
+            p.setup.strength.kind = DepthStrength
+            p.setup.strength.depth = depth
+        let elo = arg_int("--play-elo", 0)
+        if elo > 0
+            p.setup.strength.kind = EloStrength
+            p.setup.strength.elo = elo
+        p.setup.show_eval = has_arg("--play-eval")
+        p.instant = has_arg("--play-instant")
+        if has_arg("--play-help") and tab.analysis: tab.analysis.on = true
+        if has_arg("--play-go"): start_game(tab)
+        let pre = arg_word("--premoves")
+        if pre.len >= 4 and p.can_premove()
+            tab.board.follow(p.game.board(), true)
+            for k in 0..(pre.len + 1) / 5
+                let w = pre[k * 5..k * 5 + 4]
+                tab.board.queue(Square(w[0] as int - 'a', w[1] as int - '1'), Square(w[2] as int - 'a', w[3] as int - '1'), NoKind)
+
+    fn run_engines(front: *GuiTab)
+        let minimised = SDL_GetWindowFlags(app.window.handle) & SDL_WINDOW_MINIMIZED != 0
+        var path: [600]u8
+        for i in 0..tabs.tabs.len
+            let t = &tabs.tabs[i]
+            let r = t.review
+            if not r or not r.running: continue
+            let exe = library.exe_path(r.engine_id, &path)
+            r.update(&app, t.game, exe, folder_of(exe))
+            if not r.running: keep_review(t)
+        for i in 0..tabs.tabs.len
+            let t = &tabs.tabs[i]
+            let a = t.analysis
+            if not a: continue
+            if library.index_of(a.engine_id) < 0: a.switch_engine(library.chosen_id())
+            let helping = t.kind == Play and t.play != null and t.play.state != PlayChoosing and t.play.helps()
+            a.shown = t.id == front.id and (t.kind == Analysis or helping) and not minimised and not t.editing
+            if t.kind == Contribute: a.shown = true
+            a.follow(t.game)
+            let exe = library.exe_path(a.engine_id, &path)
+            if exe.len == 0 and a.on and a.engine.state == EngineOff: a.engine.fail("No engine available. Add one in the Engines tab.")
+            let entry = library.find(a.engine_id)
+            let profile = entry ? entry.profile(a.profile_id) : null
+            if a.profile_id != 0 and not profile: a.switch_profile(0, null)
+            a.update(&app, exe, folder_of(exe), profile)
+            let name = entry ? entry.display_name() : a.engine.display_name()
+            if eval_recorder: eval_recorder.keep_analysis(a, name)
+            if t.run and t.run.step(t.game, a, eval_recorder, name): app.redraw()
+            let best = &a.lines[0]
+            if best.filled and best.bound == ExactScore and a.search_key == t.game.board().key: t.game.keep_score(t.game.at, best.kind, best.score, best.depth, best.count > 0 ? best.moves[0] : NoMove)
+            let second = &a.lines[1]
+            if second.filled and second.bound == ExactScore and a.search_key == t.game.board().key: t.game.keep_second(t.game.at, second.kind, second.score, second.depth, second.moves[0])
+            if a.engine.state == EngineIdle or a.engine.state == EngineSearching: library.learn_once(a.engine_id, &a.engine)
+        for i in 0..tabs.tabs.len
+            let t = &tabs.tabs[i]
+            let p = t.play
+            if not p: continue
+            let exe = library.exe_path(p.engine_id, &path)
+            p.update(&app, exe, folder_of(exe))
+            t.live = p.state == PlayRunning
+            let e = &p.player.engine
+            if e.state == EngineIdle or e.state == EngineSearching: library.learn_once(p.engine_id, e)
+            if p.declined
+                p.declined = false
+                var line: [120]u8
+                app.ui.toast(format(&line, "{p.engine_text()} declined your draw offer."))
+            if p.unsaved: keep_played(p)
+        recorder.tick(now_ns())
+        let address = arg_word("--cloud-address", str(settings.cloud_address[0..settings.cloud_address.len]))
+        cloud.configure(address, settings.database_panel, settings.cloud_share or has_arg("--cloud-share"))
+        if cloud.tick(now_ns()): app.redraw()
+        recorder.sync(&cloud)
+        if recorder.syncing(&cloud): app.ui.wake_in(0.0)
+        elif cloud.pending(): app.ui.wake_in(1.0)
+
+    fn show_log()
+        if not log_view.shown: return
+        for i in 0..tabs.tabs.len
+            let t = &tabs.tabs[i]
+            if t.id != log_view.tab_id or not t.analysis: continue
+            let e = &t.analysis.engine
+            let entry = library.find(t.analysis.engine_id)
+            if log_view.draw(&app, &e.log, entry ? entry.display_name() : e.display_name(), &theme, &fonts)
+                var text: [..]u8
+                defer text.free()
+                e.log.write_text(&text)
+                if set_clipboard(str(text[0..text.len]), &clip): app.ui.toast("Engine log copied.")
+                else: app.ui.toast("Could not copy to the clipboard.")
+            return
+        log_view.shown = false
+
+    fn press_option()
+        let editor = &engines_page.editor
+        let name = editor.pressed_name()
+        var sent = 0
+        for i in 0..tabs.tabs.len
+            let a = tabs.tabs[i].analysis
+            if a and a.engine_id == editor.press_engine and a.press(name): sent += 1
+        var line: [160]u8
+        if sent == 0: app.ui.toast(format(&line, "No active analysis is using this engine. Start an analysis to use {name}."))
+        elif sent == 1: app.ui.toast(format(&line, "{name} sent to the engine."))
+        else: app.ui.toast(format(&line, "{name} sent to {sent} analyses."))
+        editor.press_engine = 0
+
+    fn install_from_registry()
+        registry.load(&data)
+        let want = str(engines_page.install_registry[0..engines_page.install_registry.len])
+        var found = -1
+        for i in 0..registry.catalog.engines.len
+            if registry.catalog.text(registry.catalog.engines[i].id) == want: found = i as int
+        engines_page.install_registry.clear()
+        if found < 0
+            app.ui.toast("This engine is no longer listed in the registry.")
+            return
+        install_popup.open(&registry, found, &data)
+
+    fn remove_engine(id: int)
+        engines_page.remove_id = 0
+        engines_page.forget(id)
+        let e = library.find(id)
+        if not e: return
+        var line: [160]u8
+        var said = format(&line, "{e.display_name()} was uninstalled")
+        for i in 0..tabs.tabs.len
+            let a = tabs.tabs[i].analysis
+            if a and a.engine_id == id: a.engine.quit()
+            let p = tabs.tabs[i].play
+            if p and p.engine_id == id: p.player.engine.quit()
+        if not library.remove_files(id): said = format(&line, "{e.display_name()} removed from the library. Its folder could not be deleted because a tournament is using it.")
+        library.remove(id)
+        library.save()
+        app.ui.toast(said)
+
+    fn close_tab(i: int)
+        if i < 0 or i >= tabs.tabs.len: return
+        let t = &tabs.tabs[i]
+        let lock = tab_lock(t)
+        if lock.len > 0
+            app.ui.toast(lock)
+            return
+        close_fast(t)
+        if t.analysis
+            t.analysis.release()
+            t.analysis = null
+        t.database.release()
+        if t.review
+            keep_review(t)
+            t.review.release()
+            t.review = null
+        if t.id == quick_tab: quick.cancel()
+        if t.play
+            end_play(t.play)
+            t.play = null
+        if t.draft
+            t.draft.release()
+            t.draft = null
+        if t.run
+            t.run.release()
+            t.run = null
+        t.setup.release()
+        t.event_view.release(&app.gpu)
+        tabs.close(i)
+
+    fn choose_from_page(kind: TabKind)
+        if is_singleton(kind)
+            open_new(kind)
+            return
+        let tab = tabs.current()
+        tab.kind = kind
+        tab.set_title(kind_title(kind))
+        give_game(tab)
+        app.redraw()
+
+    fn band_buttons()
+        let ui = &app.ui
+        let x = strip.side_x(ui.width)
+        let kind = tabs.current().kind
+        with ui.open(UiNode(name: "bandside", floating: true, width: UiSize.fixed(ui.width), height: UiSize.fixed(TabRowHeight)))
+            if band_icon("bandprofile", IconPerson, x, kind == Profile): open_new(Profile)
+            if band_icon("bandsettings", IconGear, x + BandIconWidth, kind == Settings): open_new(Settings)
+
+    fn band_icon(name: str, icon: LineIcon, x: f32, on: bool) -> bool
+        let ui = &app.ui
+        let y: f32 = 6.0
+        let w = BandIconWidth - 4.0
+        let h = TabRowHeight - 12.0
+        let o = ui.open(UiNode(name: name, floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), align: Vec2(0.5, 0.5), hit: true))
+        let hit = ui.interact(o.id, false)
+        let lit = ui.spring(o.id, 0, hit.hovered ? 1.0 : 0.0, 24.0)
+        let fill = hit.held ? look.press : look.hover
+        let shown = max(lit, on ? 0.7 : 0.0)
+        if shown > 0.001: ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(fill.with_alpha(fill.a * shown)), radius: Vec4.splat(6.0))
+        icons.show(ui, icon, 17.0, look.ink.with_alpha(on ? 1.0 : 0.6 + 0.4 * lit))
+        ui.close()
+        app.chrome.hole(x, y, w, h)
+        return hit.clicked
+
+    fn main_menu()
+        let ui = &app.ui
+        var line: [48]u8
+        with ui.menu_under(strip.menu_id, menu_at.x, menu_at.y, &look)
+            if ui.menu_item("New analysis"): open_new(Analysis)
+            if ui.menu_item("Play on Lichess"): open_new(Lichess)
+            if ui.menu_item("Play against an engine"): open_new(Play)
+            if ui.menu_item("New tournament"): open_new(NewTournament)
+            ui.menu_divider(&look)
+            if ui.menu_item("Tournaments"): open_new(Tournaments)
+            if ui.menu_item("Engines"): open_new(Engines)
+            if ui.menu_item("Books"): open_new(Books)
+            if ui.menu_item("Database"): open_new(Database)
+            if ui.menu_item("Profile"): open_new(Profile)
+            if ui.menu_item("Settings"): open_new(Settings)
+            ui.menu_divider(&look)
+            if ui.menu_item("Larger text   Ctrl+="): app.zoom_to(app.zoom_goal + 0.1)
+            if ui.menu_item("Smaller text   Ctrl+-"): app.zoom_to(app.zoom_goal - 0.1)
+            ui.menu_divider(&look)
+            if ui.menu_item("Quit"): app.ask_close()
+
+    fn shortcuts()
+        let i = &app.input
+        if not i.ctrl: return
+        if i.pressed(T): open_new(NewTab)
+        if i.pressed(W): close_tab(tabs.active)
+        if i.tapped(Tab): tabs.step(i.shift ? -1 : 1)
+        for k in 0..8
+            if i.pressed((Num1 as int + k) as Key) and k < tabs.tabs.len: tabs.active = k
+        if i.pressed(Num9): tabs.active = tabs.tabs.len as int - 1
+        if i.tapped(Equals): app.zoom_to(app.zoom_goal + 0.1)
+        if i.tapped(Minus): app.zoom_to(app.zoom_goal - 0.1)
+        if i.pressed(Num0): app.zoom_to(1.0)
+
+fn gui_live_step(data: *void)
+    let gui = data as *GuiApp
+    gui.step()
+
+fn theme_named(word: str) -> ThemeName
+    if word == "porcelain": return Porcelain
+    if word == "after-hours": return AfterHours
+    if word == "goo": return Goo
+    if word == "paper": return Paper
+    if word == "circuit": return Neon
+    return Charcoal
+
+
+fn phase_of(kind: TabKind) -> str
+    match kind
+        Tournaments, Event, NewTournament: return "Tournaments are not available here yet."
+    return "This feature is not available yet."

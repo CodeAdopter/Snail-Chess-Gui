@@ -1,0 +1,37 @@
+use src/tournament/event_config
+use src/play/play_game
+
+const MateScoreCp = 100000
+
+struct Adjudicator
+    rules: Adjudication
+    win_plies: int
+    win_sign: int
+    draw_plies: int
+
+    fn reset()
+        win_plies = 0
+        win_sign = 0
+        draw_plies = 0
+
+    fn take(note: *SearchNote, mover: Side, fullmove: int) -> (PlayEnd, Side)
+        if note.kind == NoScore
+            reset()
+            return NotEnded, White
+        var own = note.score
+        if note.kind == MateIn: own = note.score > 0 ? MateScoreCp : -MateScoreCp
+        let white = mover == White ? own : -own
+        if rules.resign
+            var sign = 0
+            if white >= rules.resign_cp: sign = 1
+            if white <= -rules.resign_cp: sign = -1
+            if sign != 0 and sign == win_sign: win_plies += 1
+            else: win_plies = sign != 0 ? 1 : 0
+            win_sign = sign
+            if win_plies >= rules.resign_moves * 2: return ByWinAdjudication, sign > 0 ? White : Black
+        if rules.draw
+            let level = note.kind == Centipawns and abs(white) <= rules.draw_cp
+            if level and fullmove >= rules.draw_after: draw_plies += 1
+            else: draw_plies = 0
+            if draw_plies >= rules.draw_moves * 2: return ByDrawAdjudication, White
+        return NotEnded, White

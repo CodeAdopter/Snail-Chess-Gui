@@ -1,0 +1,33 @@
+use chess/board
+use chess/rays
+
+struct Threats
+    checkers: Bitboard
+    straight_pins: Bitboard
+    diagonal_pins: Bitboard
+
+    @inline
+    fn check_answers(king: Square) -> Bitboard
+        return checkers == 0 ? ~0 : intercept(king, checkers.first)
+
+@inline
+fn find_threats[us: Side](board: *Board, king: Square, ours: Bitboard, occupied: Bitboard) -> Threats
+    const them = us.other
+    let king_bit = king.bit
+    var checkers = (capture_west(king_bit) | capture_east(king_bit)) & board.pieces(them, Pawn) | knight_attacks(king) & board.pieces(them, Knight)
+
+    var straight_pins: Bitboard = 0
+    for sniper in rook_reach(king) & board.rooks_queens(them)
+        let line = intercept(king, sniper)
+        let between = (line & occupied) ^ sniper.bit
+        if not between: checkers |= sniper.bit
+        elif between & ours and not between.many: straight_pins |= line
+
+    var diagonal_pins: Bitboard = 0
+    for sniper in bishop_reach(king) & board.bishops_queens(them)
+        let line = intercept(king, sniper)
+        let between = (line & occupied) ^ sniper.bit
+        if not between: checkers |= sniper.bit
+        elif between & ours and not between.many: diagonal_pins |= line
+
+    return Threats(checkers, straight_pins, diagonal_pins)

@@ -1,0 +1,46 @@
+use engine/render/renderer
+
+const WoodFeet = 33
+
+struct WoodField
+    counts: Vec4
+    feet: [WoodFeet]Vec4
+    stains: [64]Vec4
+    spots: [WoodFeet]Vec4
+    wear: [WoodFeet]Vec4
+    hues: [WoodFeet]Vec4
+    moves: [4]Vec4
+    clock: Vec4
+
+    fn clear()
+        counts = Vec4(0.0, -1.0, 0.0, 0.0)
+        for k in 0..64: stains[k] = Vec4(0.0, 0.0, 0.0, 0.0)
+        for k in 0..4: moves[k] = Vec4(0.0, 0.0, -1.0, 0.0)
+
+    fn foot(x: f32, z: f32, held: f32, wide: f32)
+        let n = counts.x as int
+        if n >= WoodFeet: return
+        feet[n] = Vec4(x, z, held, wide)
+        counts.x += 1.0
+
+    fn stain(sq: Square, c: Color)
+        stains[sq.rank as int * 8 + sq.file as int] = Vec4(c.r, c.g, c.b, c.a)
+
+    fn effect(at: Vec3, moss: f32, wear_of: Vec4, hue: Vec3, seed: f32) -> int
+        let n = counts.z as int
+        if n >= WoodFeet: return -1
+        spots[n] = Vec4(at.x, at.y, at.z, moss)
+        wear[n] = wear_of
+        hues[n] = Vec4(hue.x, hue.y, hue.z, seed)
+        counts.z += 1.0
+        return n
+
+fn wood_material(r: *Renderer, fragment: ShaderCode, mirrored: bool = false) -> int
+    var desc = MaterialDesc.three(fragment)
+    desc.vertex = shader("shaders/wood3d.hlsl", vertex: "wood_vs")
+    if mirrored: desc.cull = CullFront
+    return r.add_material_desc(&desc)
+
+fn wood_rgb(hex: u32, w: f32) -> Vec4
+    let c = Color.hex(hex)
+    return Vec4(c.r, c.g, c.b, w)

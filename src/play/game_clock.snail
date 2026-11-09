@@ -1,0 +1,99 @@
+use src/chess/primitives
+use src/play/time_control
+
+const NsPerMs: i64 = 1000000
+const TenthsBelowNs: i64 = 10000000000
+
+struct ClockMark
+    left_ns: [2]i64
+    made: [2]int
+
+struct GameClock
+    control: TimeControl
+    mark: ClockMark
+    side: Side
+    running: bool
+    turn_ns: i64
+    margin_ns: i64
+
+    fn start(tc: TimeControl, to_move: Side, now: i64)
+        control = tc
+        let whole = tc.kind == TimePerMove ? tc.move_ms : tc.base_ms
+        for s in 0..2
+            mark.left_ns[s] = whole * NsPerMs
+            mark.made[s] = 0
+        side = to_move
+        turn_ns = now
+        running = timed()
+
+    fn timed() -> bool
+        return control.kind == BaseIncrement or control.kind == MovesInTime or control.kind == TimePerMove
+
+    fn left_ns(s: Side, now: i64) -> i64
+        var t = mark.left_ns[s as int]
+        if running and s == side: t -= now - turn_ns
+        return max(t, 0)
+
+    fn in_time(at: i64) -> bool
+        return not running or mark.left_ns[side as int] - (at - turn_ns) > -margin_ns
+
+    fn flagged(now: i64) -> bool
+        return not in_time(now)
+
+    fn press(at: i64)
+        let s = side as int
+        if running
+            mark.left_ns[s] -= at - turn_ns
+            mark.made[s] += 1
+            if control.kind == BaseIncrement: mark.left_ns[s] += control.increment_ms * NsPerMs
+            if control.kind == MovesInTime and mark.made[s] % control.moves == 0: mark.left_ns[s] += control.base_ms * NsPerMs
+            if control.kind == TimePerMove: mark.left_ns[s] = control.move_ms * NsPerMs
+        side = side.other()
+        turn_ns = at
+
+    fn stop(now: i64)
+        if not running: return
+        mark.left_ns[side as int] = left_ns(side, now)
+        running = false
+
+    fn restore(m: ClockMark, to_move: Side, now: i64)
+        mark = m
+        side = to_move
+        turn_ns = now
+        running = timed()
+
+    fn moves_to_go(s: Side) -> int
+        return control.moves - mark.made[s as int] % control.moves
+
+    fn next_change_s(now: i64) -> f64
+        if not running: return -1.0
+        let t = left_ns(side, now)
+        if t <= 0: return -1.0
+        let unit: i64 = t < TenthsBelowNs ? 100 * NsPerMs : 1000 * NsPerMs
+        let wait = t - t / unit * unit + NsPerMs
+        return wait as f64 / 1.0e9
+
+fn clock_go(c: *GameClock, s: Side, now: i64, buf: *[120]u8) -> str
+    let w = c.left_ns(White, now) / NsPerMs
+    let b = c.left_ns(Black, now) / NsPerMs
+    let inc = c.control.increment_ms
+    match c.control.kind
+        BaseIncrement: return format(buf, " wtime {w} btime {b} winc {inc} binc {inc}")
+        MovesInTime: return format(buf, " wtime {w} btime {b} movestogo {c.moves_to_go(s)}")
+        TimePerMove: return format(buf, " movetime {c.control.move_ms}")
+        FixedDepth: return format(buf, " depth {c.control.depth}")
+        FixedNodes: return format(buf, " nodes {c.control.nodes}")
+    return format(buf, "")
+
+fn clock_text(ns: i64, buf: *[24]u8) -> str
+    let ms = max(ns, 0) / NsPerMs
+    if ms < 10000: return format(buf, "0:{ms / 1000:02}.{ms / 100 % 10}")
+    let s = ms / 1000
+    if s >= 3600: return format(buf, "{s / 3600}:{s / 60 % 60:02}:{s % 60:02}")
+    return format(buf, "{s / 60}:{s % 60:02}")
+
+fn pgn_clock(ns: i64, buf: *[24]u8) -> str
+    let ms = max(ns, 0) / NsPerMs
+    let s = ms / 1000
+    if s < 60: return format(buf, "0:00:{s:02}.{ms / 100 % 10}")
+    return format(buf, "{s / 3600}:{s / 60 % 60:02}:{s % 60:02}")

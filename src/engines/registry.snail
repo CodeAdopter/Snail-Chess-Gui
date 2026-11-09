@@ -1,0 +1,279 @@
+use engine/core/json
+use engine/desktop/http_get
+use src/uci/uci_engine
+use src/store/data_folder
+use src/engines/folded_text
+
+const CatalogUrl = "https://raw.githubusercontent.com/CodeAdopter/Chess-Engines/main/engines.json"
+const CatalogMostBytes: i64 = 8388608
+const CatalogMostEngines = 5000
+const CatalogTextMost = 2000
+const CatalogDayNs: i64 = 86400000000000
+const RegistryAgent = "Snail Chess GUI"
+
+struct RegistryEngine
+    id: PoolSpan
+    name: PoolSpan
+    description: PoolSpan
+    language: PoolSpan
+    repository: PoolSpan
+    repository_url: PoolSpan
+    documentation_url: PoolSpan
+    license: PoolSpan
+    license_url: PoolSpan
+    notes: PoolSpan
+    aliases: PoolSpan
+    codeberg: bool
+    archived: bool
+    gone: bool
+    stats: RepositoryStats
+
+struct RepositoryStats
+    known: bool
+    stars: i64
+    forks: i64
+    commits: i64
+    commits_year: i64
+    contributors: i64
+    releases: i64
+    created: PoolSpan
+    pushed: PoolSpan
+    checked: PoolSpan
+
+struct Catalog
+    engines: [..]RegistryEngine
+    pool: [..]u8
+    updated: PoolSpan
+
+    fn text(s: PoolSpan) -> str
+        return str(pool[s.at..s.at + s.len])
+
+    fn keep(s: str) -> PoolSpan
+        let at = pool.len as int
+        let n = min(s.len, CatalogTextMost) as int
+        for k in 0..n
+            pool.push(s[k])
+        return PoolSpan(at, n)
+
+    fn read(json_text: str) -> bool
+        clear()
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(json_text)
+        let list = doc.get(root, "engines")
+        if not doc.is(list, JsonArray): return false
+        updated = keep(catalog_text(&doc, root, "updated_at"))
+        var v = doc.first(list)
+        while v >= 0 and engines.len < CatalogMostEngines
+            if doc.is(v, JsonObject): read_engine(&doc, v)
+            v = doc.next(v)
+        if engines.len == 0
+            clear()
+            return false
+        return true
+
+    fn read_engine(doc: *JsonDoc, v: int)
+        let id = catalog_text(doc, v, "id")
+        let name = catalog_text(doc, v, "name")
+        let repository = catalog_text(doc, v, "repository")
+        if id.len == 0 or name.len == 0 or not repository_name(repository): return
+        var e: RegistryEngine
+        e.id = keep(id)
+        e.name = keep(name)
+        e.description = keep(catalog_text(doc, v, "description"))
+        e.language = keep(catalog_text(doc, v, "language"))
+        e.repository = keep(repository)
+        e.repository_url = keep(web_address(catalog_text(doc, v, "repository_url")))
+        e.documentation_url = keep(web_address(catalog_text(doc, v, "documentation_url")))
+        let license = doc.get(v, "license")
+        e.license = keep(catalog_text(doc, license, "name"))
+        e.license_url = keep(web_address(catalog_text(doc, license, "url")))
+        e.notes = keep(catalog_text(doc, v, "notes"))
+        e.codeberg = catalog_text(doc, v, "repository_provider") == "codeberg"
+        let archived = doc.get(v, "repository_archived")
+        e.archived = doc.is(archived, JsonBool) and doc.flag(archived)
+        let available = doc.get(v, "repository_available")
+        e.gone = doc.is(available, JsonBool) and not doc.flag(available)
+        let stats = doc.get(v, "repository_stats")
+        if doc.is(stats, JsonObject): read_stats(doc, stats, &e.stats)
+        let aliases = doc.get(v, "aliases")
+        let from = pool.len as int
+        if doc.is(aliases, JsonArray)
+            var a = doc.first(aliases)
+            while a >= 0
+                if doc.is(a, JsonString) and pool.len - from < CatalogTextMost
+                    if pool.len > from
+                        pool.push(',')
+                        pool.push(' ')
+                    keep(doc.str_of(a))
+                a = doc.next(a)
+        e.aliases = PoolSpan(from, pool.len as int - from)
+        engines.push(e)
+
+    fn read_stats(doc: *JsonDoc, v: int, s: *RepositoryStats)
+        s.stars = catalog_count(doc, v, "stars")
+        s.forks = catalog_count(doc, v, "forks")
+        s.commits = catalog_count(doc, v, "commits")
+        s.commits_year = catalog_count(doc, v, "commits_last_year")
+        s.contributors = catalog_count(doc, v, "contributors")
+        s.releases = catalog_count(doc, v, "releases")
+        s.created = keep(catalog_day(doc, v, "created_at"))
+        s.pushed = keep(catalog_day(doc, v, "pushed_at"))
+        s.checked = keep(catalog_day(doc, v, "checked_at"))
+        s.known = s.stars >= 0 and s.commits >= 0
+
+    fn clear()
+        engines.clear()
+        pool.clear()
+        updated = PoolSpan(0, 0)
+
+    fn release()
+        engines.free()
+        pool.free()
+
+struct Registry
+    catalog: Catalog
+    incoming: Catalog
+    version: int
+    fetch: HttpGet
+    fetching: bool
+    fetched_ns: i64
+    loaded: bool
+    source: [..]u8
+    failure: [240]u8
+    failure_len: int
+    data: *DataFolder
+    ranks: [..]u8
+
+    fn load(folder: *DataFolder)
+        data = folder
+        if loaded: return
+        loaded = true
+        var buf: [600]u8
+        let path = data.path("registry\\engines.json", &buf)
+        let bytes = read_file(path.ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len > 0 and catalog.read(str(bytes))
+            fetched_ns = modified_time(path.ptr as cstr)
+            version += 1
+
+    fn due() -> bool
+        return catalog.engines.len == 0 or wall_ns() - fetched_ns > CatalogDayNs
+
+    fn refresh()
+        if fetching: return
+        if source.len == 0: set_source(CatalogUrl)
+        failure_len = 0
+        fetch.most = CatalogMostBytes
+        fetching = fetch.start(str(source[0..source.len]), RegistryAgent, "Accept: application/json\n")
+
+    fn set_source(url: str)
+        source.clear()
+        for k in 0..url.len
+            source.push(url[k])
+
+    fn update() -> bool
+        if not fetching or not fetch.finished(): return false
+        fetching = false
+        if not fetch.done()
+            fail(fetch.error_text())
+            return true
+        let body = fetch.body_text()
+        if not incoming.read(body)
+            fail("The server returned an invalid engine catalog.")
+            return true
+        let kept = catalog
+        catalog = incoming
+        incoming = kept
+        incoming.clear()
+        version += 1
+        fetched_ns = wall_ns()
+        var buf: [600]u8
+        data.make_folder("registry")
+        if not save_whole(data.path("registry\\engines.json", &buf), body as []u8): fail("The catalog was downloaded but could not be saved.")
+        return true
+
+    fn fail(why: str)
+        failure_len = min(why.len, 240) as int
+        for k in 0..failure_len
+            failure[k] = why[k]
+
+    fn failure_text() -> str
+        return str(failure[0..failure_len])
+
+    fn search(query: str, into: *[..]int)
+        into.clear()
+        var words = UciWords(text: query)
+        let first = words.next()
+        ranks.resize(catalog.engines.len)
+        for i in 0..catalog.engines.len
+            let e = &catalog.engines[i]
+            ranks[i] = all_words(e, query) ? rank(e, first) as u8 : 5
+        for r in 0..5
+            for i in 0..ranks.len
+                if ranks[i] == r: into.push(i as int)
+
+    fn all_words(e: *RegistryEngine, query: str) -> bool
+        var words = UciWords(text: query)
+        loop
+            let w = words.next()
+            if w.len == 0: return true
+            if rank(e, w) == 5: return false
+
+    fn rank(e: *RegistryEngine, word: str) -> int
+        if word.len == 0: return 0
+        let c = &catalog
+        let at = find_folded(c.text(e.name), word)
+        if at == 0: return 0
+        if at > 0: return 1
+        if has_folded(c.text(e.aliases), word) or has_folded(c.text(e.id), word): return 2
+        if has_folded(c.text(e.language), word): return 3
+        if has_folded(c.text(e.description), word): return 4
+        return 5
+
+    fn release()
+        fetch.release()
+        catalog.release()
+        incoming.release()
+        source.free()
+        ranks.free()
+
+fn wall_ns() -> i64
+    var t: SDL_Time = 0
+    SDL_GetCurrentTime(&t)
+    return t
+
+fn catalog_text(doc: *JsonDoc, obj: int, key: str) -> str
+    let v = doc.get(obj, key)
+    return doc.is(v, JsonString) ? doc.str_of(v) : ""
+
+fn catalog_count(doc: *JsonDoc, obj: int, key: str) -> i64
+    let v = doc.get(obj, key)
+    if not doc.is(v, JsonNumber): return -1
+    let x = doc.num(v)
+    if not (x >= 0.0 and x <= 1000000000000.0) or x != floor(x): return -1
+    return x as i64
+
+fn catalog_day(doc: *JsonDoc, obj: int, key: str) -> str
+    let s = catalog_text(doc, obj, key)
+    if s.len != 10 or s[4] != '-' or s[7] != '-': return ""
+    for k in [0, 1, 2, 3, 5, 6, 8, 9]
+        if s[k] < '0' or s[k] > '9': return ""
+    return s
+
+fn repository_name(s: str) -> bool
+    if s.len < 3 or s.len > 200: return false
+    var slashes = 0
+    for k in 0..s.len
+        let c = s[k]
+        if c == '/'
+            slashes += 1
+            if k == 0 or k == s.len - 1: return false
+        elif not (c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z' or c >= '0' and c <= '9' or c == '-' or c == '_' or c == '.'): return false
+    return slashes == 1 and s[0] != '.' and find_folded(s, "..") < 0
+
+fn web_address(s: str) -> str
+    if s.len < 9 or s[0..8] != "https://": return ""
+    for k in 0..s.len
+        if s[k] <= 32 or s[k] == '"' or s[k] == '<' or s[k] == '>' or s[k] == 127: return ""
+    return s

@@ -1,0 +1,95 @@
+use src/engines/engine_library
+use src/engines/folded_text
+
+enum StrengthKind: u8
+    FullStrength
+    EloStrength
+    SkillStrength
+    DepthStrength
+    NodesStrength
+    TimeStrength
+
+struct PlayStrength
+    kind: StrengthKind
+    elo: int = 1500
+    skill: int = -1
+    depth: int = 6
+    nodes: i64 = 50000
+    move_ms: i64 = 1000
+
+    fn fit(e: *EngineEntry)
+        let (elo_least, elo_most) = elo_range(e)
+        if elo_most > 0: elo = clamp(elo, elo_least, elo_most) as int
+        let i = skill_index(e)
+        if i >= 0
+            let o = &e.options[i]
+            if skill < 0: skill = ((o.least + o.most) / 2) as int
+            skill = clamp(skill as i64, o.least, o.most) as int
+        depth = clamp(depth, 1, 60)
+        nodes = clamp(nodes, 1, 1000000000)
+        move_ms = clamp(move_ms, 10, 3600000)
+
+    fn tell(e: *EngineEntry, into: *EngineProfile)
+        var n: [24]u8
+        if not e: return
+        if kind == EloStrength and elo_offered(e)
+            into.put("UCI_LimitStrength", "true")
+            into.put("UCI_Elo", format(&n, "{elo}"))
+        let i = skill_index(e)
+        if kind == SkillStrength and i >= 0: into.put(e.text(e.options[i].name), format(&n, "{skill}"))
+
+    fn go_text(most_ms: i64, buf: *[48]u8) -> str
+        match kind
+            DepthStrength: return format(buf, " depth {depth}")
+            NodesStrength: return format(buf, " nodes {nodes}")
+            TimeStrength: return format(buf, " movetime {max(min(move_ms, most_ms), 10)}")
+        return format(buf, "")
+
+    fn text(buf: *[40]u8) -> str
+        match kind
+            EloStrength: return format(buf, "Elo {elo}")
+            SkillStrength: return format(buf, "Skill {skill}")
+            DepthStrength: return format(buf, "Depth {depth}")
+            NodesStrength: return format(buf, "{nodes} nodes")
+            TimeStrength: return format(buf, "{move_ms as f64 / 1000.0:.1} s per move")
+        return format(buf, "Full strength")
+
+fn strength_kinds(e: *EngineEntry, into: *[..]StrengthKind)
+    into.clear()
+    for k in [FullStrength, EloStrength, SkillStrength, DepthStrength, NodesStrength, TimeStrength]
+        if strength_offered(e, k): into.push(k)
+
+fn strength_offered(e: *EngineEntry, k: StrengthKind) -> bool
+    let elo = e and elo_offered(e)
+    let skill = e and skill_index(e) >= 0
+    match k
+        EloStrength: return elo
+        SkillStrength: return skill and not elo
+        DepthStrength, NodesStrength, TimeStrength: return not elo and not skill
+    return true
+
+fn strength_label(k: StrengthKind) -> str
+    match k
+        EloStrength: return "Elo"
+        SkillStrength: return "Skill"
+        DepthStrength: return "Depth"
+        NodesStrength: return "Nodes"
+        TimeStrength: return "Time per move"
+    return "Full"
+
+fn elo_offered(e: *EngineEntry) -> bool
+    let limit = e.option_index("UCI_LimitStrength")
+    let elo = e.option_index("UCI_Elo")
+    return limit >= 0 and elo >= 0 and e.options[limit].kind == CheckOption and e.options[elo].kind == SpinOption
+
+fn elo_range(e: *EngineEntry) -> (int, int)
+    if not e or not elo_offered(e): return 0, 0
+    let o = &e.options[e.option_index("UCI_Elo")]
+    return o.least as int, o.most as int
+
+fn skill_index(e: *EngineEntry) -> int
+    if not e: return -1
+    for i in 0..e.options.len
+        let o = &e.options[i]
+        if o.kind == SpinOption and o.most > o.least and has_folded(e.text(o.name), "skill"): return i as int
+    return -1

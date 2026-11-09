@@ -1,0 +1,3 @@
+Origami pieces drawn for Snail Chess GUI by tools/origami.py, traced from the origami renders that
+tools/ai_pieces.py made. Dedicated to the public domain under CC0 1.0 Universal,
+https://creativecommons.org/publicdomain/zero/1.0/

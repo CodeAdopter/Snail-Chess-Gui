@@ -1,0 +1,94 @@
+use src/chess/moves
+use src/chess/make
+
+const SacrificeHorizon = 4
+const SacrificeLeast = 2
+const SacrificeHolds = -100
+const SacrificeDepth = 10
+const SacrificeRoom = 2 * SacrificeHorizon + 4
+
+enum SacrificeState: u8
+    NoSacrifice
+    SacrificeProvisional
+    SacrificeConfirmed
+
+struct SacrificeLine
+    boards: [SacrificeRoom]Board
+    moves: [SacrificeRoom]Move
+    nodes: [SacrificeRoom]int
+    views: [SacrificeRoom]int
+    viewed: [SacrificeRoom]bool
+    count: int
+    shown: int
+
+    fn add(board: *Board, move: Move, node: int) -> int
+        if count >= SacrificeRoom: return -1
+        boards[count] = *board
+        moves[count] = move
+        nodes[count] = node
+        viewed[count] = false
+        count += 1
+        return count - 1
+
+    fn view(i: int, white_cp: int)
+        if i < 0 or i >= count: return
+        views[i] = white_cp
+        viewed[i] = true
+
+    fn add_line(moves: []Move, white_cp: int)
+        if count == 0: return
+        var at = count - 1
+        for m in moves
+            var legal: MoveList
+            legal.fill(&boards[at])
+            var found = false
+            for i in 0..legal.count
+                if legal.items[i] == m: found = true
+            if not found: break
+            var next = boards[at]
+            next.play(m)
+            let i = add(&next, m, -1)
+            if i < 0: break
+            at = i
+        if at > shown: view(at, white_cp)
+
+struct SacrificeFound
+    state: SacrificeState
+    at: int = -1
+    move: Move
+    key: u64
+
+fn find_sacrifice(line: *SacrificeLine) -> SacrificeFound
+    var a = line.shown
+    while a >= 1 and a >= line.shown - SacrificeHorizon - 1
+        let state = judge_sacrifice(line, a)
+        if state != NoSacrifice: return SacrificeFound(state, a, line.moves[a], line.boards[a].key)
+        a -= 1
+    return SacrificeFound()
+
+fn judge_sacrifice(line: *SacrificeLine, a: int) -> SacrificeState
+    if a < 1 or a + 1 >= line.count: return NoSacrifice
+    if line.moves[a + 1].to != line.moves[a].to: return NoSacrifice
+    let side = line.boards[a - 1].side
+    let before = material_balance(&line.boards[a - 1], side)
+    let horizon = a + 1 + SacrificeHorizon
+    let last = min(horizon, line.count - 1)
+    for i in a + 1..last + 1
+        if material_balance(&line.boards[i], side) > before - SacrificeLeast: return NoSacrifice
+    for i in horizon..line.count
+        if line.viewed[i]
+            let own = side == White ? line.views[i] : -line.views[i]
+            return own >= SacrificeHolds ? SacrificeConfirmed : NoSacrifice
+    let end = &line.boards[last]
+    if end.in_check and end.side != side
+        var legal: MoveList
+        legal.fill(end)
+        if legal.count == 0: return SacrificeConfirmed
+    return SacrificeProvisional
+
+fn material_balance(b: *Board, side: Side) -> int
+    var total = 0
+    for s in [side, side.other()]
+        let m = b.pieces(s, Pawn).count + 3 * (b.pieces(s, Knight).count + b.pieces(s, Bishop).count) + 5 * b.pieces(s, Rook).count + 9 * b.pieces(s, Queen).count
+        total += s == side ? m as int : -(m as int)
+    return total

@@ -1,0 +1,341 @@
+use src/books/book_search
+use src/books/book_library
+use src/books/book_read
+
+enum MakerState: u8
+    MakerStopped
+    MakerRunning
+    MakerDone
+    MakerShort
+    MakerFailed
+
+enum CandidatePhase: u8
+    CandidateWalking
+    CandidateScoring
+    CandidateAgreeing
+
+const ScoreWords = ["none", "cp", "mate"]
+
+struct BookMaker
+    book: *BookEntry
+    books: *BookLibrary
+    searchers: [..]*BookSearcher
+    checks: [..]int
+    agreed: [..]int
+    seeds: [..]u8
+    seed_starts: [..]int
+    state: MakerState
+    phase: CandidatePhase
+    candidate: int
+    accepted: int
+    rejected: int
+    tries: int
+    keys: KeySet
+    walk: Game
+    node: int
+    moves: [..]Move
+    walked: int
+    plies: int
+    by: int
+    target: Side
+    cand_seed: u64
+    rng: SplitMix64
+    record: [..]u8
+    last: [..]u8
+    failure: [240]u8
+    failure_len: int
+    version: u64
+
+    fn open(library: *BookLibrary, e: *BookEntry, engines: *EngineLibrary)
+        books = library
+        book = e
+        if e.kind == BookEngine: add_searcher(engines, e.engine_id, e.profile_id, null)
+        var path: [640]u8
+        if e.seed_book > 0
+            let bytes = read_file(books.file(e.seed_book, "openings.txt", &path).ptr as cstr)
+            defer free_file(bytes)
+            let text = str(bytes)
+            var from = 0
+            for i in 0..text.len
+                if text[i] != '\n': continue
+                let line = text[from..i]
+                from = i as int + 1
+                if line.len < 8 or line[0..8] != "startpos": continue
+                seed_starts.push(seeds.len as int)
+                push_text(&seeds, line)
+            seed_starts.push(seeds.len as int)
+        let log = read_file(books.file(e.id, "candidates.log", &path).ptr as cstr)
+        defer free_file(log)
+        let text = str(log)
+        var openings: [..]u8
+        defer openings.free()
+        var start: Board
+        var line_moves: [..]Move
+        defer line_moves.free()
+        var from = 0
+        for i in 0..text.len
+            if text[i] != '\n': continue
+            let line = text[from..i]
+            from = i as int + 1
+            if line.len < 10 or line[0..10] != "candidate ": continue
+            candidate += 1
+            count_checks(line)
+            let marked = find(line, " moves")
+            if find(line, " result accepted ") < 0 or marked < 0
+                rejected += 1
+                tries += 1
+                continue
+            tries = 0
+            let opening = format(&path, "startpos{line[marked..line.len]}")
+            if not read_opening(opening, &start, &line_moves): continue
+            keys.add(opening_end(&start, line_moves[0..line_moves.len]).key)
+            push_text(&openings, opening)
+            openings.push('\n')
+            accepted += 1
+        let kept = read_file(books.file(e.id, "openings.txt", &path).ptr as cstr)
+        defer free_file(kept)
+        if str(kept) != str(openings[0..openings.len]): save_whole(books.file(e.id, "openings.txt", &path), openings[0..openings.len])
+        if e.positions != accepted
+            e.positions = accepted
+            books.save(e)
+        state = MakerStopped
+        if accepted >= e.wanted: state = MakerDone
+
+    fn add_searcher(engines: *EngineLibrary, engine_id: int, profile_id: int, changes: *EngineProfile)
+        let s = new BookSearcher
+        s.set_up(engines, engine_id, profile_id, changes)
+        searchers.push(s)
+        while checks.len < searchers.len
+            checks.push(0)
+            agreed.push(0)
+
+    fn count_checks(line: str)
+        var w = UciWords(text: line)
+        var side = White
+        loop
+            let word = w.next()
+            if word.len == 0 or word == "scores": break
+            if word == "target": side = w.next() == "black" ? Black : White
+        var first = true
+        loop
+            let who = w.next()
+            if who.len == 0 or who == "moves": break
+            let kind = w.next()
+            w.next()
+            let (white, ok) = uci_number(w.next())
+            let (k, k_ok) = uci_number(who)
+            if first
+                first = false
+                continue
+            if not ok or not k_ok or k < 0 or k > 64: continue
+            while checks.len as i64 <= k
+                checks.push(0)
+                agreed.push(0)
+            checks[k] += 1
+            if kind == "cp" and in_band(white as int, side): agreed[k] += 1
+
+    fn failure_text() -> str
+        return str(failure[0..failure_len])
+
+    fn start()
+        if state == MakerRunning or accepted >= book.wanted or searchers.len == 0: return
+        state = MakerRunning
+        for s in searchers
+            s.player.on = true
+        book.state = BookMaking
+        books.save(book)
+        begin_candidate()
+
+    fn stop()
+        if state != MakerRunning: return
+        quit_engines()
+        state = MakerStopped
+        book.state = BookPaused
+        books.save(book)
+        version += 1
+
+    fn quit_engines()
+        for s in searchers
+            s.player.on = false
+            s.player.engine.quit()
+            s.step = SearchIdle
+
+    fn update(app: *DesktopApp, engines: *EngineLibrary)
+        if state != MakerRunning: return
+        for s in searchers
+            s.update(app, engines)
+            if s.step == SearchFailed
+                var why: [300]u8
+                failure_len = keep_text(format(&why, "{engines.find(s.engine_id) ? engines.find(s.engine_id).display_name() : "An engine"}: {s.failure_text()}"), failure[0..240])
+                quit_engines()
+                state = MakerFailed
+                book.state = BookPaused
+                books.save(book)
+                version += 1
+                return
+        if phase == CandidateAgreeing
+            for s in searchers
+                if s.step != SearchDone: return
+            agree()
+            return
+        let s = searchers[by]
+        if s.step != SearchDone: return
+        s.step = SearchIdle
+        if phase == CandidateWalking
+            node = walk.add_move(node, s.picked)
+            moves.push(s.picked)
+            walked += 1
+            walk_on()
+        else: judge()
+
+    fn begin_candidate()
+        cand_seed = book.seed ^ (candidate as u64 + 1) * 11400714819323198485
+        rng = SplitMix64(state: cand_seed)
+        let low = max(book.plies_low, 1)
+        plies = low + (rng.next() % (max(book.plies_high - low, 0) + 1) as u64) as int
+        let n = searchers.len as int
+        let first = (book.seed % n as u64) as int
+        by = (first + accepted) % n
+        target = book.favoured == 0 ? White : Black
+        if book.favoured == 2
+            let side0 = n == 1 ? 0 : (book.seed >> (16 + by) as u64 & 1) as int
+            target = (accepted / n + side0) % 2 == 0 ? White : Black
+        var start: Board
+        start.load_fen(StartFen)
+        walk.reset(&start)
+        node = 0
+        walked = 0
+        moves.clear()
+        if seed_starts.len > 1
+            let k = (rng.next() % (seed_starts.len - 1) as u64) as int
+            var seed_moves: [..]Move
+            defer seed_moves.free()
+            if read_opening(str(seeds[seed_starts[k]..seed_starts[k + 1]]), &start, &seed_moves)
+                for m in seed_moves
+                    node = walk.add_move(node, m)
+                    moves.push(m)
+        for s in searchers
+            s.new_candidate()
+        phase = CandidateWalking
+        version += 1
+        walk_on()
+
+    fn walk_on()
+        let b = &walk.nodes[node].board
+        if walked >= plies
+            if keys.has(b.key)
+                reject("duplicate", 0)
+                return
+            phase = CandidateScoring
+            searchers[by].score_at(&walk, node, book.depth)
+            return
+        if not has_any_move(b)
+            reject("illegal", 0)
+            return
+        searchers[by].pick(&walk, node, book.depth, book.margin, b.side == target, &rng)
+
+    fn in_band(white: int, side: Side) -> bool
+        let mine = side == White ? white : -white
+        return mine >= book.band_low and mine <= book.band_high
+
+    fn white_of(s: *BookSearcher) -> int
+        return walk.nodes[node].board.side == White ? s.score : -s.score
+
+    fn judge()
+        let s = searchers[by]
+        if s.kind != Centipawns or not in_band(white_of(s), target)
+            reject("band", 1)
+            return
+        if searchers.len == 1
+            accept(1)
+            return
+        phase = CandidateAgreeing
+        for e in searchers
+            e.new_candidate()
+            e.score_at(&walk, node, book.agree_depth)
+
+    fn agree()
+        var inside = 0
+        for i in 0..searchers.len
+            let s = searchers[i]
+            checks[i] += 1
+            if s.kind == Centipawns and in_band(white_of(s), target)
+                agreed[i] += 1
+                inside += 1
+        if inside == searchers.len as int: accept(2)
+        elif inside > 0: reject("disagree", 2)
+        else: reject("band", 2)
+
+    fn accept(scored: int)
+        write_record("accepted", scored)
+        var path: [640]u8
+        add_line(books.file(book.id, "candidates.log", &path), str(record[0..record.len]))
+        var line: [..]u8
+        defer line.free()
+        var start: Board
+        start.load_fen(StartFen)
+        write_opening(&start, moves[0..moves.len], "", &line)
+        add_line(books.file(book.id, "openings.txt", &path), str(line[0..line.len]))
+        keys.add(walk.nodes[node].board.key)
+        candidate += 1
+        accepted += 1
+        tries = 0
+        book.positions = accepted
+        if accepted >= book.wanted
+            finish(MakerDone, BookReady)
+            return
+        books.save(book)
+        begin_candidate()
+
+    fn reject(why: str, scored: int)
+        write_record(why, scored)
+        var path: [640]u8
+        add_line(books.file(book.id, "candidates.log", &path), str(record[0..record.len]))
+        candidate += 1
+        rejected += 1
+        tries += 1
+        if tries >= book.tries
+            finish(MakerShort, BookShort)
+            return
+        begin_candidate()
+
+    fn finish(how: MakerState, kept: BookState)
+        state = how
+        book.state = kept
+        books.save(book)
+        quit_engines()
+        version += 1
+
+    fn write_record(result: str, scored: int)
+        record.clear()
+        var head: [300]u8
+        push_text(&record, format(&head, "candidate {candidate} slot {accepted} by {by} target {SideWords[target as int]} seed {cand_seed:016X} plies {plies} depth {book.depth} {book.agree_depth} result {result} scores"))
+        if scored >= 1
+            let s = searchers[by]
+            push_text(&record, format(&head, " {by} {ScoreWords[s.kind as int]} {s.score} {white_of(s)}"))
+        if scored >= 2
+            for i in 0..searchers.len
+                let s = searchers[i]
+                push_text(&record, format(&head, " {i} {ScoreWords[s.kind as int]} {s.score} {white_of(s)}"))
+        push_text(&record, " moves")
+        for m in moves
+            var uci: ShortText
+            write_uci(m, &uci)
+            record.push(' ')
+            push_text(&record, uci.text())
+        last.clear()
+        push_text(&last, str(record[0..record.len]))
+
+    fn release()
+        for s in searchers
+            s.release()
+        searchers.free()
+        checks.free()
+        agreed.free()
+        seeds.free()
+        seed_starts.free()
+        keys.release()
+        free_game(&walk)
+        moves.free()
+        record.free()
+        last.free()

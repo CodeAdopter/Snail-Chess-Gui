@@ -1,0 +1,3 @@
+Facet pieces, Snail Chess GUI's own, drawn by tools/piece_sets/facet.py. tools/pieces.py stands them in
+the square as it stands every set. Dedicated to the public domain under CC0 1.0 Universal,
+https://creativecommons.org/publicdomain/zero/1.0/

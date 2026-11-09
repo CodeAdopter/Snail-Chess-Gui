@@ -1,0 +1,846 @@
+use engine/ui/ui_clip_out
+use src/looks/surfaces
+use src/views/arrow_paint
+use src/views/piece_sheet
+use src/effects/effects
+use src/board3d/board_scene
+
+const FileLetters = "abcdefgh"
+const RankDigits = "12345678"
+const DragStart: f32 = 4.0
+const PromotionKinds = [Queen, Knight, Rook, Bishop]
+
+struct BoardPlace
+    x: f32
+    y: f32
+    size: f32
+    cell_px: int
+
+fn board_place(x: f32, y: f32, size: f32, scale: f32) -> BoardPlace
+    let cell_px = max(floor(size * scale / 8.0 + 0.001) as int, 1)
+    let s = (cell_px * 8) as f32 / scale
+    return BoardPlace(round(x * scale) / scale, round(y * scale) / scale, s, cell_px)
+
+struct BoardLook
+    colors: BoardColors
+    theme: *GuiTheme
+    fonts: *GuiFonts
+    sheet: *PieceSheet
+    set: PieceSet
+    arrows: bool
+    costume: Costume
+    coordinates: bool = true
+    highlights: bool = true
+    targets: bool = true
+    target_rgb: u32
+    arrow_colors: [ArrowKinds]Color
+    engine_width: f32 = 0.15
+    notes: bool = true
+    note_arrow: Color = Color(0.08, 0.47, 0.11, 0.8)
+    note_width: f32 = 0.15
+    effects: *Effects
+    surfaces: *Surfaces
+    backdrop: Backdrop
+    scene: *BoardScene
+    desk_clock: bool = true
+    desk_cards: bool = true
+    flat_arrows: bool
+    free_moves: bool
+    style: SceneStyle
+
+    fn cards_on_table() -> bool
+        return scene != null and desk_cards
+
+struct MoveMoments
+    trail: f32 = -1.0
+    dust: f32 = -1.0
+    burst: f32 = -1.0
+    glint: f32 = -1.0
+
+struct BoardView
+    selected: Square = Square.none
+    dragging: bool
+    drag_moved: bool
+    unselect_on_release: bool
+    press: Vec2
+    promoting: bool
+    promotion_from: Square
+    promotion_to: Square
+    moves: MoveList
+    key: u64
+    side: Side
+    place: BoardPlace
+    flipped: bool
+    arrows: [MaxBoardArrows]BoardArrow
+    arrow_count: int
+    notes: [..]BoardArrow
+    bends: ArrowBends
+    note_from: Square = Square.none
+    sacrifice: SacrificeFound
+    path: UiPath
+    slides: PieceSlides
+    dropped: Square = Square.none
+    landed: Move = NoMove
+    scene: *BoardScene
+    shown: *Board
+    room: Vec4
+    clock_hit: bool
+    free: FreeBoard
+    by_hand: bool
+    hand_waits: bool
+    free_on: bool
+    free_took: bool
+    space_hit: bool
+    carried: Piece
+    ply: int
+    premoves: [..]Premove
+    premove_ply: int
+    premoved: bool
+    ahead: Board
+    ahead_on: bool
+    story: PieceStory
+    taken: TakenMark
+
+    fn arrow(from: Square, to: Square, color: Color, width: f32)
+        if arrow_count >= MaxBoardArrows: return
+        arrows[arrow_count] = BoardArrow(from, to, color, width)
+        arrow_count += 1
+
+    fn draw(app: *DesktopApp, look: *BoardLook, board: *Board, last: Move, at: BoardPlace, flipped: bool, movable: bool, premovable: bool = false) -> Move
+        let ui = &app.ui
+        place = at
+        self.flipped = flipped
+        follow(board, ui.still, last)
+        let (due, seen) = take_premoves(board, movable, premovable and look.scene == null)
+        var made = due
+        let area = look.scene ? shown_room() : Vec4(at.x, at.y, at.size, at.size)
+        let o = ui.open(UiNode(name: "board", floating: true, offset: Vec2(area.x, area.y), width: UiSize.fixed(area.z), height: UiSize.fixed(area.w), hit: true))
+        let h = ui.interact(o.id, false)
+        ui.close()
+        if h.pressed: ui.focus = 0
+        let mouse = Vec2(app.pointer.mouse.x, app.pointer.mouse.y)
+        scene = look.scene
+        shown = board
+        if scene
+            scene.clock_stands = look.desk_clock
+            scene.style = look.style
+            scene.steer(app, h.hovered)
+        free_on = scene != null and look.free_moves and by_hand and look.style.room != DenRoom
+        if promoting
+            let chosen = scene ? draw_in_3d(app, look, board, last, mouse, app.pointer.mouse.pressed(MouseLeft)) : draw_squares_and_pieces(app, look, board, seen, last, mouse, h.hovered, app.pointer.mouse.pressed(MouseLeft))
+            scene = null
+            return chosen
+        clock_hit = false
+        free_took = false
+        let on_clock = scene and scene.desk.clock.pressable and h.hovered and scene.clock_under(mouse)
+        if free_on
+            free.follow(board, ui.still)
+            if movable: made = take_free(app, board, mouse, h.hovered, h.pressed and not on_clock)
+            else
+                free.held = -1
+                free.picked = -1
+            free.step(ui.dt, ui.still)
+        elif made == NoMove and (movable or ahead_on): made = take_input(app, seen, mouse, h.hovered, h.pressed)
+        if on_clock: app.cursor = SDL_SYSTEM_CURSOR_POINTER
+        if scene and h.pressed and not dragging and selected == Square.none and made == NoMove and not free_took
+            if on_clock: clock_hit = true
+            else: scene.orbiting = true
+        take_notes(app, mouse, h.hovered)
+        if made != NoMove and dropped != Square.none and not premoved: landed = made
+        if scene: draw_in_3d(app, look, board, last, mouse, false)
+        else: draw_squares_and_pieces(app, look, board, seen, last, mouse, h.hovered, false)
+        landed = NoMove
+        arrow_count = 0
+        sacrifice = SacrificeFound()
+        story.ready = false
+        scene = null
+        return made
+
+    fn follow(board: *Board, still: bool, last: Move = NoMove)
+        if board.key == key and board.side == side: return
+        key = board.key
+        side = board.side
+        ply = board.fullmove * 2 + board.side as int
+        moves.fill(board)
+        if dragging and selected != Square.none and board.squares[selected] == carried: promoting = false
+        else: cancel()
+        notes.clear()
+        taken.note(&slides.was, board, last)
+        slides.change(board, dropped, still, premoved)
+        taken.slid = slides.slide_count > 0
+        dropped = Square.none
+        premoved = false
+
+    fn take_premoves(board: *Board, movable: bool, premovable: bool) -> (Move, *Board)
+        ahead_on = premovable
+        if not movable and not ahead_on
+            cancel()
+            premoves.clear()
+        var made = NoMove
+        if movable and premoves.len > 0: made = premove_due()
+        let seen = premoves.len > 0 or ahead_on ? lay_ahead(board) : board
+        if made != NoMove: premoves.remove(0)
+        return (made, seen)
+
+    fn shown_room() -> Vec4
+        if room.z > 0.0 and room.w > 0.0: return room
+        return Vec4(place.x, place.y, place.size, place.size)
+
+    fn draw_in_3d(app: *DesktopApp, look: *BoardLook, board: *Board, last: Move, mouse: Vec2, pressed: bool) -> Move
+        var s: BoardShow
+        s.board = board
+        s.last = look.highlights ? last : NoMove
+        s.selected = selected
+        s.lifted = dragging and drag_moved and (free_on ? free.held >= 0 : selected != Square.none)
+        if free_on: s.free = &free
+        s.pointer = mouse
+        s.hover = s.lifted ? square_at(mouse) : Square.none
+        s.check = look.highlights and board.in_check ? board.king_square(board.side) : Square.none
+        if look.targets and selected != Square.none and not promoting
+            for i in 0..moves.count
+                let m = moves.items[i]
+                if m.from != selected or m.is_promotion and m.promotion != Queen: continue
+                let bit = (1 as u64) << (m.to as u64)
+                s.targets |= bit
+                if board.squares[m.to] != NoPiece or m.kind == EnPassant: s.captures |= bit
+        s.slides = &slides
+        s.landed = landed
+        for i in 0..arrow_count: s.arrow(arrows[i].from, arrows[i].to, arrows[i].color, arrows[i].width)
+        if look.notes
+            for i in 0..notes.len: s.arrow(notes[i].from, notes[i].to, look.note_arrow, look.note_width)
+        let under = square_at(mouse)
+        if note_from != Square.none and under != Square.none and under != note_from: s.arrow(note_from, under, look.note_arrow.with_alpha(look.note_arrow.a * 0.6), look.note_width)
+        s.flat_arrows = look.flat_arrows
+        s.flipped = flipped
+        s.accent = look.theme.accent
+        s.target = target_mark(look)
+        s.accent_ink = look.theme.accent_ink
+        s.page = look.theme.page
+        s.fonts = look.fonts
+        scene_effects(&s.fx, look, board, last)
+        scene.show(app, &s, shown_room(), place.size)
+        if promoting: return draw_promotion(app, look, board, mouse, pressed)
+        return NoMove
+
+    fn scene_effects(f: *SceneFx, look: *BoardLook, board: *Board, last: Move)
+        let fx = look.effects
+        if not fx or not fx.made: return
+        f.on = true
+        let check = look.highlights and board.in_check ? board.king_square(board.side) : Square.none
+        var burning = false
+        for sq in 0..64
+            if board.squares[sq as Square] == NoPiece: continue
+            let fl = fx.flame_on(story.ready ? &story : null, sq as Square, check, board.key)
+            f.flame[sq] = fl.strength
+            f.hue[sq] = fl.hue
+            f.seeds[sq] = fl.seed - floor(fl.seed)
+            if fl.strength > 0.0: burning = true
+            if story.ready: f.moss[sq] = fx.moss_on(&story, sq as Square)
+        let sac = fx.sacrifice_flame(&sacrifice)
+        if sac.strength > 0.0
+            f.sacrifice = sac.strength
+            f.sacrifice_at = sacrifice.move.to
+            f.sacrifice_seed = sac.seed - floor(sac.seed)
+            burning = true
+        if burning: f.time = fx.burning_every(SceneTickNs)
+        let mm = move_moments(fx, board, last)
+        if mm.glint >= 0.0
+            f.glint = mm.glint / GlintLength
+            f.glint_at = last.to
+        if mm.trail >= 0.0
+            f.trail = mm.trail
+            f.trail_reach = slides.slide_count > 0 ? slides.progress() : 1.0
+            f.trail_from = last.from
+            f.trail_to = last.to
+            f.trail_strength = fx.intensity(MoveTrail)
+            f.trail_length = TrailLength
+        if mm.dust >= 0.0
+            f.dust = mm.dust
+            f.dust_at = last.to
+            f.dust_strength = fx.intensity(LandingDust)
+        if mm.burst >= 0.0
+            f.burst = mm.burst
+            f.burst_at = taken.at
+            f.burst_piece = taken.piece
+            f.burst_strength = fx.intensity(CaptureBurst)
+
+    fn take_notes(app: *DesktopApp, mouse: Vec2, hovered: bool)
+        let input = &app.pointer.mouse
+        let under = square_at(mouse)
+        if hovered and input.pressed(MouseRight): note_from = under
+        if note_from == Square.none or not input.released(MouseRight): return
+        let from = note_from
+        note_from = Square.none
+        if under == Square.none: return
+        for i in 0..notes.len
+            if notes[i].from == from and notes[i].to == under
+                notes.remove(i)
+                return
+        notes.push(BoardArrow(from, under, Color(0.08, 0.47, 0.11, 0.8), 0.15))
+
+    fn select(board: *Board, sq: Square)
+        key = board.key
+        side = board.side
+        ply = board.fullmove * 2 + board.side as int
+        moves.fill(board)
+        cancel()
+        slides.change(board, Square.none, true)
+        if sq != Square.none and own_piece(board, sq): selected = sq
+
+    fn cancel()
+        selected = Square.none
+        dragging = false
+        promoting = false
+
+    fn take_free(app: *DesktopApp, board: *Board, mouse: Vec2, hovered: bool, pressed: bool) -> Move
+        let input = &app.pointer
+        if input.pressed(Escape)
+            free.unsync()
+            dragging = false
+            return NoMove
+        let man = hovered ? scene.man_at(mouse, &free) : -1
+        var put = false
+        if pressed
+            free_took = true
+            if man >= 0 and man == free.picked: free.picked = -1
+            elif man >= 0
+                free.hold(man)
+                dragging = true
+                drag_moved = false
+                press = mouse
+            elif free.picked >= 0
+                let i = free.picked
+                free.held = i
+                free.put(scene.landing(mouse, free.men[i].drawn, Vec2(0.0, 0.0)))
+                put = true
+            else: free_took = false
+        if dragging and free.held >= 0
+            if (mouse - press).length > DragStart: drag_moved = true
+            if not input.mouse.down(MouseLeft)
+                dragging = false
+                if drag_moved
+                    free.put(scene.landing(mouse, free.men[free.held].drawn, scene.fling_speed()))
+                    put = true
+                else
+                    free.picked = free.held
+                    free.held = -1
+        if hovered and (dragging or man >= 0): app.cursor = SDL_SYSTEM_CURSOR_POINTER
+        if put and not hand_waits: return free.match(board)
+        return NoMove
+
+    fn take_input(app: *DesktopApp, board: *Board, mouse: Vec2, hovered: bool, pressed: bool) -> Move
+        let input = &app.pointer
+        let under = square_at(mouse)
+        var made = NoMove
+        if input.pressed(Escape) or hovered and input.mouse.pressed(MouseRight)
+            cancel()
+            premoves.clear()
+        if pressed
+            if selected != Square.none and is_target(selected, under) and not (ahead_on and own_piece(board, under))
+                made = choose(selected, under)
+                selected = Square.none
+            elif under != Square.none and own_piece(board, under)
+                unselect_on_release = under == selected
+                selected = under
+                carried = board.squares[under]
+                dragging = true
+                drag_moved = false
+                press = mouse
+            else: selected = Square.none
+        if dragging
+            if (mouse - press).length > DragStart: drag_moved = true
+            if not input.mouse.down(MouseLeft)
+                dragging = false
+                if drag_moved and under != selected and is_target(selected, under)
+                    made = choose(selected, under)
+                    selected = Square.none
+                    if not ahead_on: dropped = under
+                elif not drag_moved and unselect_on_release: selected = Square.none
+        if hovered and (dragging or under != Square.none and (own_piece(board, under) or is_target(selected, under))): app.cursor = SDL_SYSTEM_CURSOR_POINTER
+        return made
+
+    fn choose(from: Square, to: Square) -> Move
+        if ahead_on
+            if ahead.squares[from].kind() == Pawn and (to.rank == 0 or to.rank == 7)
+                promoting = true
+                promotion_from = from
+                promotion_to = to
+            else: queue(from, to, NoKind)
+            return NoMove
+        var found = NoMove
+        var count = 0
+        for i in 0..moves.count
+            let m = moves.items[i]
+            if m.from == from and m.to == to
+                found = m
+                count += 1
+        if count > 1
+            promoting = true
+            promotion_from = from
+            promotion_to = to
+            return NoMove
+        return found
+
+    fn is_target(from: Square, to: Square) -> bool
+        if from == Square.none or to == Square.none: return false
+        if ahead_on: return premove_targets(&ahead, from) >> (to as u64) & 1 != 0
+        for i in 0..moves.count
+            if moves.items[i].from == from and moves.items[i].to == to: return true
+        return false
+
+    fn own_piece(board: *Board, sq: Square) -> bool
+        let p = board.squares[sq]
+        return p != NoPiece and p.side == (ahead_on ? board.side.other() : board.side)
+
+    fn queue(from: Square, to: Square, promotion: Kind)
+        if premoves.len == 0: premove_ply = ply
+        let p = Premove(from, to, promotion)
+        premoves.push(p)
+        play_ahead(&ahead, p)
+
+    fn premove_due() -> Move
+        let p = premoves[0]
+        if ply == premove_ply + 1
+            for i in 0..moves.count
+                let m = moves.items[i]
+                if m.from != p.from or m.to != p.to or m.is_promotion and m.promotion != p.promotion: continue
+                premove_ply = ply + 1
+                dropped = m.to
+                premoved = true
+                return m
+        premoves.clear()
+        return NoMove
+
+    fn lay_ahead(board: *Board) -> *Board
+        ahead = *board
+        for i in 0..premoves.len
+            play_ahead(&ahead, premoves[i])
+        return &ahead
+
+    fn square_at(p: Vec2) -> Square
+        if scene: return scene.square_at(p, shown, dragging ? selected : Square.none)
+        let cell = place.size / 8.0
+        let col = floor((p.x - place.x) / cell) as int
+        let row = floor((p.y - place.y) / cell) as int
+        if col < 0 or col > 7 or row < 0 or row > 7: return Square.none
+        let file = flipped ? 7 - col : col
+        let rank = flipped ? row : 7 - row
+        return Square(file, rank)
+
+    fn corner(sq: Square) -> Vec2
+        let cell = place.size / 8.0
+        if scene: return scene.screen_of(sq) - Vec2(cell * 0.5, cell * 0.5)
+        let col = flipped ? 7 - sq.file as int : sq.file as int
+        let row = flipped ? sq.rank as int : 7 - sq.rank as int
+        return Vec2(place.x + col as f32 * cell, place.y + row as f32 * cell)
+
+    fn draw_squares_and_pieces(app: *DesktopApp, look: *BoardLook, board: *Board, seen: *Board, last: Move, mouse: Vec2, hovered: bool, pressed: bool) -> Move
+        let ui = &app.ui
+        let at = place
+        let cell = at.size / 8.0
+        let c = look.colors
+        ui.clip_to(at.x, at.y, at.size, at.size, 3.0)
+        let (surface, detailed) = board_surface_box(look.surfaces, c)
+        if detailed: ui.box(at.x, at.y, at.size, at.size, surface)
+        else: ui.rect(at.x, at.y, at.size, at.size, c.dark)
+        for sq in 0..64
+            let s = sq as Square
+            let light = (s.file + s.rank) % 2 == 1
+            let moved = look.highlights and last != NoMove and (s == last.from or s == last.to)
+            if not moved and (detailed or not light): continue
+            let p = corner(s)
+            if detailed
+                ui.rect(p.x, p.y, cell, cell, MovedTint)
+                continue
+            var fill = light ? c.light : c.dark
+            if moved: fill = light ? c.light_moved : c.dark_moved
+            ui.rect(p.x, p.y, cell, cell, fill)
+        var queued: u64 = 0
+        for i in 0..premoves.len
+            queued |= (1 as u64) << (premoves[i].from as u64) | (1 as u64) << (premoves[i].to as u64)
+        for sq in 0..64
+            if queued >> (sq as u64) & 1 == 0: continue
+            let p = corner(sq as Square)
+            ui.rect(p.x, p.y, cell, cell, PremoveTint)
+        if look.surfaces: look.surfaces.draw_over_board(ui, look.backdrop, at.x, at.y, at.size, now_ns())
+        if look.highlights and board.in_check
+            let k = corner(board.king_square(board.side))
+            ui.box(k.x, k.y, cell, cell, UiBox(fill: UiFill.radial(Color(0.85, 0.12, 0.1, 0.9), Color(0.85, 0.12, 0.1, 0.0), radius: 0.62)))
+        if selected != Square.none
+            let p = corner(selected)
+            let mark = target_mark(look)
+            ui.box(p.x + 1.0, p.y + 1.0, cell - 2.0, cell - 2.0, UiBox(fill: UiFill.solid(mark.with_alpha(0.28)), border: 3.0, border_color: mark, radius: Vec4.splat(2.0)))
+        let fx = look.effects
+        let mm = move_moments(fx, board, last)
+        let t = slides.progress()
+        var flames: [64]EffectFlame
+        let story_on = fx and story.ready and seen == board
+        let check = look.highlights and board.in_check ? board.king_square(board.side) : Square.none
+        let (mood_check, king_mood) = king_moods(look, board)
+        var burning = false
+        for sq in 0..64
+            flames[sq] = EffectFlame()
+            if not fx or board.squares[sq as Square] == NoPiece or seen.squares[sq as Square] != board.squares[sq as Square]: continue
+            flames[sq] = fx.flame_on(story_on ? &story : null, sq as Square, check, board.key)
+            if flames[sq].strength > 0.0: burning = true
+        let sac = fx ? fx.sacrifice_flame(&sacrifice) : EffectFlame()
+        let time = burning or sac.strength > 0.0 ? fx.burning() : 0.0
+        if fx
+            if sac.strength > 0.0
+                let g = corner(sacrifice.move.to)
+                fx.square_fire(ui, g.x, g.y, cell, sac, time)
+            let half = Vec2(cell * 0.5, cell * 0.5)
+            if mm.trail >= 0.0: fx.trail_line(ui, corner(last.from) + half, corner(last.to) + half, cell, mm.trail, slides.slide_count > 0 ? t : 1.0)
+            if mm.dust >= 0.0
+                let p = corner(last.to)
+                fx.landing_dust(ui, p.x, p.y, cell, mm.dust, (board.key % 1000) as f32 * 0.37)
+        if look.coordinates: draw_coordinates(ui, look, cell)
+        let under = square_at(mouse)
+        draw_arrows(ui, look, under, cell, false)
+        if look.targets and selected != Square.none and not promoting
+            let (marks, takes) = target_marks(seen)
+            let mark = target_mark(look)
+            let rim = max(cell * 0.025, 1.5)
+            for sq in 0..64
+                if marks >> (sq as u64) & 1 == 0: continue
+                let to = sq as Square
+                let p = corner(to)
+                if dragging and to == under: ui.rect(p.x, p.y, cell, cell, mark.with_alpha(0.22))
+                if takes >> (sq as u64) & 1 != 0: capture_frame(ui, p, cell, rim, mark)
+                else
+                    ui.circle(p.x + cell * 0.5, p.y + cell * 0.5, cell * 0.15 + rim, TargetRim)
+                    ui.circle(p.x + cell * 0.5, p.y + cell * 0.5, cell * 0.15, mark)
+        for i in 0..slides.fade_count
+            let f = slides.fades[i]
+            if mm.burst >= 0.0 and f.at == taken.at: continue
+            let p = corner(f.at)
+            look.sheet.show(ui, f.piece, p.x, p.y, cell, 1.0 - t)
+        if mm.burst >= 0.0
+            let p = corner(taken.at)
+            let (values, _) = fx.piece_values(0.0, 0.0, 0.0, clamp(mm.burst / (BurstLength * 0.75), 0.0, 1.0), time)
+            show_shaded(ui, look, taken.piece, p.x, p.y, cell, 1.0, fx.piece, values)
+        for sq in 0..64
+            if flames[sq].strength > 0.0
+                let p = piece_spot(sq as Square, t)
+                let burnt = board.squares[sq as Square]
+                fx.piece_flames(ui, &look.sheet.layer.texture, look.sheet.uv(burnt, 0, piece_mood(burnt, sq as Square, mood_check, king_mood)), p.x, p.y, cell, flames[sq], time, false)
+        for sq in 0..64
+            let s = sq as Square
+            let piece = seen.squares[s]
+            if piece == NoPiece or slides.brings(s, piece) or landed != NoMove and s == landed.from: continue
+            let p = corner(s)
+            let lifted = dragging and s == selected
+            let mood = piece_mood(piece, s, mood_check, king_mood)
+            if fx and not lifted
+                let moss = story_on ? fx.moss_on(&story, s) : 0.0
+                let glint = mm.glint >= 0.0 and s == last.to ? max(mm.glint / GlintLength, 0.001) : 0.0
+                let heat = flames[sq].hue == FlameOrange ? flames[sq].strength : 0.0
+                let (values, shows) = fx.piece_values(moss, heat, glint, 0.0, time)
+                if shows
+                    show_shaded(ui, look, piece, p.x, p.y, cell, 1.0, fx.piece, values, mood)
+                    continue
+            look.sheet.show(ui, piece, p.x, p.y, cell, lifted ? 0.3 : 1.0, mood)
+        for i in 0..slides.slide_count
+            let sl = slides.slides[i]
+            let from = corner(sl.from)
+            let to = corner(sl.to)
+            let x = from.x + (to.x - from.x) * t
+            let y = from.y + (to.y - from.y) * t
+            let mood = piece_mood(sl.piece, sl.to, mood_check, king_mood)
+            if fx
+                let glint = mm.glint >= 0.0 and sl.to == last.to ? max(mm.glint / GlintLength, 0.001) : 0.0
+                let heat = flames[sl.to as int].hue == FlameOrange ? flames[sl.to as int].strength : 0.0
+                let (values, shows) = fx.piece_values(0.0, heat, glint, 0.0, time)
+                if shows
+                    show_shaded(ui, look, sl.piece, x, y, cell, 1.0, fx.piece, values, mood)
+                    continue
+            look.sheet.show(ui, sl.piece, x, y, cell, mood: mood)
+        if landed != NoMove
+            let to = corner(landed.to)
+            let piece = board.squares[landed.from]
+            look.sheet.show(ui, piece, to.x, to.y, cell, mood: piece_mood(piece, landed.to, mood_check, king_mood))
+        if fx
+            for sq in 0..64
+                if flames[sq].strength <= 0.0: continue
+                let p = piece_spot(sq as Square, t)
+                let burnt = board.squares[sq as Square]
+                fx.piece_flames(ui, &look.sheet.layer.texture, look.sheet.uv(burnt, 0, piece_mood(burnt, sq as Square, mood_check, king_mood)), p.x, p.y, cell, flames[sq], time, true)
+            if mm.burst >= 0.0
+                let p = corner(taken.at)
+                fx.burst_embers(ui, p.x, p.y, cell, mm.burst, (board.key % 997) as f32 * 0.41)
+        draw_arrows(ui, look, under, cell, true)
+        if t < 1.0: ui.wake_in(0.0)
+        ui.unclip()
+        if dragging and selected != Square.none
+            let keep = ui.layer
+            ui.layer = 6
+            let piece = seen.squares[selected]
+            look.sheet.show(ui, piece, mouse.x - cell * 0.5, mouse.y - cell * 0.5, cell, mood: piece_mood(piece, selected, mood_check, king_mood))
+            ui.layer = keep
+        if promoting: return draw_promotion(app, look, seen, mouse, pressed)
+        return NoMove
+
+    fn move_moments(fx: *Effects, board: *Board, last: Move) -> MoveMoments
+        var m: MoveMoments
+        if not fx or not fx.made or last == NoMove or not taken.played or taken.move != last: return m
+        if not fx.clock.still
+            let down = taken.slid ? SlideSeconds * 0.85 : 0.0
+            m.trail = fx.passing(MoveTrail, board.key, TrailLength, 0.0)
+            let d = fx.passing(LandingDust, board.key, DustLength + down, 0.0)
+            m.dust = d >= down ? d - down : -1.0
+            if taken.piece != NoPiece: m.burst = fx.passing(CaptureBurst, board.key, BurstLength, 0.0)
+        m.glint = fx.passing(PieceGlint, board.key, GlintLength, GlintLength * 0.5)
+        return m
+
+    fn piece_spot(s: Square, t: f32) -> Vec2
+        for i in 0..slides.slide_count
+            if slides.slides[i].to == s
+                let from = corner(slides.slides[i].from)
+                return from + (corner(s) - from) * t
+        if landed != NoMove and s == landed.from: return corner(landed.to)
+        return corner(s)
+
+    fn show_shaded(ui: *UiCanvas, look: *BoardLook, piece: Piece, x: f32, y: f32, cell: f32, alpha: f32, material: u32, values: Vec4, mood: PieceMood = Calm)
+        let held = ui.material
+        let held_values = ui.material_values
+        ui.shade(material, values)
+        look.sheet.show(ui, piece, x, y, cell, alpha, mood)
+        ui.shade(held, held_values)
+
+    fn target_marks(seen: *Board) -> (u64, u64)
+        var marks: u64 = 0
+        var takes: u64 = 0
+        if ahead_on
+            marks = premove_targets(seen, selected)
+            for sq in 0..64
+                let p = seen.squares[sq as Square]
+                if marks >> (sq as u64) & 1 != 0 and p != NoPiece and p.side == seen.side: takes |= (1 as u64) << (sq as u64)
+            return (marks, takes)
+        for i in 0..moves.count
+            let m = moves.items[i]
+            if m.from != selected or m.is_promotion and m.promotion != Queen: continue
+            let bit = (1 as u64) << (m.to as u64)
+            marks |= bit
+            if seen.squares[m.to] != NoPiece or m.kind == EnPassant: takes |= bit
+        return (marks, takes)
+
+    fn capture_frame(ui: *UiCanvas, p: Vec2, cell: f32, rim: f32, mark: Color)
+        let thick = max(cell * 0.04, 4.0)
+        let round = cell * 0.06
+        ui.box(p.x + 1.0, p.y + 1.0, cell - 2.0, cell - 2.0, UiBox(border: thick + rim * 2.0, border_color: TargetRim, radius: Vec4.splat(round)))
+        ui.box(p.x + 1.0 + rim, p.y + 1.0 + rim, cell - 2.0 - rim * 2.0, cell - 2.0 - rim * 2.0, UiBox(border: thick, border_color: mark, radius: Vec4.splat(round - rim)))
+
+    fn draw_arrows(ui: *UiCanvas, look: *BoardLook, under: Square, cell: f32, over: bool)
+        let drawn = note_from != Square.none and under != Square.none and under != note_from
+        bends.clear()
+        for i in 0..arrow_count: bends.add(arrows[i].from, arrows[i].to)
+        if look.notes
+            for i in 0..notes.len: bends.add(notes[i].from, notes[i].to)
+        if drawn: bends.add(note_from, under)
+        bends.settle()
+        for i in 0..arrow_count
+            draw_arrow(ui, &arrows[i], bends.bend[i], cell, over)
+        if look.notes
+            for i in 0..notes.len
+                var shown = BoardArrow(notes[i].from, notes[i].to, look.note_arrow, look.note_width)
+                draw_arrow(ui, &shown, bends.bend[arrow_count + i], cell, over)
+        if drawn
+            var drawing = BoardArrow(note_from, under, look.note_arrow.with_alpha(look.note_arrow.a * 0.6), look.note_width)
+            draw_arrow(ui, &drawing, bends.bend[bends.bend.len - 1], cell, over)
+
+    fn draw_arrow(ui: *UiCanvas, a: *BoardArrow, bend: Square, cell: f32, over: bool)
+        let half = Vec2(cell * 0.5, cell * 0.5)
+        let start = corner(a.from)
+        let from = start + half
+        let to = corner(a.to) + half
+        let thick = cell * a.width
+        if a.from == a.to
+            if not over: ui.ring(from.x, from.y, cell * 0.5 - thick * 0.4, thick * 0.6, a.color)
+            return
+        let knee = bend == Square.none ? from : corner(bend) + half
+        let along = to - knee
+        let length = along.length
+        if length < 1.0: return
+        let way = along * (1.0 / length)
+        let side = Vec2(-way.y, way.x)
+        let head = min(cell * 0.42, length * 0.6)
+        let base = to - way * head
+        let wing = side * (thick * 1.45)
+        let edge = side * (thick * 0.5)
+        path.clear()
+        path.move_to(to.x, to.y)
+        path.line_to(base.x + wing.x, base.y + wing.y)
+        path.line_to(base.x + edge.x, base.y + edge.y)
+        if bend == Square.none
+            path.arc(from.x, from.y, thick * 0.5, atan2(side.x, -side.y), Pi)
+        else
+            let first = (knee - from) * (1.0 / (knee - from).length)
+            let rim = Vec2(-first.y, first.x) * (thick * 0.5)
+            path.line_to(knee.x + rim.x + edge.x, knee.y + rim.y + edge.y)
+            path.arc(from.x, from.y, thick * 0.5, atan2(rim.x, -rim.y), Pi)
+            path.line_to(knee.x - rim.x - edge.x, knee.y - rim.y - edge.y)
+        path.line_to(base.x - edge.x, base.y - edge.y)
+        path.line_to(base.x - wing.x, base.y - wing.y)
+        path.close()
+        let d = ui.density
+        let x = round(start.x * d) / d
+        let y = round(start.y * d) / d
+        let w = round((start.x + cell) * d) / d - x
+        let h = round((start.y + cell) * d) / d - y
+        if over: ui.clip_out(x, y, w, h)
+        else: ui.clip_to(x, y, w, h)
+        ui.fill_path(&path, a.color)
+        ui.unclip()
+
+    fn draw_coordinates(ui: *UiCanvas, look: *BoardLook, cell: f32)
+        let size = clamp(cell * 0.17, 8.5, 12.0)
+        let style = UiTextStyle(face: look.fonts.strong, size: size)
+        for i in 0..8
+            let rank = flipped ? 7 - i : i
+            let s = Square(flipped ? 7 : 0, rank)
+            let p = corner(s)
+            let light = (s.file + s.rank) % 2 == 1
+            ui.text(p.x + 3.0, p.y + 2.0, RankDigits[rank..rank + 1], UiTextStyle(color: light ? look.colors.light_ink : look.colors.dark_ink, ..style))
+            let file = flipped ? 7 - i : i
+            let f = Square(file, flipped ? 7 : 0)
+            let q = corner(f)
+            let lit = (f.file + f.rank) % 2 == 1
+            ui.text(q.x + cell - size * 0.62 - 3.0, q.y + cell - size * 1.32, FileLetters[file..file + 1], UiTextStyle(color: lit ? look.colors.light_ink : look.colors.dark_ink, ..style))
+
+    fn draw_promotion(app: *DesktopApp, look: *BoardLook, seen: *Board, mouse: Vec2, pressed: bool) -> Move
+        let ui = &app.ui
+        let at = place
+        let cell = at.size / 8.0
+        let keep = ui.layer
+        ui.layer = 5
+        ui.rect(at.x, at.y, at.size, at.size, Color(0.08, 0.1, 0.1, 0.38))
+        let top = corner(promotion_to)
+        let down: f32 = top.y < at.y + at.size * 0.5 ? 1.0 : -1.0
+        let side = seen.squares[promotion_from].side
+        var chosen = NoMove
+        var picked = false
+        var hit_any = false
+        for i in 0..4
+            let kind = PromotionKinds[i]
+            let y = top.y + down * cell * i as f32
+            let over = mouse.x >= top.x and mouse.x < top.x + cell and mouse.y >= y and mouse.y < y + cell
+            ui.box(top.x + 2.0, y + 2.0, cell - 4.0, cell - 4.0, UiBox(fill: UiFill.solid(over ? look.theme.accent_soft : look.theme.surface), radius: Vec4.splat(cell * 0.5), shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.25), 0.0, 2.0, 8.0, 0.0, false)))
+            look.sheet.show(ui, Piece.of(side, kind), top.x, y, cell)
+            if over
+                hit_any = true
+                app.cursor = SDL_SYSTEM_CURSOR_POINTER
+                if pressed and ahead_on
+                    queue(promotion_from, promotion_to, kind)
+                    picked = true
+                elif pressed: chosen = promotion_move(kind)
+        ui.layer = keep
+        if chosen != NoMove or picked or pressed and not hit_any or app.pointer.pressed(Escape)
+            promoting = false
+            selected = Square.none
+        return chosen
+
+    fn promotion_move(kind: Kind) -> Move
+        for i in 0..moves.count
+            let m = moves.items[i]
+            if m.from == promotion_from and m.to == promotion_to and m.is_promotion and m.promotion == kind: return m
+        return NoMove
+
+const MaxBoardArrows = 8
+
+struct BoardArrow
+    from: Square
+    to: Square
+    color: Color
+    width: f32
+
+const PremoveTint = Color(0.86, 0.2, 0.18, 0.5)
+
+struct Premove
+    from: Square
+    to: Square
+    promotion: Kind
+
+fn play_ahead(b: *Board, p: Premove)
+    let piece = b.squares[p.from]
+    if piece == NoPiece: return
+    b.squares[p.from] = NoPiece
+    b.squares[p.to] = p.promotion != NoKind ? Piece.of(piece.side, p.promotion) : piece
+    let step = p.to.file as int - p.from.file as int
+    if piece.kind == King and (step == 2 or step == -2)
+        let rank = p.from.rank as int
+        let rook_from = Square(step > 0 ? 7 : 0, rank)
+        let rook_to = Square(step > 0 ? 5 : 3, rank)
+        b.squares[rook_to] = b.squares[rook_from]
+        b.squares[rook_from] = NoPiece
+
+fn target_mark(look: *BoardLook) -> Color
+    let c = look.target_rgb != 0 ? Color.hex(look.target_rgb) : look.theme.accent
+    return c.with_alpha(0.92)
+
+fn premove_targets(b: *Board, from: Square) -> u64
+    let piece = b.squares[from]
+    if piece == NoPiece: return 0
+    let side = piece.side
+    let f = from.file as int
+    let r = from.rank as int
+    var bits: u64 = 0
+    match piece.kind
+        Pawn
+            let up = side == White ? 1 : -1
+            bits = square_bit(f, r + up) | square_bit(f - 1, r + up) | square_bit(f + 1, r + up)
+            if r == (side == White ? 1 : 6): bits |= square_bit(f, r + up * 2)
+        Knight
+            for d in [[1, 2], [2, 1], [2, -1], [1, -2], [-1, -2], [-2, -1], [-2, 1], [-1, 2]]
+                bits |= square_bit(f + d[0], r + d[1])
+        King
+            for d in [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]]
+                bits |= square_bit(f + d[0], r + d[1])
+            let back = side == White ? 0 : 7
+            if f == 4 and r == back
+                let rook = Piece.of(side, Rook)
+                if b.castling & kingside_right(side) != 0 and b.squares[Square(7, back)] == rook: bits |= square_bit(6, back)
+                if b.castling & queenside_right(side) != 0 and b.squares[Square(0, back)] == rook: bits |= square_bit(2, back)
+        else
+            let kind = piece.kind
+            for d in [[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [1, -1]]
+                let diagonal = d[0] != 0 and d[1] != 0
+                if kind == Bishop and not diagonal or kind == Rook and diagonal: continue
+                for k in 1..8
+                    bits |= square_bit(f + d[0] * k, r + d[1] * k)
+    return bits
+
+fn square_bit(f: int, r: int) -> u64
+    if f < 0 or f > 7 or r < 0 or r > 7: return 0
+    return (1 as u64) << (Square(f, r) as u64)
+
+fn king_moods(look: *BoardLook, board: *Board) -> (Square, PieceMood)
+    if not look.sheet.moods or not board.in_check: return (Square.none, Calm)
+    return (board.king_square(board.side), has_any_move(board) ? Checked : Mated)
+
+fn piece_mood(piece: Piece, s: Square, check: Square, king: PieceMood) -> PieceMood
+    if piece == NoPiece: return Calm
+    if piece.kind == King: return s == check ? king : Calm
+    if piece.kind != Pawn: return Calm
+    let ahead = piece.side == White ? s.rank as int : 7 - s.rank as int
+    return ahead >= 5 ? Promoting : Calm
+
+fn draw_small_board(ui: *UiCanvas, look: *BoardLook, board: *Board, last: Move, x: f32, y: f32, size: f32, flipped: bool)
+    let cell = size / 8.0
+    let c = look.colors
+    ui.clip_to(x, y, size, size, 3.0)
+    let (surface, detailed) = board_surface_box(look.surfaces, c)
+    if detailed: ui.box(x, y, size, size, surface)
+    else: ui.rect(x, y, size, size, c.dark)
+    let (check, king) = king_moods(look, board)
+    for sq in 0..64
+        let s = sq as Square
+        let col = flipped ? 7 - s.file as int : s.file as int
+        let row = flipped ? s.rank as int : 7 - s.rank as int
+        let px = x + col as f32 * cell
+        let py = y + row as f32 * cell
+        let light = (s.file + s.rank) % 2 == 1
+        let moved = look.highlights and last != NoMove and (s == last.from or s == last.to)
+        if detailed and moved: ui.rect(px, py, cell, cell, MovedTint)
+        elif not detailed and (light or moved): ui.rect(px, py, cell, cell, moved ? (light ? c.light_moved : c.dark_moved) : c.light)
+        look.sheet.show(ui, board.squares[s], px, py, cell, mood: piece_mood(board.squares[s], s, check, king))
+    ui.unclip()

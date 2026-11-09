@@ -1,0 +1,285 @@
+use src/fastchess/fast_install
+use src/fastchess/fast_runs
+use src/views/settings_kit
+use src/tabs/fast_tab
+use src/views/engine_picker
+use engine/desktop/file_dialog
+
+const FastExample = "snailfast -engine cmd=dev.exe name=dev -engine cmd=base.exe name=base -each tc=10+0.1 -openings file=book.epd format=epd order=random -rounds 20000 -repeat -concurrency 8 -sprt elo0=0 elo1=5 alpha=0.05 beta=0.05"
+
+const FastKinds = ["SPRT", "Fixed games"]
+const FastBoundWords = ["0, 5 (gainer)", "0, 2 (small gainer)", "-3, 1 (no regression)"]
+const FastBoundLow = [0.0, 0.0, -3.0]
+const FastBoundHigh = [5.0, 2.0, 1.0]
+const FastControls = ["5+0.05", "10+0.1", "30+0.3", "60+0.6"]
+const FastRoundWords = ["100", "500", "2000", "10000", "50000"]
+const FastRounds = [100, 500, 2000, 10000, 50000]
+const FastPastMost = 8
+
+struct FastPast
+    id: [32]u8
+    id_len: int
+    line: [160]u8
+    line_len: int
+
+struct FastExtension
+    install: FastInstall
+    runs: *FastRuns
+    on_path: bool
+    path_read: bool
+    opens: bool
+    opens_read: bool
+    asked: bool
+    picker_a: EnginePicker
+    picker_b: EnginePicker
+    engine_a: int
+    engine_b: int
+    kind: int
+    bounds: int
+    control: int = 1
+    rounds: int = 3
+    at_once: int = 2
+    openings: [..]u8
+    picking: FileDialog
+    command: [..]u8
+    past: [..]FastPast
+    past_read: bool
+    open_id: [32]u8
+    open_len: int
+
+    fn page(app: *DesktopApp, kit: *SettingsKit, token: str, look: *BoardLook, lib: *EngineLibrary)
+        let ui = &app.ui
+        if lib and install.is_installed(): new_match(app, kit, look, lib)
+        let theme = kit.theme
+        let fonts = kit.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        var line: [400]u8
+        if not asked and not install.busy()
+            asked = true
+            install.ready_releases()
+            if install.releases.due(): install.releases.refresh(token)
+        with kit.card(1, "fastchess")
+            let installed = install.is_installed()
+            let offer = install.offer()
+            with kit.row(10, "Installed", installed ? format(&line, "Version {install.installed_text()}, kept apart from any other copy of fastchess on this computer.") : "fastchess runs matches and SPRT tests between engines. It is installed into the app's data folder.")
+                with ui.open(UiNode(name: "fastinstall", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    if install.step == FastDownloading
+                        let (got, total) = install.progress()
+                        ui.label(total > 0 ? format(&line, "Downloading {got * 100 / total}%") : "Downloading", note)
+                        if ui.button("Cancel"): install.get.cancel()
+                    elif install.step == FastUnpacking: ui.label("Installing", note)
+                    elif install.releases.fetching: ui.label("Checking for releases", note)
+                    elif not installed
+                        if ui.button("Install", true): install.start()
+                    elif offer.len > 0
+                        if ui.button(format(&line, "Update to {offer}"), true): install.start()
+                    else
+                        ui.label("Up to date", note)
+                        if ui.button("Reinstall"): install.start()
+            if install.step == FastFailed or install.failure_len > 0: ui.paragraph(install.failure_text(), UiTextStyle(face: fonts.text, size: 12.5, color: theme.loss()), UiNode(width: UiSize.grow(), padding: Vec4(18.0, 0.0, 18.0, 12.0)))
+            if install.releases.failure_len > 0: ui.paragraph(install.releases.failure_text(), note, UiNode(width: UiSize.grow(), padding: Vec4(18.0, 0.0, 18.0, 12.0)))
+            var spot: [720]u8
+            let shown = installed ? install.exe_text() : install.place.path("fastchess", &spot)
+            with kit.row(12, "Location", installed ? "Where fastchess.exe is." : "Where fastchess will be installed.")
+                with ui.open(UiNode(name: "fastspot", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    if ui.button("Copy")
+                        var text: [720]u8
+                        if SDL_SetClipboardText(format(&text, "{shown}").ptr as cstr): ui.toast("Path copied")
+                    if ui.button("Open folder")
+                        var cut = shown.len as int
+                        if installed
+                            while cut > 0 and shown[cut - 1] != '\\'
+                                cut -= 1
+                        fast_open(shown[0..cut])
+            ui.paragraph(shown, UiTextStyle(face: fonts.mono, size: 11.5, color: theme.ink), UiNode(width: UiSize.grow(), padding: Vec4(18.0, 0.0, 18.0, 14.0)))
+            with kit.row(11, "Source", "github.com/Disservin/fastchess, under the GPL-3.0 licence.")
+                if ui.button("Open"): SDL_OpenURL("https://github.com/Disservin/fastchess")
+        with kit.card(2, "snailfast")
+            ui.paragraph("Use snailfast in place of fastchess, with the same arguments, in any terminal or script. It prints what fastchess prints, and every match it runs opens in a tab here with its boards, results and time left.", note, UiNode(width: UiSize.grow(), padding: Vec4(18.0, 14.0, 18.0, 6.0)))
+            var bin: [720]u8
+            let folder = install.place.path("fastchess\\bin", &bin)
+            if not path_read
+                path_read = true
+                on_path = fast_on_path(folder)
+            var want = on_path
+            if kit.switch(20, "Add to PATH", "Lets any terminal find snailfast. Terminals opened after the change see it.", ref want)
+                if fast_put_on_path(folder, want): on_path = want
+                else: ui.toast("Your PATH could not be changed.")
+            with kit.row(21, "Example", "An SPRT between two builds of an engine. Copy it to a terminal, or give it to an AI agent.")
+                if ui.button("Copy")
+                    var text: [600]u8
+                    let t = format(&text, "{FastExample}")
+                    if SDL_SetClipboardText(t.ptr as cstr): ui.toast("Command copied")
+            ui.paragraph(FastExample, UiTextStyle(face: fonts.mono, size: 11.5, color: theme.ink), UiNode(width: UiSize.grow(), padding: Vec4(18.0, 0.0, 18.0, 14.0)))
+        with kit.card(3, "Runs")
+            if runs
+                if not opens_read
+                    opens_read = true
+                    opens = runs.opens_app()
+                if kit.switch(30, "Open the app for new runs", "When snailfast starts a match and the app is closed, open it with the match in a tab.", ref opens): runs.set_open_app(opens)
+                with kit.row(31, "Runs folder", "Each run's output, games and boards, as snailfast saved them.")
+                    if ui.button("Open")
+                        var p: [720]u8
+                        var url: [760]u8
+                        let runs_folder = runs.place.path("fastchess\\runs", &p)
+                        SDL_OpenURL(format(&url, "file:///{runs_folder}").ptr as cstr)
+                if not past_read
+                    past_read = true
+                    read_past()
+                for i in 0..past.len
+                    let r = &past[i]
+                    with kit.row(40 + i as int, str(r.line[0..r.line_len]), str(r.id[0..r.id_len]))
+                        if ui.button("Open")
+                            open_len = r.id_len
+                            for k in 0..open_len
+                                open_id[k] = r.id[k]
+
+    fn read_past()
+        past.clear()
+        var buf: [720]u8
+        var names: [..]u8
+        defer names.free()
+        names_in(runs.place.path("fastchess\\runs", &buf), &names)
+        var ids: [..]str
+        defer ids.free()
+        var from = 0
+        for i in 0..names.len
+            if names[i] != '\n': continue
+            if i > from: ids.push(str(names[from..i]))
+            from = i as int + 1
+        for i in 1..ids.len as int
+            var k = i
+            while k > 0 and fast_later(ids[k], ids[k - 1])
+                let held = ids[k]
+                ids[k] = ids[k - 1]
+                ids[k - 1] = held
+                k -= 1
+        for i in 0..min(ids.len as int, FastPastMost)
+            var r = FastRun()
+            if not r.open(&runs.place, ids[i])
+                r.release()
+                continue
+            var e = FastPast(id_len: min(ids[i].len, 31) as int)
+            for k in 0..e.id_len
+                e.id[k] = ids[i][k]
+            var title: [200]u8
+            var when: [48]u8
+            var whole: [160]u8
+            let state = r.state == FastRunning ? "running" : r.state == FastLost ? "ended early" : r.code == 0 ? "finished" : "stopped"
+            let line = format(&whole, "{fast_title(&r, &title)}, {r.args.sprt ? "SPRT" : "match"}, {fast_when(r.started_ms, &when)}, {state}")
+            e.line_len = min(line.len, 159) as int
+            for k in 0..e.line_len
+                e.line[k] = line[k]
+            past.push(e)
+            r.release()
+
+    fn take_open() -> str
+        let n = open_len
+        open_len = 0
+        return str(open_id[0..n])
+
+    fn new_match(app: *DesktopApp, kit: *SettingsKit, look: *BoardLook, lib: *EngineLibrary)
+        let ui = &app.ui
+        let theme = kit.theme
+        let fonts = kit.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        pick_defaults(lib)
+        var buf: [1000]u8
+        let picked = picking.take(buf[0..1000])
+        if picked.len > 0
+            openings.clear()
+            push_text(&openings, picked)
+        with kit.card(0, "New match")
+            let a = lib.find(engine_a)
+            let b = lib.find(engine_b)
+            with kit.row(1, "Engines", "The first is the one being tested, the second what it is measured against.")
+                with ui.open(UiNode(name: "fastengines", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    if engine_choice_button(ui, look, "fastenginea", 0, a ? a.display_name() : "Choose", "", picker_a.shown, UiNode(width: UiSize.fixed(150.0))): picker_a.open()
+                    ui.label("vs", note)
+                    if engine_choice_button(ui, look, "fastengineb", 1, b ? b.display_name() : "Choose", "", picker_b.shown, UiNode(width: UiSize.fixed(150.0))): picker_b.open()
+            if picker_a.draw(ui, look, lib, engine_a, -1): engine_a = picker_a.picked_engine
+            if picker_b.draw(ui, look, lib, engine_b, -1): engine_b = picker_b.picked_engine
+            kit.choice(2, "Test", "An SPRT stops once it is sure enough either way. Fixed games play every round.", ref kind, FastKinds)
+            if kind == 0: kit.choice(3, "Bounds", "elo0 and elo1, in normalized Elo, with alpha and beta 0.05.", ref bounds, FastBoundWords)
+            kit.choice(4, "Time control", "Seconds per game plus seconds added per move.", ref control, FastControls)
+            kit.choice(5, kind == 0 ? "Most rounds" : "Rounds", "Each round plays an opening twice, once with each colour.", ref rounds, FastRoundWords)
+            kit.count(6, "Games at once", "Each game takes two cores while it runs.", ref at_once, 1, max(cpu_count(), 1))
+            with kit.row(7, "Openings", openings.len > 0 ? str(openings[0..openings.len]) : "An EPD or PGN file. Without one, every game starts from the starting position.")
+                with ui.open(UiNode(name: "fastopenings", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    if openings.len > 0 and ui.button("Clear"): openings.clear()
+                    if ui.button("Choose") and not picking.is_open(): picking.pick_file(app.window.handle, "Openings", "epd;pgn", null)
+            with kit.row(8, "Start", "The match runs through snailfast and opens in a tab. Copy command gives the same match for a terminal.")
+                with ui.open(UiNode(name: "fastgo", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    if ui.button("Copy command")
+                        make_command(lib)
+                        command.push(0)
+                        if SDL_SetClipboardText(command.ptr as cstr): ui.toast("Command copied")
+                    if ui.button("Start", true)
+                        if a == null or b == null: ui.toast("Choose two engines first.")
+                        elif start_match(lib): ui.toast("Match started. It opens in a tab.")
+                        else: ui.toast("snailfast could not be started.")
+
+    fn pick_defaults(lib: *EngineLibrary)
+        if engine_a == 0 and lib.entries.len > 0: engine_a = lib.entries[0].id
+        if engine_b == 0 and lib.entries.len > 1: engine_b = lib.entries[1].id
+        elif engine_b == 0: engine_b = engine_a
+
+    fn make_command(lib: *EngineLibrary)
+        pick_defaults(lib)
+        command.clear()
+        push_text(&command, "snailfast")
+        var path: [600]u8
+        var line: [900]u8
+        let a = lib.find(engine_a)
+        let b = lib.find(engine_b)
+        if a == null or b == null: return
+        let twin = a.display_name() == b.display_name() ? " 2" : ""
+        push_text(&command, format(&line, " -engine cmd=\"{lib.exe_path(engine_a, &path)}\" name=\"{a.display_name()}\""))
+        push_text(&command, format(&line, " -engine cmd=\"{lib.exe_path(engine_b, &path)}\" name=\"{b.display_name()}{twin}\""))
+        push_text(&command, format(&line, " -each tc={FastControls[control]}"))
+        if openings.len > 0
+            let file = str(openings[0..openings.len])
+            let shape = ends_with(file, ".pgn") or ends_with(file, ".PGN") ? "pgn" : "epd"
+            push_text(&command, format(&line, " -openings file=\"{file}\" format={shape} order=random"))
+        push_text(&command, format(&line, " -rounds {FastRounds[rounds]} -repeat -concurrency {at_once} -recover"))
+        if kind == 0: push_text(&command, format(&line, " -sprt elo0={FastBoundLow[bounds]:.1} elo1={FastBoundHigh[bounds]:.1} alpha=0.05 beta=0.05"))
+
+    fn start_match(lib: *EngineLibrary) -> bool
+        make_command(lib)
+        if command.len < 10: return false
+        var shim: [720]u8
+        var folder: [720]u8
+        var inside: [64]u8
+        var whole: [..]u8
+        defer whole.free()
+        whole.push('"')
+        push_text(&whole, install.place.path(format(&inside, "fastchess\\bin\\{FastShimName}"), &shim))
+        whole.push('"')
+        push_text(&whole, str(command[9..command.len]))
+        let at = install.place.path("fastchess", &folder)
+        return sn_fc_launch(whole.ptr, whole.len as int, at.ptr, at.len as int, 1) != 0
+
+    fn left()
+        asked = false
+        path_read = false
+        opens_read = false
+        past_read = false
+
+    fn release()
+        install.release()
+        picker_a.release()
+        picker_b.release()
+        openings.free()
+        command.free()
+        past.free()
+
+fn fast_later(a: str, b: str) -> bool
+    if a.len != b.len: return a.len > b.len
+    for i in 0..a.len
+        if a[i] != b[i]: return a[i] > b[i]
+    return false
+
+fn fast_when(ms: i64, buf: *[48]u8) -> str
+    var d: SDL_DateTime
+    if ms <= 0 or not SDL_TimeToDateTime(ms * 1000000, &d, true): return format(buf, "unknown time")
+    return format(buf, "{d.year}-{d.month:02}-{d.day:02} {d.hour:02}:{d.minute:02}")

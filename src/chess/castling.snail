@@ -1,0 +1,39 @@
+use chess/primitives
+
+const WhiteKingside = 1
+const WhiteQueenside = 2
+const BlackKingside = 4
+const BlackQueenside = 8
+const AllRights = 15
+
+@inline
+fn kingside_right(side: Side) -> u8
+    return 1 << 2 * side
+
+@inline
+fn queenside_right(side: Side) -> u8
+    return 2 << 2 * side
+
+const KingsideGap: Bitboard = f1.bit | g1.bit
+const QueensideGap: Bitboard = b1.bit | c1.bit | d1.bit
+const KingsidePassage: Bitboard = f1.bit | g1.bit
+const QueensidePassage: Bitboard = c1.bit | d1.bit
+
+fn back_rank[us: Side]() -> int
+    return us == White ? 0 : 56
+
+var kept_after_touching: [64]u8
+
+init
+    for sq in 0..64
+        kept_after_touching[sq] = AllRights
+    kept_after_touching[e1] = AllRights & ~(WhiteKingside | WhiteQueenside)
+    kept_after_touching[h1] = AllRights & ~WhiteKingside
+    kept_after_touching[a1] = AllRights & ~WhiteQueenside
+    kept_after_touching[e8] = AllRights & ~(BlackKingside | BlackQueenside)
+    kept_after_touching[h8] = AllRights & ~BlackKingside
+    kept_after_touching[a8] = AllRights & ~BlackQueenside
+
+@inline
+fn kept_after(from: Square, to: Square) -> u8
+    return kept_after_touching[from] & kept_after_touching[to]

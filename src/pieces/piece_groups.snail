@@ -1,0 +1,15 @@
+use src/pieces/piece_sets
+
+const PieceGroupNames = ["Standard", "Stylised", "Minimal", "Animated"]
+const PieceGroupNotes = ["Traditional tournament piece designs", "Distinctive designs with recognisable piece shapes", "Letters, shapes and plain pieces", "Pieces that move while they wait"]
+const StandardSets = ["classic"]
+const MinimalSets = ["letters", "shapes", "checker", "tokens", "blindfold"]
+
+fn piece_group(set: PieceSet) -> int
+    if piece_art(set).motions.len > 0: return 3
+    let word = PieceSetWords[set as int]
+    for w in StandardSets
+        if w == word: return 0
+    for w in MinimalSets
+        if w == word: return 2
+    return 1

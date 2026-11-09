@@ -1,0 +1,183 @@
+use engine/ui/ui_canvas
+
+enum ThemeName: u8
+    Porcelain
+    AfterHours
+    Charcoal
+    Goo
+    Paper
+    Neon
+
+const BasicThemes = 3
+const ThemeCount = 6
+
+enum AccentName: u8
+    DeepTeal
+    HarbourBlue
+    Mulberry
+    WarmCopper
+    SnailGreen
+    Graphite
+    Saffron
+    Rosewood
+
+const AccentLabels = ["Deep teal", "Harbour blue", "Mulberry", "Warm copper", "Snail green", "Graphite", "Saffron", "Rosewood"]
+
+const PageCurve: f32 = 14.0
+
+fn theme_label(name: ThemeName) -> str
+    match name
+        AfterHours: return "After hours"
+        Charcoal: return "Charcoal"
+        Goo: return "Goo"
+        Paper: return "Paper"
+        Neon: return "Circuit"
+    return "Porcelain"
+
+struct GuiTheme
+    name: ThemeName
+    page: Color
+    band: Color
+    surface: Color
+    sunken: Color
+    line: Color
+    ink: Color
+    muted: Color
+    accent: Color
+    accent_soft: Color
+    accent_ink: Color
+    dark: bool
+    warn: Color
+    material: u32
+    motion: Vec4
+    pressed_at: f32 = -100.0
+    pressed_point: f32
+
+    static fn of(name: ThemeName) -> GuiTheme
+        match name
+            AfterHours: return GuiTheme(name, Color.hex(0x19231F), Color.hex(0x141C19), Color.hex(0x202D27), Color.hex(0x1C2822), Color.hex(0x36453B), Color.hex(0xE0E8DF), Color.hex(0x9DAD9F), Color.hex(0x5FA8A0), Color.hex(0x2B3D32), Color.hex(0x10201C), true, Color.hex(0xE0A35A))
+            Charcoal: return GuiTheme(name, Color.hex(0x18191B), Color.hex(0x131415), Color.hex(0x222326), Color.hex(0x1D1E21), Color.hex(0x3A3C42), Color.hex(0xE6E7E9), Color.hex(0xA4A6AD), Color.hex(0x6FB3AD), Color.hex(0x303136), Color.hex(0x121314), true, Color.hex(0xE0A35A))
+            Goo: return slime(Color.hex(0x8EE26E))
+            Neon: return circuit(Color.hex(0x22E4FF))
+            Paper: return GuiTheme(name, Color.hex(0xEEE7D8), Color.hex(0xE2D9C6), Color.hex(0xF8F3E8), Color.hex(0xE9E1D0), Color.hex(0xD2C7B2), Color.hex(0x24211D), Color.hex(0x736B5E), Color.hex(0xB23A2C), Color.hex(0xF4E2D9), Color.hex(0xFFF9F0), false, Color.hex(0xB45A2D))
+        return GuiTheme(name, Color.hex(0xF7F8F5), Color.hex(0xE9ECE6), Color.hex(0xFFFFFF), Color.hex(0xF1F3EE), Color.hex(0xE2E7E3), Color.hex(0x1C2C32), Color.hex(0x84908F), Color.hex(0x286A67), Color.hex(0xEDF5F1), Color.hex(0xFFFFFF), false, Color.hex(0xB45A2D))
+
+    fn with_accent(a: AccentName) -> GuiTheme
+        var t = *self
+        if a == DeepTeal: return t
+        if name == Goo: return slime(goo_accent(a))
+        if name == Neon: return circuit(neon_accent(a))
+        if dark
+            match a
+                HarbourBlue: t.accent = Color.hex(0x95B8DC)
+                Mulberry: t.accent = Color.hex(0xC4A1C7)
+                WarmCopper: t.accent = Color.hex(0xD1AA82)
+                SnailGreen: t.accent = Color.hex(0x62C69B)
+                Graphite: t.accent = Color.hex(0xB3B9C4)
+                Saffron: t.accent = Color.hex(0xD9BC62)
+                Rosewood: t.accent = Color.hex(0xD9949F)
+            return t
+        match a
+            HarbourBlue
+                t.accent = Color.hex(0x3D658C)
+                t.accent_soft = Color.hex(0xEBF0F6)
+            Mulberry
+                t.accent = Color.hex(0x826085)
+                t.accent_soft = Color.hex(0xF3EDF3)
+            WarmCopper
+                t.accent = Color.hex(0x9A6944)
+                t.accent_soft = Color.hex(0xF6EFE8)
+            SnailGreen
+                t.accent = Color.hex(0x1C6F52)
+                t.accent_soft = Color.hex(0xE9F3EE)
+            Graphite
+                t.accent = Color.hex(0x596170)
+                t.accent_soft = Color.hex(0xEFF1F3)
+            Saffron
+                t.accent = Color.hex(0x8C6A14)
+                t.accent_soft = Color.hex(0xF7F1E1)
+            Rosewood
+                t.accent = Color.hex(0xA2475A)
+                t.accent_soft = Color.hex(0xF7ECEE)
+        return t
+
+    fn detailed() -> bool
+        return name as int >= BasicThemes
+
+    fn wear(b: UiBox, spills: bool = true) -> UiBox
+        if material == 0: return b
+        var w = b
+        w.material = material
+        w.values = motion
+        if spills: w.reach = spill()
+        if name == Neon
+            w.fill = UiFill.solid(b.fill.kind == UiPaintSolid ? b.fill.a : b.fill.b)
+            w.fill.b = accent
+        return w
+
+    fn spill() -> f32
+        match name
+            Goo: return GooDrip
+            Paper: return PaperSpill
+            Neon: return NeonSpill
+        return 0.0
+
+    fn moving() -> bool
+        if material == 0 or motion.x < -1.0: return false
+        return name != Paper
+
+    fn feel(ui: *UiCanvas)
+        if ui.still
+            motion = Vec4(-1.0e9, -1.0e5, -1.0e5, 0.0)
+            return
+        let p = ui.pointer
+        if ui.pointer_pressed
+            pressed_at = ui.time
+            pressed_point = clamp(floor(p.x * 0.5 + 0.5), 0.0, 4095.0) * 4096.0 + clamp(floor(p.y * 0.5 + 0.5), 0.0, 4095.0)
+        motion = Vec4(ui.time - pressed_at, p.x, p.y, pressed_point)
+
+    fn gain() -> Color
+        return dark ? Color.hex(0x6CC48C) : Color.hex(0x2E8A4F)
+
+    fn loss() -> Color
+        return dark ? Color.hex(0xE8776E) : Color.hex(0xC4433A)
+
+    fn widgets(face: int, bold: int) -> UiTheme
+        return UiTheme(face, bold, 13.0, ink, muted, page, surface, surface, sunken, line, accent, accent_ink, accent, 6.0)
+
+const GooDrip: f32 = 28.0
+
+const PaperSpill: f32 = 10.0
+
+const NeonSpill: f32 = 22.0
+
+fn circuit(c: Color) -> GuiTheme
+    let base = Color.hex(0x080B12)
+    return GuiTheme(Neon, base.lerp(c, 0.02), Color.hex(0x05070C), Color.hex(0x0D121C).lerp(c, 0.04), Color.hex(0x0A0F18).lerp(c, 0.03), Color.hex(0x1A2433).lerp(c, 0.18), Color.hex(0xE8F3FF), Color.hex(0x7F90A8), c, base.lerp(c, 0.16), Color.hex(0x02121A), true, Color.hex(0xFFB547))
+
+fn neon_accent(a: AccentName) -> Color
+    match a
+        HarbourBlue: return Color.hex(0x3D8BFF)
+        Mulberry: return Color.hex(0xC04DFF)
+        WarmCopper: return Color.hex(0xFF8A2A)
+        SnailGreen: return Color.hex(0x39FF88)
+        Graphite: return Color.hex(0xD6E2F2)
+        Saffron: return Color.hex(0xFFD23A)
+        Rosewood: return Color.hex(0xFF3D7F)
+    return Color.hex(0x22E4FF)
+
+fn slime(c: Color) -> GuiTheme
+    let base = Color.hex(0x111513)
+    let page = base.lerp(c, 0.035)
+    return GuiTheme(Goo, page, Color.hex(0x0A0D0B).lerp(c, 0.03), base.lerp(c, 0.13), base.lerp(c, 0.085), base.lerp(c, 0.3), Color.hex(0xEDF3EE).lerp(c, 0.06), Color.hex(0x9CA7A0).lerp(c, 0.22), c, base.lerp(c, 0.22), Color.hex(0x0A140D), true, Color.hex(0xE0A35A))
+
+fn goo_accent(a: AccentName) -> Color
+    match a
+        HarbourBlue: return Color.hex(0x6FB4F2)
+        Mulberry: return Color.hex(0xCF8BE0)
+        WarmCopper: return Color.hex(0xE8A66A)
+        SnailGreen: return Color.hex(0x4FD69A)
+        Graphite: return Color.hex(0xB9C2CF)
+        Saffron: return Color.hex(0xEDCB55)
+        Rosewood: return Color.hex(0xF08898)
+    return Color.hex(0x8EE26E)

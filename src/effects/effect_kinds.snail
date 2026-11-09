@@ -1,0 +1,22 @@
+enum GuiEffect: u8
+    HotPiece
+    MossyPiece
+    MoveTrail
+    LandingDust
+    CaptureBurst
+    PieceGlint
+    CheckFlare
+    SacrificeMark
+    StreakMarks
+
+const GuiEffectCount = 9
+const GuiEffectWords = ["hot", "moss", "trail", "dust", "burst", "glint", "flare", "sacrifice", "ice"]
+const GuiEffectLabels = ["Fire on successful pieces", "Moss on inactive pieces", "Move trails", "Landing dust", "Capture embers", "Move highlight", "Check flames", "Sacrifice glow", "Streak fire and frost"]
+const GuiEffectNotes = ["Show fire on pieces whose total capture value exceeds their own value. More captures increase the flames. Values: pawn 1, knight or bishop 3, rook 5, queen 9, king 4.", "Moss starts growing after a piece stays still for 12 of its side's moves and fully covers it after 30. Fire removes moss.", "Show a fading light trail behind moving pieces.", "Show a dust puff and an expanding ring when a piece lands.", "Animate captured pieces dissolving into rising embers.", "Show a brief sweep of light on the piece that just moved.", "Show red flames around a king in check.", "Mark potential sacrifices with a dim glow. The glow turns gold when engine analysis confirms the sacrifice.", "Show fire on an engine's place in the standings after 3 wins in a row, and frost after 3 losses in a row."]
+
+const GuiEffectGroups = ["Pieces", "Moves and captures", "Check and sacrifices", "Standings"]
+const GuiEffectGroupStarts = [0, 2, 6, 8]
+
+struct EffectChoice
+    on: bool
+    intensity: f32 = 0.7

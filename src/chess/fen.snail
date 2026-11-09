@@ -1,0 +1,179 @@
+use chess/make
+use chess/short_text
+
+const StartFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+extend Board
+    fn load_fen(fen: str) -> bool
+        var at: i64 = 0
+        let placement_field = fen_word(fen, ref at)
+        let side_field = fen_word(fen, ref at)
+        let castling_field = fen_word(fen, ref at)
+        let en_passant_field = fen_word(fen, ref at)
+        let clock_field = fen_word(fen, ref at)
+        let fullmove_field = fen_word(fen, ref at)
+        if fen_word(fen, ref at).len > 0: return false
+
+        var placement: [64]Piece
+        var rank = 7
+        var file = 0
+        var white_kings = 0
+        var black_kings = 0
+        for c in 0..placement_field.len
+            let symbol = placement_field[c]
+            if symbol == '/'
+                if file != 8 or rank == 0: return false
+                rank -= 1
+                file = 0
+            elif symbol >= '1' and symbol <= '8'
+                file += symbol - '0'
+                if file > 8: return false
+            else
+                let piece = piece_from_letter(symbol)
+                if piece == NoPiece or file > 7: return false
+                placement[Square(file, rank)] = piece
+                if piece == Piece.of(White, King): white_kings += 1
+                if piece == Piece.of(Black, King): black_kings += 1
+                file += 1
+        if rank != 0 or file != 8: return false
+        if white_kings != 1 or black_kings != 1: return false
+        if side_field != "w" and side_field != "b": return false
+        if castling_field.len == 0 or not castling_letters(castling_field): return false
+        if en_passant_field != "-" and not square_text(en_passant_field): return false
+        let (clock_value, clock_ok) = fen_number(clock_field, 0)
+        let (fullmove_value, fullmove_ok) = fen_number(fullmove_field, 1)
+        if not clock_ok or not fullmove_ok: return false
+
+        var probe: Board
+        for sq in 0..64
+            if placement[sq] != NoPiece: probe.put(placement[sq], sq)
+        if (probe.pieces(White, Pawn) | probe.pieces(Black, Pawn)) & (Rank1 | Rank8): return false
+        let mover = side_field == "b" ? Black : White
+        let waiting = mover.other
+        if probe.is_attacked[waiting](probe.king_square(waiting), probe.occupied()): return false
+
+        bb = probe.bb
+        squares = probe.squares
+        side = mover
+
+        var rights: u8 = 0
+        for c in 0..castling_field.len
+            let symbol = castling_field[c]
+            if symbol == 'K' and has_castling_pieces(White, h1): rights |= WhiteKingside
+            if symbol == 'Q' and has_castling_pieces(White, a1): rights |= WhiteQueenside
+            if symbol == 'k' and has_castling_pieces(Black, h8): rights |= BlackKingside
+            if symbol == 'q' and has_castling_pieces(Black, a8): rights |= BlackQueenside
+        castling = rights
+        en_passant = read_en_passant(en_passant_field)
+        clock = clock_value
+        fullmove = max(fullmove_value, 1)
+        key = compute_key()
+        return true
+
+    fn has_castling_pieces(side: Side, rook_home: Square) -> bool
+        let king_home = side == White ? e1 : e8
+        return squares[king_home] == Piece.of(side, King) and squares[rook_home] == Piece.of(side, Rook)
+
+    fn read_en_passant(field: str) -> Square
+        if field.len != 2: return Square.none
+        let file = field[0] - 'a'
+        let rank = field[1] - '1'
+        let white = side == White
+        if rank != (white ? 5 : 2): return Square.none
+        let target = Square(file, rank)
+        if squares[target] != NoPiece: return Square.none
+        let victim = target + (white ? -8 : 8)
+        if squares[victim] != Piece.of(side.other, Pawn): return Square.none
+        let beside = (victim.bit << 1 & ~FileA) | (victim.bit >> 1 & ~FileH)
+        return beside & pieces(side, Pawn) ? target : Square.none
+
+    fn write_fen(out: *ShortText)
+        for r in 0..8
+            let rank = 7 - r
+            var empty = 0
+            for file in 0..8
+                let piece = squares[Square(file, rank)]
+                if piece == NoPiece
+                    empty += 1
+                    continue
+                if empty > 0
+                    out.add('0' + empty)
+                    empty = 0
+                out.add(piece_letter(piece))
+            if empty > 0: out.add('0' + empty)
+            if rank > 0: out.add('/')
+        out.add(' ')
+        out.add(side == White ? 'w' : 'b')
+        out.add(' ')
+        if castling == 0: out.add('-')
+        if castling & WhiteKingside: out.add('K')
+        if castling & WhiteQueenside: out.add('Q')
+        if castling & BlackKingside: out.add('k')
+        if castling & BlackQueenside: out.add('q')
+        out.add(' ')
+        if en_passant == Square.none: out.add('-')
+        else: write_square(en_passant, out)
+        out.add(' ')
+        out.add_int(clock)
+        out.add(' ')
+        out.add_int(fullmove)
+
+fn piece_from_letter(letter: u8) -> Piece
+    match letter
+        'P': return Piece.of(White, Pawn)
+        'p': return Piece.of(Black, Pawn)
+        'N': return Piece.of(White, Knight)
+        'n': return Piece.of(Black, Knight)
+        'B': return Piece.of(White, Bishop)
+        'b': return Piece.of(Black, Bishop)
+        'R': return Piece.of(White, Rook)
+        'r': return Piece.of(Black, Rook)
+        'Q': return Piece.of(White, Queen)
+        'q': return Piece.of(Black, Queen)
+        'K': return Piece.of(White, King)
+        'k': return Piece.of(Black, King)
+    return NoPiece
+
+fn kind_letter(kind: Kind) -> u8
+    match kind
+        Knight: return 'N'
+        Bishop: return 'B'
+        Rook: return 'R'
+        Queen: return 'Q'
+        King: return 'K'
+    return 'P'
+
+fn piece_letter(piece: Piece) -> u8
+    let letter = kind_letter(piece.kind)
+    return piece.side == White ? letter : letter + 32
+
+fn write_square(sq: Square, out: *ShortText)
+    out.add('a' + sq.file)
+    out.add('1' + sq.rank)
+
+fn square_text(s: str) -> bool
+    return s.len == 2 and s[0] >= 'a' and s[0] <= 'h' and s[1] >= '1' and s[1] <= '8'
+
+fn castling_letters(s: str) -> bool
+    if s == "-": return true
+    for i in 0..s.len
+        let c = s[i]
+        if c != 'K' and c != 'Q' and c != 'k' and c != 'q': return false
+    return true
+
+fn fen_number(s: str, missing: int) -> (int, bool)
+    if s.len == 0: return missing, true
+    if s.len > 6: return 0, false
+    var n = 0
+    for i in 0..s.len
+        if s[i] < '0' or s[i] > '9': return 0, false
+        n = n * 10 + (s[i] - '0')
+    return n, true
+
+fn fen_word(text: str, ref at: i64) -> str
+    while at < text.len and (text[at] == ' ' or text[at] == '\t')
+        at += 1
+    let start = at
+    while at < text.len and text[at] != ' ' and text[at] != '\t'
+        at += 1
+    return text[start..at]

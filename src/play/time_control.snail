@@ -1,0 +1,96 @@
+use src/uci/uci_text
+
+enum ClockKind: u8
+    NoClock
+    BaseIncrement
+    MovesInTime
+    TimePerMove
+    FixedDepth
+    FixedNodes
+
+struct TimeControl
+    kind: ClockKind = BaseIncrement
+    base_ms: i64 = 300000
+    increment_ms: i64 = 3000
+    moves: int = 40
+    move_ms: i64 = 1000
+    depth: int = 10
+    nodes: i64 = 100000
+
+    fn text(buf: *[32]u8) -> str
+        var a: [16]u8
+        var b: [16]u8
+        match kind
+            NoClock: return format(buf, "No clock")
+            MovesInTime: return format(buf, "{moves}/{amount_text(base_ms, 60000, &a)}")
+            TimePerMove: return format(buf, "{amount_text(move_ms, 1000, &a)} s per move")
+            FixedDepth: return format(buf, "Depth {depth}")
+            FixedNodes: return format(buf, "{nodes} nodes")
+        return format(buf, "{amount_text(base_ms, 60000, &a)}+{amount_text(increment_ms, 1000, &b)}")
+
+    fn pgn_text(buf: *[32]u8) -> str
+        var a: [16]u8
+        var b: [16]u8
+        match kind
+            BaseIncrement: return format(buf, "{amount_text(base_ms, 1000, &a)}+{amount_text(increment_ms, 1000, &b)}")
+            MovesInTime: return format(buf, "{moves}/{amount_text(base_ms, 1000, &a)}")
+        return format(buf, "-")
+
+fn read_time_control(s: str) -> (TimeControl, bool)
+    var t: TimeControl
+    if s == "none" or s == "-"
+        t.kind = NoClock
+        return t, true
+    for i in 0..s.len
+        if s[i] == '+'
+            let (base, base_ok) = read_amount(s[0..i], 60000)
+            let (inc, inc_ok) = read_amount(s[i + 1..s.len], 1000)
+            t.kind = BaseIncrement
+            t.base_ms = base
+            t.increment_ms = inc
+            return t, base_ok and inc_ok and time_allowed(&t)
+        if s[i] == '/'
+            let (moves, moves_ok) = uci_number(s[0..i])
+            let (base, base_ok) = read_amount(s[i + 1..s.len], 60000)
+            t.kind = MovesInTime
+            t.moves = moves as int
+            t.base_ms = base
+            return t, moves_ok and base_ok and time_allowed(&t)
+    return t, false
+
+fn time_allowed(t: *TimeControl) -> bool
+    if t.base_ms < 1000 or t.base_ms > 36000000: return false
+    if t.kind == BaseIncrement: return t.increment_ms >= 0 and t.increment_ms <= 60000
+    return t.moves >= 1 and t.moves <= 200
+
+fn read_amount(s: str, unit_ms: i64) -> (i64, bool)
+    var whole: i64 = 0
+    var part: i64 = 0
+    var scale: i64 = 1
+    var digits = 0
+    var point = false
+    for i in 0..s.len
+        let c = s[i]
+        if c == '.' and not point
+            point = true
+            continue
+        if c < '0' or c > '9': return 0, false
+        digits += 1
+        if digits > 9: return 0, false
+        if point
+            if scale >= 1000: continue
+            part = part * 10 + (c - '0') as i64
+            scale *= 10
+        else: whole = whole * 10 + (c - '0') as i64
+    if digits == 0: return 0, false
+    return whole * unit_ms + part * unit_ms / scale, true
+
+fn amount_text(ms: i64, unit_ms: i64, buf: *[16]u8) -> str
+    var whole = ms / unit_ms
+    var hundredths = ((ms % unit_ms) * 100 + unit_ms / 2) / unit_ms
+    if hundredths >= 100
+        whole += 1
+        hundredths = 0
+    if hundredths == 0: return format(buf, "{whole}")
+    if hundredths % 10 == 0: return format(buf, "{whole}.{hundredths / 10}")
+    return format(buf, "{whole}.{hundredths:02}")

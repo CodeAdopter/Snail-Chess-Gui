@@ -1,0 +1,256 @@
+use engine/desktop/desktop_app
+use src/uci/engine_told
+
+const MaxAnalysisLines = 8
+const AnalysisHz = 10
+
+var analysis_hz: int = AnalysisHz
+
+struct PvLine
+    depth: int
+    seldepth: int
+    kind: ScoreKind
+    score: int
+    bound: ScoreBound
+    nodes: i64
+    wdl: [3]int
+    has_wdl: bool
+    moves: [MaxPvMoves]Move
+    count: int
+    filled: bool
+
+struct EngineAnalysis
+    engine: UciEngine
+    engine_id: int
+    profile_id: int
+    applied_revision: int = -1
+    hash_mb: int
+    effective: EngineProfile
+    sent: EngineProfile
+    pressed: [..]u8
+    on: bool
+    shown: bool
+    multipv: int = 3
+    threads: int
+    sent_multipv: int
+    sent_threads: int
+    sent_wdl: bool
+    lines: [MaxAnalysisLines]PvLine
+    target: Board
+    target_key: u64
+    command: [..]u8
+    searching: Board
+    search_key: u64
+    searched_key: u64
+    started_ns: i64
+    depth: int
+    nodes: i64
+    nps: i64
+    hashfull: int = -1
+    last_take_ns: i64
+    version: u64
+    kept_key: u64
+    kept_depth: [MaxAnalysisLines]int
+
+    fn follow(game: *Game)
+        let b = game.board()
+        if b.key == target_key and b.side == target.side: return
+        target = *b
+        target_key = b.key
+        write_position(game, game.at, &command)
+
+    fn update(app: *DesktopApp, engine_path: str, engine_folder: str, profile: *EngineProfile)
+        let e = &engine
+        let want = on and shown
+        if e.state == EngineFailed and not on: e.state = EngineOff
+        if e.state == EngineOff and want
+            sent_threads = 0
+            sent_multipv = 0
+            sent_wdl = false
+            searched_key = 0
+            applied_revision = -1
+            sent.clear_values()
+            pressed.clear()
+            e.start(engine_path, engine_folder)
+        if e.state == EngineOff or e.state == EngineFailed: return
+        let now = now_ns()
+        let gap = 1000000000 / max(analysis_hz, 1) as i64
+        if e.child.waiting()
+            let quick = e.state != EngineSearching
+            if quick or e.child.pressing() or now - last_take_ns >= gap
+                last_take_ns = now
+                e.take()
+                read_batch()
+            else: app.wake_in((gap - (now - last_take_ns)) as f64 / 1.0e9)
+        if e.check(now)
+            version += 1
+            return
+        let revision = profile ? profile.revision : 0
+        let profile_due = revision != applied_revision and profile_settled(app, profile, now)
+        match e.state
+            EngineIdle
+                if pressed.len > 0
+                    send_presses()
+                    e.ready()
+                elif profile_due
+                    applied_revision = revision
+                    if apply_profile(profile): e.ready()
+                elif want and (target_key != searched_key or options_changed()): begin()
+            EngineSearching
+                if not want or target_key != search_key or options_changed() or pressed.len > 0 or profile_due: e.stop()
+        if e.state == EngineStarting or e.state == EngineReadying or e.state == EngineStopping: app.wake_in(0.25)
+
+    fn options_changed() -> bool
+        return wanted_lines() != sent_multipv and engine.option("MultiPV") >= 0 or threads != sent_threads and engine.option("Threads") >= 0 or not sent_wdl and engine.option("UCI_ShowWDL") >= 0
+
+    fn wanted_lines() -> int
+        let i = engine.option("MultiPV")
+        if i < 0: return 1
+        let most = engine.options[i].most
+        return clamp(multipv, 1, clamp(most as int, 1, MaxAnalysisLines))
+
+    fn begin()
+        let e = &engine
+        if options_changed()
+            var value: [24]u8
+            if e.option("Threads") >= 0 and threads != sent_threads
+                e.set_option("Threads", format(&value, "{threads}"))
+                sent_threads = threads
+            if e.option("MultiPV") >= 0 and wanted_lines() != sent_multipv
+                sent_multipv = wanted_lines()
+                e.set_option("MultiPV", format(&value, "{sent_multipv}"))
+            if e.option("UCI_ShowWDL") >= 0 and not sent_wdl
+                sent_wdl = true
+                e.set_option("UCI_ShowWDL", "true")
+            e.ready()
+            return
+        e.send(str(command[0..command.len]))
+        e.send("go infinite")
+        e.state = EngineSearching
+        search_key = target_key
+        searching = target
+        searched_key = 0
+        started_ns = now_ns()
+        for i in 0..MaxAnalysisLines
+            lines[i].filled = false
+        depth = 0
+        nodes = 0
+        nps = 0
+        hashfull = -1
+        version += 1
+
+    fn read_batch()
+        let e = &engine
+        var latest: [MaxAnalysisLines]int
+        for i in 0..MaxAnalysisLines
+            latest[i] = -1
+        let n = e.batch.lines.len as int
+        for i in 0..n
+            let line = e.batch.line(i)
+            if line.len >= 4 and line[0..4] == "info"
+                if e.state != EngineSearching: continue
+                let info = read_info(line)
+                if info.nodes > 0: nodes = info.nodes
+                if info.nps > 0: nps = info.nps
+                if info.hashfull >= 0: hashfull = info.hashfull
+                if info.pv.len > 0 and info.multipv <= MaxAnalysisLines: latest[info.multipv - 1] = i
+            elif line.len >= 8 and line[0..8] == "bestmove"
+                if e.state == EngineSearching: searched_key = search_key
+                if e.state == EngineSearching or e.state == EngineStopping: e.state = EngineIdle
+            else: e.handshake(line)
+        for slot in 0..MaxAnalysisLines
+            if latest[slot] >= 0: read_line(slot, read_info(e.batch.line(latest[slot])))
+        version += 1
+
+    fn read_line(slot: int, info: UciInfo)
+        let l = &lines[slot]
+        l.depth = info.depth
+        l.seldepth = info.seldepth
+        if info.kind != NoScore
+            l.kind = info.kind
+            l.score = info.score
+            l.bound = info.bound
+        l.nodes = info.nodes
+        l.has_wdl = info.has_wdl
+        if info.has_wdl: l.wdl = info.wdl
+        l.count = 0
+        var b = searching
+        var w = UciWords(text: info.pv)
+        while l.count < MaxPvMoves
+            let word = w.next()
+            if word.len == 0: break
+            let (m, legal) = parse_move(&b, word)
+            if not legal: break
+            l.moves[l.count] = m
+            l.count += 1
+            b.play(m)
+        l.filled = l.count > 0
+        if slot == 0: depth = info.depth
+
+    fn profile_settled(app: *DesktopApp, profile: *EngineProfile, now: i64) -> bool
+        if not profile: return true
+        let wait = profile.touched_ns + 400000000 - now
+        if wait <= 0: return true
+        app.wake_in(wait as f64 / 1.0e9)
+        return false
+
+    fn apply_profile(profile: *EngineProfile) -> bool
+        effective.clear_values()
+        if profile: effective.copy_values(profile)
+        let (h, has_hash) = effective.value_of("Hash")
+        if hash_mb > 0 and not has_hash
+            var t: [16]u8
+            effective.put("Hash", format(&t, "{hash_mb}"))
+        let told_any = tell_values(&engine, &effective, &sent, ["Threads", "MultiPV"])
+        if told_any: searched_key = 0
+        return told_any
+
+    fn press(name: str) -> bool
+        if engine.state == EngineOff or engine.state == EngineFailed or engine.option(name) < 0: return false
+        for k in 0..name.len
+            pressed.push(name[k])
+        pressed.push('\n')
+        searched_key = 0
+        return true
+
+    fn send_presses()
+        var line: [200]u8
+        var from = 0
+        for k in 0..pressed.len
+            if pressed[k] == '\n'
+                engine.send(format(&line, "setoption name {str(pressed[from..k])}"))
+                from = k as int + 1
+        pressed.clear()
+
+    fn switch_profile(id: int, p: *EngineProfile)
+        if id == profile_id: return
+        profile_id = id
+        applied_revision = -1
+        if not p: return
+        let (t, has_threads) = p.value_of("Threads")
+        let (threads_n, threads_ok) = uci_number(t)
+        if has_threads and threads_ok and threads_n > 0: threads = threads_n as int
+        let (m, has_lines) = p.value_of("MultiPV")
+        let (lines_n, lines_ok) = uci_number(m)
+        if has_lines and lines_ok and lines_n > 0: multipv = clamp(lines_n as int, 1, MaxAnalysisLines)
+
+    fn switch_engine(id: int)
+        if id == engine_id: return
+        engine_id = id
+        profile_id = 0
+        engine.quit()
+        search_key = 0
+        searched_key = 0
+        for i in 0..MaxAnalysisLines
+            lines[i].filled = false
+        version += 1
+
+    fn lines_fresh() -> bool
+        return search_key == target_key and lines[0].filled
+
+    fn release()
+        engine.release()
+        effective.release()
+        command.free()
+        sent.release()
+        pressed.free()

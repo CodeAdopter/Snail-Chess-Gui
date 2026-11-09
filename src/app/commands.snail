@@ -1,0 +1,168 @@
+use src/app/tabs
+
+enum TabAction: u8
+    NoAction
+    OpenPlay
+    OpenTournamentSetup
+    PasteText
+    CopyFen
+    CopyPgn
+    ToggleEngine
+    EditBoard
+    AddEngineFile
+    NewProfile
+    ShowEngineLog
+    AddEngineRegistry
+    StartGame
+    NewGame
+    TakeBack
+    OfferDraw
+    ResignGame
+    AnalyzeGame
+    PauseEvent
+    ResumeEvent
+    StopEvent
+    StartTournament
+    ImportBook
+    AddBookRegistry
+    GenerateBook
+    ShowFlat
+    ShowThreeD
+    ToggleDatabase
+    ImportGames
+    ImportLichess
+    ExportGames
+    StopFastchess
+    ContinueFastchess
+    ShowFastBoards
+    ShowFastEco
+    SkipPosition
+    RestartRun
+
+fn event_status(r: *EventRunner, focus: int, buf: *[160]u8) -> str
+    var tc: [32]u8
+    let t = r.config.control.text(&tc)
+    let done = r.finished_games()
+    let total = r.schedule.len
+    var round = 0
+    if focus >= 0 and focus < r.slots.len and r.slots[focus].busy(): round = r.schedule[r.slots[focus].index].round
+    else
+        let next = r.next_unplayed()
+        if next >= 0: round = r.schedule[next].round
+    match r.state
+        EventRunning: return format(buf, "Running  ·  {done} of {total} games  ·  round {round}  ·  {t}")
+        EventPausing: return format(buf, "Pausing after current games finish  ·  {done} of {total} games  ·  {t}")
+        EventPaused: return format(buf, "Paused  ·  {done} of {total} games  ·  {t}")
+        EventStopped: return format(buf, "Stopped after {done} of {total} games")
+    return format(buf, "Finished  ·  {total} games  ·  {t}")
+
+fn view_switch(bar: *CommandBar, three_d: bool, asked: TabAction) -> TabAction
+    bar.divider()
+    let k = bar.segments("view", ["2D", "3D"], three_d ? 1 : 0)
+    if k == 0: return ShowFlat
+    if k == 1: return ShowThreeD
+    return asked
+
+fn draw_commands(app: *DesktopApp, look: *DesktopLook, icons: *LineIcons, tab: *GuiTab, three_d: bool, database: bool, lichess_over: bool) -> TabAction
+    var asked = NoAction
+    with bar = command_bar(app, look)
+        match tab.kind
+            Analysis
+                if bar.button("flip", "Flip board", true, false, icons.path(IconFlip)): tab.flipped = not tab.flipped
+                if bar.button("edit", tab.editing ? "Close editor" : "Edit board", true, tab.editing, icons.path(IconPencil)): asked = EditBoard
+                if bar.button("paste", "Paste", true, false, icons.path(IconPaste)): asked = PasteText
+                bar.divider()
+                if bar.button("copyfen", "Copy FEN", true, false, icons.path(IconCopy)): asked = CopyFen
+                if bar.button("copypgn", "Copy PGN", true, false, icons.path(IconCopy)): asked = CopyPgn
+                bar.divider()
+                if bar.button("log", "Engine log", true, false, icons.path(IconList)): asked = ShowEngineLog
+                bar.gap()
+                if bar.button("playfrom", "Play from here", true, false, icons.path(IconPlay)): asked = OpenPlay
+                bar.divider()
+                if bar.button("database", "", true, database, icons.path(IconCloud), database ? "Cloud evaluations: on" : "Cloud evaluations: off"): asked = ToggleDatabase
+                asked = view_switch(&bar, three_d, asked)
+            Play
+                let p = tab.play
+                let running = p and p.state == PlayRunning
+                let over = p and p.state == PlayOver
+                if bar.button("newgame", p and p.setup.terms.quick ? "Next match" : "New game", over, false, icons.path(IconPlus)): asked = NewGame
+                if bar.button("takeback", "Take back", running and p.can_take_back(), false, icons.path(IconUndo)): asked = TakeBack
+                if bar.button("draw", "Offer draw", running and not p.draw_offered, false, icons.path(IconHalf)): asked = OfferDraw
+                if bar.button("resign", "Resign", running, false, icons.path(IconFlag)): asked = ResignGame
+                bar.divider()
+                if bar.button("flip", "Flip board", true, false, icons.path(IconFlip)): tab.flipped = not tab.flipped
+                bar.gap()
+                if bar.button("analyze", "Analyze", p.state != PlayChoosing and p.helps(), false, icons.path(IconSearch)): asked = AnalyzeGame
+                asked = view_switch(&bar, three_d, asked)
+            Contribute
+                if bar.button("skip", "Skip position", tab.run and tab.run.evaluating, false, icons.path(IconPlay)): asked = SkipPosition
+                if bar.button("restart", "Start over", true, false, icons.path(IconUndo)): asked = RestartRun
+                bar.divider()
+                if bar.button("flip", "Flip board", true, false, icons.path(IconFlip)): tab.flipped = not tab.flipped
+                bar.divider()
+                if bar.button("log", "Engine log", true, false, icons.path(IconList)): asked = ShowEngineLog
+                bar.gap()
+                asked = view_switch(&bar, three_d, asked)
+            Lichess
+                if bar.button("flip", "Flip board", true, false, icons.path(IconFlip)): tab.flipped = not tab.flipped
+                bar.gap()
+                if bar.button("analyze", "Analyze", lichess_over, false, icons.path(IconSearch)): asked = AnalyzeGame
+                asked = view_switch(&bar, three_d, asked)
+            FastChess
+                let run = tab.fast
+                if run
+                    var line: [160]u8
+                    bar.note(fast_status(run, &line))
+                    bar.divider()
+                    if run.can_continue()
+                        if bar.button("continuefast", "Continue", true, false, icons.path(IconPlay)): asked = ContinueFastchess
+                    elif bar.button("stopfast", "Stop", run.running() and not run.stopping, false, icons.path(IconStop)): asked = StopFastchess
+                    bar.divider()
+                    let k = bar.segments("fastview", ["Boards", "Eco"], tab.fast_view.eco ? 1 : 0)
+                    if k == 0 and tab.fast_view.eco: asked = ShowFastBoards
+                    if k == 1 and not tab.fast_view.eco: asked = ShowFastEco
+                    bar.gap()
+            Tournaments
+                if bar.button("newtour", "New tournament", true, false, icons.path(IconPlus)): asked = OpenTournamentSetup
+            Event
+                let r = tab.event
+                if r
+                    var line: [160]u8
+                    bar.note(event_status(r, tab.event_view.focus, &line))
+                    bar.divider()
+                    if r.state == EventRunning
+                        if bar.button("pause", "Pause", true, false, icons.path(IconPause)): asked = PauseEvent
+                    elif bar.button("resume", "Resume", r.state == EventPaused or r.state == EventPausing, false, icons.path(IconPlay)): asked = ResumeEvent
+                    if bar.button("stop", "Stop", r.state != EventStopped and r.state != EventFinished, false, icons.path(IconStop)): asked = StopEvent
+                    bar.gap()
+                if bar.button("flip", "Flip board", true, false, icons.path(IconFlip)): tab.flipped = not tab.flipped
+                asked = view_switch(&bar, three_d, asked)
+            NewTournament
+                let d = tab.draft
+                bar.note(d and d.ready ? d.config.name_text() : "New tournament")
+                bar.gap()
+                if bar.button("start", "Start", d and d.ready and d.config.problem().len == 0, false, icons.path(IconPlay)): asked = StartTournament
+            Engines
+                if bar.button("addfile", "Add from file", true, false, icons.path(IconFile)): asked = AddEngineFile
+                if bar.button("addregistry", "Add from registry", true, false, icons.path(IconDownload)): asked = AddEngineRegistry
+                bar.divider()
+                if bar.button("profile", "New profile", true, false, icons.path(IconSliders)): asked = NewProfile
+            Database
+                if bar.button("importgames", "Import PGN", true, false, icons.path(IconFile)): asked = ImportGames
+                if bar.button("lichess", "Import from Lichess", true, false, icons.path(IconDownload)): asked = ImportLichess
+                bar.divider()
+                if bar.button("exportgames", "Export", true, false, icons.path(IconCopy)): asked = ExportGames
+            Books
+                if bar.button("import", "Import", true, false, icons.path(IconFile)): asked = ImportBook
+                if bar.button("bookregistry", "Add from registry", true, false, icons.path(IconDownload)): asked = AddBookRegistry
+                if bar.button("generate", "Generate", true, false, icons.path(IconSparkle)): asked = GenerateBook
+            else
+                bar.note("")
+    return asked
+
+fn fast_status(run: *FastRun, buf: *[160]u8) -> str
+    let t = &run.tally
+    let state = run.continuing ? "Starting" : run.can_continue() ? "Stopped" : run.state == FastLost ? "Ended" : run.state == FastEnded ? "Finished" : run.stopping ? "Stopping" : "Running"
+    let total = t.total > 0 ? t.total : t.started
+    if t.sprt: return format(buf, "{state}  ·  {t.games.len} of {total} games  ·  LLR {t.llr:.2} ({t.lower:.2}, {t.upper:.2})")
+    return format(buf, "{state}  ·  {t.games.len} of {total} games")

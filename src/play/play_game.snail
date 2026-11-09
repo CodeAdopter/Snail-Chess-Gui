@@ -1,0 +1,579 @@
+use src/play/game_clock
+use src/play/play_strength
+use src/play/quick_match
+use src/play/speed_pool
+use src/chess/status
+use src/database/eval_recorder
+
+enum PlayState: u8
+    PlayChoosing
+    PlayRunning
+    PlayOver
+
+enum PlayEnd: u8
+    NotEnded
+    ByCheckmate
+    ByStalemate
+    ByRepetition
+    ByFiftyMoves
+    ByDeadPosition
+    ByTime
+    ByTimeNoMate
+    ByResignation
+    ByAgreement
+    ByEngineFailure
+    ByIllegalMove
+    ByAbandon
+    ByWinAdjudication
+    ByDrawAdjudication
+    ByIllegalNoMate
+
+const FlatPaceNs: i64 = 1000000000
+const TablePaceNs: i64 = 2000000000
+const PressLeastNs: i64 = 350000000
+const PressSpreadNs: i64 = 450000000
+const UntimedShareNs: f64 = 2.5e9
+const UntimedMostNs: i64 = 10000000000
+
+enum SideChoice: u8
+    ChooseWhite
+    ChooseRandom
+    ChooseBlack
+
+struct PlaySetup
+    engine_id: int
+    profile_id: int
+    side: SideChoice
+    time: TimeControl
+    strength: PlayStrength
+    show_eval: bool
+    natural: bool = true
+    terms: MatchTerms
+
+struct PlayGame
+    setup: PlaySetup
+    reply_ns: i64
+    reply_known: bool
+    engine_pressing: bool
+    press_at: i64
+    in_3d: bool
+    table_clock: bool
+    instant: bool
+    state: PlayState
+    human: Side
+    game: *Game
+    live: int
+    first: int
+    clock: GameClock
+    marks: [..]ClockMark
+    player: EnginePlayer
+    engine_id: int
+    engine_answered: bool
+    end: PlayEnd
+    pressing: bool
+    by_hand: bool
+    fouls: int
+    draw_offered: bool
+    declined: bool
+    unsaved: bool
+    start_board: Board
+    opening: [..]Move
+    engine_name: [80]u8
+    engine_name_len: int
+    human_name: [64]u8
+    human_name_len: int
+    note: [200]u8
+    note_len: int
+    version: u64
+    began_utc: SDL_DateTime
+    rating_before: int
+    rating_change: int
+    rating_after: [16]u8
+    rating_after_len: int
+    rated_done: bool
+    queue_note: [120]u8
+    queue_note_len: int
+
+    fn engine_text() -> str
+        return str(engine_name[0..engine_name_len])
+
+    fn human_text() -> str
+        return str(human_name[0..human_name_len])
+
+    fn note_text() -> str
+        return str(note[0..note_len])
+
+    fn queue_text() -> str
+        return str(queue_note[0..queue_note_len])
+
+    fn say(s: str)
+        note_len = keep_text(s, note[0..200])
+        version += 1
+
+    fn take_opening(from: *Game)
+        start_board = from.nodes[0].board
+        opening.clear()
+        var n = from.at
+        while n > 0
+            opening.push(from.nodes[n].move)
+            n = from.nodes[n].parent
+        var i = 0
+        var j = opening.len as int - 1
+        while i < j
+            let m = opening[i]
+            opening[i] = opening[j]
+            opening[j] = m
+            i += 1
+            j -= 1
+
+    fn take_start()
+        start_board.load_fen(StartFen)
+        opening.clear()
+
+    fn lay_out()
+        game.reset(&start_board)
+        for m in opening
+            game.play(m)
+        live = game.at
+        first = live
+
+    fn begin(lib: *EngineLibrary, person: str = "") -> bool
+        note_len = 0
+        let entry = lib.find(setup.engine_id)
+        if not entry
+            say("No engine available. Add one in the Engines tab.")
+            return false
+        lay_out()
+        if rule_end(game, live) != NotEnded
+            say("The game is already over in this position.")
+            return false
+        human = side_for(setup.side)
+        let now = now_ns()
+        clock.start(setup.time, game.board().side, now)
+        marks.clear()
+        marks.push(clock.mark)
+        if engine_id != setup.engine_id
+            player.engine.quit()
+            engine_id = setup.engine_id
+        if player.engine.state == EngineFailed: player.engine.state = EngineOff
+        player.wanted.clear_values()
+        let p = entry.profile(setup.profile_id)
+        if p: player.wanted.copy_values(p)
+        if setup.terms.quick: tell_terms()
+        else
+            if not strength_offered(entry, setup.strength.kind): setup.strength.kind = FullStrength
+            setup.strength.fit(entry)
+            setup.strength.tell(entry, &player.wanted)
+        if entry.source == FromBundle: lib.tell_bundle(&player.wanted)
+        player.new_game()
+        player.on = true
+        engine_answered = false
+        engine_name_len = keep_text(setup.terms.quick ? setup.terms.name_text() : entry.display_name(), engine_name[0..80])
+        rated_done = false
+        rating_change = 0
+        var t: SDL_Time
+        if not SDL_GetCurrentTime(&t) or not SDL_TimeToDateTime(t, &began_utc, false): began_utc = SDL_DateTime()
+        let user = SDL_getenv("USERNAME")
+        human_name_len = keep_text(person.len > 0 ? person : user ? str(user) : "You", human_name[0..64])
+        tag_game()
+        state = PlayRunning
+        end = NotEnded
+        pressing = false
+        fouls = 0
+        draw_offered = false
+        declined = false
+        unsaved = false
+        if game.board().side != human: ask_engine(now)
+        version += 1
+        return true
+
+    fn tell_terms()
+        let t = &setup.terms
+        var n: [24]u8
+        setup.strength.kind = t.full() ? FullStrength : EloStrength
+        setup.strength.elo = t.elo
+        player.wanted.put("UCI_LimitStrength", t.full() ? "false" : "true")
+        if not t.full(): player.wanted.put("UCI_Elo", format(&n, "{t.elo}"))
+        player.wanted.put("Style", StyleWords[t.style])
+        if t.rated: setup.show_eval = false
+
+    fn helps() -> bool
+        return not setup.terms.rated or state != PlayRunning
+
+    fn tag_game()
+        var date: [16]u8
+        var tc: [32]u8
+        var event: [48]u8
+        let speed = speed_of(&setup.time)
+        game.set_tag("Event", setup.terms.quick ? format(&event, "{setup.terms.rated ? "Rated" : "Casual"} {SpeedWords[speed]} game") : "Casual game")
+        game.set_tag("Site", "Snail Chess GUI")
+        game.set_tag("Date", today_text(&date))
+        game.set_tag("Round", "-")
+        game.set_tag("White", human == White ? human_text() : engine_text())
+        game.set_tag("Black", human == Black ? human_text() : engine_text())
+        game.set_tag("TimeControl", setup.time.pgn_text(&tc))
+        game.set_tag("WhiteType", human == White ? "human" : "program")
+        game.set_tag("BlackType", human == Black ? "human" : "program")
+        var elo: [16]u8
+        if setup.strength.kind == EloStrength or setup.terms.quick: game.set_tag(human == White ? "BlackElo" : "WhiteElo", format(&elo, "{setup.strength.elo}"))
+        if setup.terms.quick
+            game.set_tag(human == White ? "WhiteElo" : "BlackElo", format(&elo, "{rating_before}"))
+            game.set_tag(human == White ? "BlackStyle" : "WhiteStyle", StyleNames[setup.terms.style])
+            if setup.terms.rated: game.set_tag("Rated", "Yes")
+        let u = &began_utc
+        if u.year > 0
+            game.set_tag("UTCDate", format(&date, "{u.year}.{u.month:02}.{u.day:02}"))
+            game.set_tag("UTCTime", format(&tc, "{u.hour:02}:{u.minute:02}:{u.second:02}"))
+
+    fn update(app: *DesktopApp, engine_path: str, engine_folder: str)
+        player.update(app, engine_path, engine_folder)
+        if state != PlayRunning: return
+        if player.engine.state == EngineFailed
+            engine_failed()
+            return
+        if clock.side != human and player.go_ns > clock.turn_ns: clock.turn_ns = player.go_ns
+        let now = now_ns()
+        if engine_pressing
+            if now >= press_at: press_engine(press_at)
+            else: app.wake_in((press_at - now) as f64 / 1.0e9)
+        if player.has_best
+            if not reply_known
+                reply_ns = reply_wait(now)
+                reply_known = true
+            let due = player.go_ns + reply_ns
+            if now >= due
+                player.best_ns = max(player.best_ns, due)
+                engine_moved()
+            else: app.wake_in((due - now) as f64 / 1.0e9)
+        if state == PlayRunning and clock.side != human and clock.flagged(now)
+            player.take_now()
+            if player.has_best: engine_moved()
+        if state == PlayRunning and clock.flagged(now): flag_fell()
+        if state == PlayRunning and clock.running: app.wake_in(clock.left_ns(clock.side, now) as f64 / 1.0e9 + 0.001)
+
+    fn human_move(move: Move, press_after: bool = false)
+        if not can_move(): return
+        let now = now_ns()
+        if engine_pressing: press_engine(now)
+        if not clock.in_time(now)
+            flag_fell()
+            return
+        if press_after and clock.running
+            pressing = true
+            add(move)
+            return
+        clock.press(now)
+        add(move)
+
+    fn hit_clock()
+        if state != PlayRunning or not pressing: return
+        pressing = false
+        let now = now_ns()
+        if not clock.in_time(now)
+            flag_fell()
+            return
+        clock.press(now)
+        marks.push(clock.mark)
+        ask_engine(now)
+        version += 1
+
+    fn illegal_move()
+        if not can_move(): return
+        let now = now_ns()
+        if not clock.in_time(now)
+            flag_fell()
+            return
+        fouls += 1
+        let quick = clock.timed() and speed_of(&clock.control) <= SpeedBlitz
+        if fouls >= 2 or quick
+            if cannot_mate(&game.nodes[live].board, human.other()): finish(ByIllegalNoMate, Drawn)
+            else: finish(ByIllegalMove, win_for(human.other()))
+            return
+        if clock.timed(): clock.mark.left_ns[human.other() as int] += 120 * NsPerMs * 1000
+        version += 1
+
+    fn can_move() -> bool
+        return state == PlayRunning and game.at == live and game.board().side == human
+
+    fn can_premove() -> bool
+        return state == PlayRunning and game.at == live and game.board().side != human and not pressing
+
+    fn engine_moved()
+        player.has_best = false
+        engine_answered = true
+        if not clock.in_time(player.best_ns)
+            flag_fell()
+            return
+        if player.illegal
+            finish(ByIllegalMove, win_for(human))
+            return
+        let gap = table_clock and in_3d and not instant ? press_gap(player.best_ns) : 0
+        if gap > 0
+            engine_pressing = true
+            press_at = player.best_ns + gap
+        else: clock.press(player.best_ns)
+        game.keep_score(live, player.score_kind, player.score, player.heard.depth, player.best)
+        if eval_recorder: eval_recorder.keep_player(&player)
+        add(player.best)
+        if state == PlayRunning and draw_offered: answer_draw()
+
+    fn press_engine(at: i64)
+        engine_pressing = false
+        if state != PlayRunning: return
+        clock.press(at)
+        marks.push(clock.mark)
+        version += 1
+
+    fn add(move: Move)
+        let following = game.at == live
+        live = game.add_move(live, move)
+        if following: game.go(live)
+        if not pressing and not engine_pressing: marks.push(clock.mark)
+        let why = rule_end(game, live)
+        if why == ByCheckmate: finish(why, win_for(game.nodes[live].board.side.other()))
+        elif why != NotEnded: finish(why, Drawn)
+        elif game.nodes[live].board.side != human and not pressing: ask_engine(now_ns())
+        version += 1
+
+    fn ask_engine(now: i64)
+        let s = game.nodes[live].board.side
+        reply_known = false
+        var go: [160]u8
+        var limit: [48]u8
+        let inc = clock.control.kind == BaseIncrement ? clock.control.increment_ms : 0
+        let most = clock.timed() ? clock.left_ns(s, now) / NsPerMs / 10 + inc : 3600000
+        let lim = setup.strength.go_text(most, &limit)
+        if not clock.timed()
+            let alone = lim.len > 0 ? lim : " movetime 1000"
+            player.ask(game, live, format(&go, "go{alone}"))
+            return
+        var clocks: [120]u8
+        player.ask(game, live, format(&go, "go{clock_go(&clock, s, now, &clocks)}{lim}"))
+
+    fn reply_wait(now: i64) -> i64
+        if instant: return 0
+        var wait = in_3d ? TablePaceNs : FlatPaceNs
+        var r = SplitMix64(state: now as u64)
+        if setup.natural: wait = max(wait, think_time(&r, now))
+        if not clock.timed(): return min(wait, UntimedMostNs)
+        return min(wait, clock.left_ns(clock.side, now) / (setup.natural ? 8 : 30))
+
+    fn think_time(r: *SplitMix64, now: i64) -> i64
+        let b = &game.nodes[live].board
+        var share = UntimedShareNs
+        if clock.timed()
+            let to_go = clock.control.kind == MovesInTime ? max(clock.moves_to_go(clock.side), 1) : max(40 - b.fullmove / 2, 20)
+            let inc = clock.control.kind == BaseIncrement ? clock.control.increment_ms as f64 * 1.0e6 : 0.0
+            share = clock.left_ns(clock.side, now) as f64 / to_go as f64 + inc * 0.8
+        var phase = b.fullmove <= 4 ? 0.25 : b.fullmove <= 10 ? 0.6 : b.fullmove <= 30 ? 1.2 : 0.9
+        let last = game.nodes[live].move
+        if count_legal_moves(b) <= 1: phase = 0.15
+        elif live != first and last.is_capture() and player.best.is_capture() and player.best.to == last.to: phase *= 0.35
+        let u = (r.next() % 10000) as f64 / 10000.0
+        let swing = u < 0.25 ? 0.4 + u * 1.6 : u < 0.9 ? 0.8 + (u - 0.25) * 0.9 : 1.4 + (u - 0.9) * 16.0
+        return (share * phase * swing) as i64
+
+    fn press_gap(at: i64) -> i64
+        var r = SplitMix64(state: at as u64 + 7919)
+        let gap = PressLeastNs + (r.next() % PressSpreadNs as u64) as i64
+        return clock.timed() ? min(gap, clock.left_ns(clock.side, at) / 60) : gap
+
+    fn flag_fell()
+        let out = clock.side
+        if cannot_mate(&game.nodes[live].board, out.other()): finish(ByTimeNoMate, Drawn)
+        else: finish(ByTime, win_for(out.other()))
+
+    fn engine_failed()
+        if engine_answered
+            finish(ByEngineFailure, win_for(human))
+            return
+        say(player.engine.failure_text())
+        player.on = false
+        clock.stop(now_ns())
+        state = PlayChoosing
+        lay_out()
+
+    fn finish(why: PlayEnd, result: GameResult)
+        end = why
+        state = PlayOver
+        pressing = false
+        engine_pressing = false
+        clock.stop(now_ns())
+        player.cancel()
+        draw_offered = false
+        game.result = result
+        game.set_tag("Termination", termination_of(why))
+        unsaved = live != first
+        version += 1
+
+    fn take_back()
+        if not can_take_back(): return
+        if engine_pressing: press_engine(now_ns())
+        let plies = game.nodes[live].board.side == human ? 2 : 1
+        player.cancel()
+        var after = live
+        for k in 0..plies - 1
+            after = game.nodes[after].parent
+        let target = game.nodes[after].parent
+        game.delete_from(after)
+        game.go(target)
+        live = target
+        let done = plies_played()
+        marks.resize(done + 1)
+        clock.restore(marks[done], human, now_ns())
+        pressing = false
+        draw_offered = false
+        version += 1
+
+    fn can_take_back() -> bool
+        if state != PlayRunning or not helps(): return false
+        let plies = game.nodes[live].board.side == human ? 2 : 1
+        return plies_played() >= plies
+
+    fn plies_played() -> int
+        var n = 0
+        var i = live
+        while i != first and i > 0
+            n += 1
+            i = game.nodes[i].parent
+        return n
+
+    fn offer_draw()
+        if state != PlayRunning or draw_offered: return
+        draw_offered = true
+        if not player.thinking() and player.score_kind != NoScore: answer_draw()
+        version += 1
+
+    fn answer_draw()
+        draw_offered = false
+        let worse = player.score_kind == Centipawns and player.score <= 0 or player.score_kind == MateIn and player.score < 0
+        if worse: finish(ByAgreement, Drawn)
+        else: declined = true
+        version += 1
+
+    fn resign()
+        if state == PlayRunning: finish(ByResignation, win_for(human.other()))
+
+    fn abandon()
+        if state != PlayRunning: return
+        if setup.terms.rated and person_moved(): finish(ByAbandon, win_for(human.other()))
+        else: finish(ByAbandon, Unfinished)
+
+    fn person_moved() -> bool
+        var i = live
+        while i != first and i > 0
+            if game.nodes[game.nodes[i].parent].board.side == human: return true
+            i = game.nodes[i].parent
+        return false
+
+    fn person_score() -> f64
+        if game.result == Drawn: return 0.5
+        if game.result == Unfinished: return -1.0
+        return game.result == win_for(human) ? 1.0 : 0.0
+
+    fn copy_for_history(into: *Game)
+        into.copy_from(game)
+        var line: [..]int
+        defer line.free()
+        var i = live
+        while i != first and i > 0
+            line.push(i)
+            i = into.nodes[i].parent
+        var text: [64]u8
+        var clk: [40]u8
+        var eval: [24]u8
+        let timed = clock.timed()
+        for k in 0..line.len
+            let n = line[line.len - 1 - k]
+            let mover = into.nodes[into.nodes[n].parent].board.side as int
+            var said = ""
+            var t: [24]u8
+            if timed and k + 1 < marks.len: said = format(&clk, "[%clk {pgn_clock(marks[k + 1].left_ns[mover], &t)}]")
+            let node = &into.nodes[n]
+            var judged = ""
+            let a = abs(node.eval_cp as int)
+            let sign = node.eval_cp < 0 ? "-" : ""
+            if node.eval_depth > 0 and node.eval_mate != 0: judged = format(&eval, "[%eval #{node.eval_mate}]")
+            elif node.eval_depth > 0: judged = format(&eval, "[%eval {sign}{a / 100}.{a % 100:02}]")
+            if said.len > 0 or judged.len > 0: into.set_comment(n, format(&text, "{said}{said.len > 0 and judged.len > 0 ? " " : ""}{judged}"))
+
+    fn choose_again()
+        state = PlayChoosing
+        pressing = false
+        end = NotEnded
+        note_len = 0
+        lay_out()
+        version += 1
+
+    fn status_text(buf: *[200]u8) -> str
+        if state == PlayChoosing: return format(buf, "{note_text()}")
+        if state == PlayRunning
+            let offered = draw_offered ? " · Draw offered" : ""
+            let foul = fouls > 0 ? ". One illegal move recorded; another loses the game" : ""
+            let hand = by_hand ? " · Complete your move with the clock or Space" : ""
+            if game.nodes[live].board.side == human: return format(buf, "Your move{hand}{offered}{foul}")
+            if pressing: return format(buf, "Press your clock{offered}")
+            return format(buf, "{engine_text()} is thinking{offered}")
+        let e = engine_text()
+        var w: [100]u8
+        let who = game.result == win_for(human) ? format(&w, "You win") : format(&w, "{e} wins")
+        match end
+            ByCheckmate: return format(buf, "{who} by checkmate")
+            ByTime: return format(buf, "{who} on time")
+            ByResignation: return format(buf, "{who} by resignation")
+            ByEngineFailure: return format(buf, "{who}. {e} stopped: {player.engine.failure_text()}")
+            ByIllegalMove
+                if game.result == win_for(human): return format(buf, "{who}. {e} played an illegal move, {player.best_text()}")
+                return format(buf, "{who} because of your illegal move")
+            ByIllegalNoMate: return format(buf, "Draw: your illegal move ended the game, but {e} could not checkmate.")
+            ByStalemate: return format(buf, "Drawn by stalemate")
+            ByRepetition: return format(buf, "Drawn by threefold repetition")
+            ByFiftyMoves: return format(buf, "Drawn by the fifty-move rule")
+            ByDeadPosition: return format(buf, "Draw: neither side can checkmate.")
+            ByTimeNoMate: return format(buf, "Draw: time ran out, but the opponent could not checkmate.")
+            ByAgreement: return format(buf, "Drawn by agreement")
+            ByWinAdjudication: return format(buf, "{who} by adjudication")
+            ByDrawAdjudication: return format(buf, "Drawn by adjudication")
+        return format(buf, "The game was abandoned")
+
+    fn release()
+        player.release()
+        marks.free()
+        opening.free()
+
+fn rule_end(game: *Game, node: int) -> PlayEnd
+    let b = &game.nodes[node].board
+    match outcome_of(b)
+        Checkmate: return ByCheckmate
+        Stalemate: return ByStalemate
+        DeadPosition: return ByDeadPosition
+        FiftyMoves: return ByFiftyMoves
+    if game.repeats(node) >= 3: return ByRepetition
+    return NotEnded
+
+fn cannot_mate(b: *Board, side: Side) -> bool
+    if b.pieces(side, Pawn) | b.rooks_queens(side): return false
+    return (b.pieces(side, Knight) | b.pieces(side, Bishop)).count <= 1
+
+fn win_for(side: Side) -> GameResult
+    return side == White ? WhiteWins : BlackWins
+
+fn side_for(choice: SideChoice) -> Side
+    if choice == ChooseWhite: return White
+    if choice == ChooseBlack: return Black
+    var r = SplitMix64(state: now_ns() as u64)
+    return (r.next() & 1) as Side
+
+fn termination_of(why: PlayEnd) -> str
+    match why
+        ByTime, ByTimeNoMate: return "time forfeit"
+        ByIllegalMove, ByIllegalNoMate: return "rules infraction"
+        ByEngineFailure, ByAbandon: return "abandoned"
+        ByWinAdjudication, ByDrawAdjudication: return "adjudication"
+    return "normal"
+
+fn today_text(buf: *[16]u8) -> str
+    var t: SDL_Time
+    var d: SDL_DateTime
+    if not SDL_GetCurrentTime(&t) or not SDL_TimeToDateTime(t, &d, true): return format(buf, "????.??.??")
+    return format(buf, "{d.year}.{d.month:02}.{d.day:02}")

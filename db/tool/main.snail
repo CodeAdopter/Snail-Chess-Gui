@@ -1,0 +1,162 @@
+use src/database/position_store
+use src/database/db_games
+use src/database/db_logs
+use src/database/db_pgn_import
+use src/database/db_export
+use src/database/db_lichess
+use engine/platform/files
+
+const UsageLines = [
+    "scdb FOLDER COMMAND ...",
+    "  import FILE.pgn [--engines]      games of a PGN file, every player an engine with --engines",
+    "  lichess-user NAME [MOST]         a Lichess player's games, with the evaluations of analysed ones",
+    "  lichess-broadcast ID             every game of a Lichess broadcast",
+    "  lichess-cloud FEN                the Lichess cloud evaluation of a position",
+    "  lichess-evals FILE.jsonl [MOST]  the Lichess evaluation dump, unpacked from zstd first",
+    "  evals FEN                        every engine evaluation of a position",
+    "  games FEN [MOST]                 the games that reached a position",
+    "  export-games FILE.pgn [--humans|--human-engine|--engines] [--player NAME] [--elo MIN-MAX]",
+    "  export-evals FILE.jsonl [--engine NAME]",
+    "  export-logs FILE.txt [--engine NAME]",
+    "  stats"]
+
+fn main()
+    if arg_count() < 3
+        usage()
+        exit(1)
+    var db: PositionDb
+    if not db.open(arg(1))
+        print("Cannot open {arg(1)}. Another program may have it open.")
+        exit(1)
+    let command = arg(2)
+    let started = now_ns()
+    var error: [..]u8
+    defer error.free()
+    if command == "import" and arg_count() > 3
+        let text = read_file(arg(3).ptr as cstr)
+        var imp = DbPgnImport(db: &db, source: DbFromFile, all_engines: has_flag("--engines"))
+        imp.run(str(text))
+        db.commit()
+        print("{imp.games} games, {imp.moves} moves, {imp.evals} evaluations, {imp.broken} games cut short at a bad move")
+        imp.release()
+        free_file(text)
+    elif command == "lichess-user" and arg_count() > 3
+        let most = arg_count() > 4 ? parse_int(arg(4)) as int : 0
+        report(db_lichess_user(&db, arg(3), most, &error), &error)
+    elif command == "lichess-broadcast" and arg_count() > 3
+        report(db_lichess_broadcast(&db, arg(3), &error), &error)
+    elif command == "lichess-cloud" and arg_count() > 3
+        let n = db_lichess_cloud(&db, arg(3), &error)
+        if n < 0 or error.len > 0: print(str(error[0..error.len]))
+        else: print("{n} lines kept")
+        db.commit()
+    elif command == "lichess-evals" and arg_count() > 3
+        let most = arg_count() > 4 ? parse_int(arg(4)) : 0
+        let n = db_lichess_eval_file(&db, arg(3), most)
+        print("{n} positions")
+    elif command == "evals" and arg_count() > 3
+        show_evals(&db, arg(3))
+    elif command == "games" and arg_count() > 3
+        show_games(&db, arg(3), arg_count() > 4 ? parse_int(arg(4)) as int : 20)
+    elif command == "export-games" and arg_count() > 3
+        var filter: DbGameFilter
+        if has_flag("--humans"): filter.kind = DbHumansOnly
+        if has_flag("--human-engine"): filter.kind = DbHumanEngine
+        if has_flag("--engines"): filter.kind = DbEnginesOnly
+        let player = flag_value("--player")
+        if player.len > 0
+            filter.player = db.store.known_id(db.names, player)
+            if filter.player == 0
+                print("No player is named {player}.")
+                db.close()
+                exit(1)
+        let elo = flag_value("--elo")
+        if elo.len > 0
+            var dash = 0
+            while dash < elo.len and elo[dash] != '-': dash += 1
+            filter.elo_min = parse_int(elo[0..dash]) as int
+            if dash < elo.len: filter.elo_max = parse_int(elo[dash + 1..elo.len]) as int
+        print("{db_export_games(&db, arg(3), &filter)} games written")
+    elif command == "export-evals" and arg_count() > 3
+        print("{db_export_evals(&db, arg(3), engine_flag(&db))} evaluations written")
+    elif command == "export-logs" and arg_count() > 3
+        print("{db_export_logs(&db, arg(3), engine_flag(&db))} log lines written")
+    elif command == "stats"
+        print("{db.game_count()} games, {db.store.records(db.evals)} evaluations, {db.store.records(db.positions)} positions, {db.store.records(db.seen)} positions reached in games, {db.engines.count()} engines, {db.names.count()} names")
+        print("segments: evals {db.evals.segments.len}, positions {db.positions.segments.len}, seen {db.seen.segments.len}")
+    else
+        usage()
+    db.close()
+    print("{(now_ns() - started) as f64 / 1000000.0:.1} ms")
+
+fn usage()
+    for line in UsageLines: print(line)
+
+fn report(n: int, error: *[..]u8)
+    if n < 0: print(str(error[0..error.len]))
+    else: print("{n} games")
+
+fn has_flag(name: str) -> bool
+    for i in 3..arg_count()
+        if arg(i) == name: return true
+    return false
+
+fn flag_value(name: str) -> str
+    for i in 3..arg_count() - 1
+        if arg(i) == name: return arg(i + 1)
+    return ""
+
+fn engine_flag(db: *PositionDb) -> u16
+    let name = flag_value("--engine")
+    if name.len == 0: return 0
+    let id = db.store.known_id(db.engines, name) as u16
+    if id == 0: print("No engine is named {name}, so none is left out.")
+    return id
+
+fn show_evals(db: *PositionDb, fen: str)
+    var board: Board
+    if not board.load_fen(fen)
+        print("Not a FEN.")
+        return
+    var list: [..]DbEval
+    defer list.free()
+    let t = now_ns()
+    db.evals_at(board.key, &list)
+    let took = now_ns() - t
+    var name: [..]u8
+    var pv: [..]u8
+    defer name.free()
+    defer pv.free()
+    for e in list
+        db.engine_name(e.engine, &name)
+        pv.clear()
+        for i in 0..e.pv_len
+            if i > 0: pv.push(' ')
+            db_add_uci(&pv, e.pv[i])
+        print("{str(name[0..name.len])}  line {e.multipv}  depth {e.depth}  score {e.score}  nodes {e.nodes}  {str(pv[0..pv.len])}")
+    print("{list.len} evaluations in {took} ns")
+
+fn show_games(db: *PositionDb, fen: str, most: int)
+    var board: Board
+    if not board.load_fen(fen)
+        print("Not a FEN.")
+        return
+    var list: [..]DbSeen
+    defer list.free()
+    let t = now_ns()
+    db.games_at(board.key, &list)
+    let took = now_ns() - t
+    var meta: DbGame
+    var white: [..]u8
+    var black: [..]u8
+    defer white.free()
+    defer black.free()
+    var shown = 0
+    for s in list
+        if shown >= most: break
+        if not db.game_meta(s.game, &meta): continue
+        db.name_of(meta.white, &white)
+        db.name_of(meta.black, &black)
+        print("#{s.game} ply {s.ply}  {str(white[0..white.len])} - {str(black[0..black.len])}  {db_result_text(meta.result)}  {meta.date}")
+        shown += 1
+    print("{list.len} games reached it, found in {took} ns")

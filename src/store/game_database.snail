@@ -1,0 +1,329 @@
+use src/store/played_games
+use src/engines/engine_library
+use src/engines/folded_text
+
+const GameIndexMagic = "SCGIDX01"
+const DatabaseIdle = 0
+const DatabaseWorking = 1
+const DatabaseDone = 2
+
+var database_wake_event: u32
+
+struct GameEntry
+    at: i64
+    len: i64
+    day: i32
+    result: i32
+    white_at: i32
+    white_len: i32
+    black_at: i32
+    black_len: i32
+    event_at: i32
+    event_len: i32
+    opening_at: i32
+    opening_len: i32
+
+fn index_games(text: str, entries: *[..]GameEntry, pool: *[..]u8, done: *int)
+    entries.clear()
+    pool.clear()
+    var starts: [..]int
+    defer starts.free()
+    scan_pgn(text, &starts, 100000000)
+    for k in 0..starts.len
+        let s = starts[k]
+        let end = k + 1 < starts.len ? starts[k + 1] : text.len as int
+        var e = GameEntry(at: s as i64, len: (end - s) as i64)
+        var eco = ""
+        var opening = ""
+        var lex = PgnLexer(text: text, at: s)
+        while lex.next() == PgnTag
+            let name = lex.tag_name
+            let value = lex.token
+            if name == "White": keep_tag(pool, value, &e.white_at, &e.white_len)
+            elif name == "Black": keep_tag(pool, value, &e.black_at, &e.black_len)
+            elif name == "Event": keep_tag(pool, value, &e.event_at, &e.event_len)
+            elif name == "Opening": opening = value
+            elif name == "ECO": eco = value
+            elif name == "Date": e.day = day_of_text(value) as i32
+            elif name == "Result"
+                let (r, ok) = result_of_text(value)
+                if ok: e.result = r as i32
+        keep_tag(pool, opening.len > 0 ? opening : eco, &e.opening_at, &e.opening_len)
+        entries.push(e)
+        if k % 1024 == 0: atomic_store(done, k as int)
+    atomic_store(done, starts.len as int)
+
+fn keep_tag(pool: *[..]u8, value: str, at: *i32, len: *i32)
+    *at = pool.len as i32
+    var n = 0
+    var i = 0
+    while i < value.len and n < 200
+        if value[i] == '\\' and i + 1 < value.len: i += 1
+        pool.push(value[i])
+        n += 1
+        i += 1
+    *len = n as i32
+
+struct GameDatabase
+    id: int
+    name: [..]u8
+    source: [..]u8
+    count: int
+    made: i64
+    entries: [..]GameEntry
+    pool: [..]u8
+    loaded: bool
+
+    fn name_text() -> str
+        return str(name[0..name.len])
+
+    fn text(at: i32, len: i32) -> str
+        return str(pool[at as int..at as int + len as int])
+
+    fn white(e: *GameEntry) -> str
+        return text(e.white_at, e.white_len)
+
+    fn black(e: *GameEntry) -> str
+        return text(e.black_at, e.black_len)
+
+    fn event(e: *GameEntry) -> str
+        return text(e.event_at, e.event_len)
+
+    fn opening(e: *GameEntry) -> str
+        return text(e.opening_at, e.opening_len)
+
+    fn write(out: *[..]u8)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.object()
+        doc.set(root, "name", doc.text(name_text()))
+        doc.set(root, "source", doc.text(str(source[0..source.len])))
+        doc.set(root, "games", doc.number(count as f64))
+        doc.set(root, "made", doc.number(made as f64))
+        doc.write(root, out)
+
+    fn read(text: str) -> bool
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(text)
+        if not doc.is(root, JsonObject): return false
+        set_text(&name, json_text(&doc, root, "name"))
+        set_text(&source, json_text(&doc, root, "source"))
+        count = doc.num_at(root, "games", 0.0) as int
+        made = doc.num_at(root, "made", 0.0) as i64
+        return name.len > 0
+
+    fn load_index(path: str) -> bool
+        let bytes = read_file(path.ptr as cstr)
+        defer free_file(bytes)
+        entries.clear()
+        pool.clear()
+        if bytes.len < 24 or str(bytes[0..8]) != GameIndexMagic: return false
+        let n = *(&bytes[8] as *i64)
+        let pool_len = *(&bytes[16] as *i64)
+        let size = sizeof(GameEntry) as i64
+        if n < 0 or pool_len < 0 or 24 + n * size + pool_len != bytes.len as i64: return false
+        var at = 24
+        for i in 0..n
+            entries.push(*(&bytes[at] as *GameEntry))
+            at += size as int
+        for i in 0..pool_len
+            pool.push(bytes[at + i as int])
+        for e in entries
+            let fits = e.white_at + e.white_len <= pool_len and e.black_at + e.black_len <= pool_len and e.event_at + e.event_len <= pool_len and e.opening_at + e.opening_len <= pool_len
+            if not fits or e.white_at < 0 or e.black_at < 0 or e.event_at < 0 or e.opening_at < 0: return false
+        loaded = true
+        return true
+
+    fn unload()
+        entries.free()
+        pool.free()
+        loaded = false
+
+    fn release()
+        unload()
+        name.free()
+        source.free()
+
+fn write_index(path: str, entries: []GameEntry, pool: []u8) -> bool
+    var bytes: [..]u8
+    defer bytes.free()
+    push_text(&bytes, GameIndexMagic)
+    var n = entries.len as i64
+    var p = pool.len as i64
+    for i in 0..8
+        bytes.push((&n as *u8)[i])
+    for i in 0..8
+        bytes.push((&p as *u8)[i])
+    let raw = entries.ptr as *u8
+    for i in 0..entries.len * sizeof(GameEntry)
+        bytes.push(raw[i])
+    for c in pool
+        bytes.push(c)
+    return save_whole(path, bytes[0..bytes.len])
+
+fn read_game_text(path: str, at: i64, len: i64, into: *[..]u8) -> bool
+    into.clear()
+    let io = SDL_IOFromFile(path.ptr as cstr, "rb")
+    if not io: return false
+    into.resize(len as int)
+    let placed = SDL_SeekIO(io, at, SDL_IO_SEEK_SET) == at
+    let got = placed and len > 0 ? SDL_ReadIO(io, &into[0], len as u64) : 0
+    SDL_CloseIO(io)
+    return placed and got == len as u64
+
+struct DatabaseLibrary
+    data: *DataFolder
+    databases: [..]*GameDatabase
+    version: u64
+
+    fn open(folder: *DataFolder)
+        data = folder
+        data.make_folder("games")
+        var names: [..]u8
+        defer names.free()
+        var buf: [600]u8
+        names_in(data.path("games", &buf), &names)
+        var from = 0
+        for i in 0..names.len
+            if names[i] != '\n': continue
+            let (n, ok) = uci_number(str(names[from..i]))
+            from = i as int + 1
+            if not ok or n <= 0: continue
+            var path: [640]u8
+            let bytes = read_file(file(n as int, "database.json", &path).ptr as cstr)
+            defer free_file(bytes)
+            let d = new GameDatabase
+            d.id = n as int
+            if bytes.len > 0 and d.read(str(bytes)): databases.push(d)
+            else: d.release()
+        for i in 1..databases.len
+            var k = i as int
+            while k > 0 and databases[k].id < databases[k - 1].id
+                let held = databases[k]
+                databases[k] = databases[k - 1]
+                databases[k - 1] = held
+                k -= 1
+        version += 1
+
+    fn file(id: int, name: str, buf: *[640]u8) -> str
+        var inside: [80]u8
+        var at: [600]u8
+        let folder = data.path(format(&inside, "games\\{id}"), &at)
+        return format(buf, "{folder}\\{name}")
+
+    fn find(id: int) -> *GameDatabase
+        for d in databases
+            if d.id == id: return d
+        return null
+
+    fn next_id() -> int
+        var most = 0
+        for d in databases
+            most = max(most, d.id)
+        return most + 1
+
+    fn remove(id: int) -> bool
+        for i in 0..databases.len
+            let d = databases[i]
+            if d.id != id: continue
+            var inside: [80]u8
+            var at: [600]u8
+            if not remove_tree(data.path(format(&inside, "games\\{id}"), &at)): return false
+            databases.remove(i)
+            d.release()
+            version += 1
+            return true
+        return false
+
+    fn release()
+        for d in databases
+            d.release()
+        databases.free()
+
+struct DatabaseImport
+    source: [600]u8
+    source_len: int
+    folder: [640]u8
+    folder_len: int
+    db: *GameDatabase
+    done: int
+    work: int
+    thread: u64
+    problem: [200]u8
+    problem_len: int
+
+    fn source_text() -> str
+        return str(source[0..source_len])
+
+    fn folder_text() -> str
+        return str(folder[0..folder_len])
+
+    fn problem_text() -> str
+        return str(problem[0..problem_len])
+
+    fn start(lib: *DatabaseLibrary, path: str) -> bool
+        if thread != 0: return false
+        source_len = keep_text(path, source[0..600])
+        let id = lib.next_id()
+        var inside: [80]u8
+        lib.data.make_folder(format(&inside, "games\\{id}"))
+        var at: [600]u8
+        folder_len = keep_text(lib.data.path(format(&inside, "games\\{id}"), &at), folder[0..640])
+        db = new GameDatabase
+        db.id = id
+        let file = file_name_of(path)
+        set_text(&db.source, file)
+        set_text(&db.name, file.len > 4 and ends_folded(file, ".pgn") ? file[0..file.len - 4] : file)
+        var t: SDL_Time
+        if SDL_GetCurrentTime(&t): db.made = t / 1000000000
+        problem_len = 0
+        atomic_store(&done, 0)
+        if database_wake_event == 0: database_wake_event = SDL_RegisterEvents(1)
+        atomic_store(&work, DatabaseWorking)
+        thread = spawn(database_work, self)
+        return true
+
+    fn update(lib: *DatabaseLibrary) -> *GameDatabase
+        if thread == 0 or atomic_load(&work) == DatabaseWorking: return null
+        join(thread)
+        thread = 0
+        let d = db
+        db = null
+        if problem_len > 0
+            remove_tree(folder_text())
+            d.release()
+            return null
+        d.unload()
+        lib.databases.push(d)
+        lib.version += 1
+        return d
+
+    fn working() -> bool
+        return thread != 0
+
+    fn release()
+        if thread != 0
+            join(thread)
+            thread = 0
+
+fn database_work(j: *DatabaseImport)
+    let bytes = read_file(j.source_text().ptr as cstr)
+    defer free_file(bytes)
+    var path: [700]u8
+    let d = j.db
+    if bytes.len == 0: j.problem_len = keep_text("The PGN file is empty or could not be read.", j.problem[0..200])
+    elif not save_whole(format(&path, "{j.folder_text()}\\games.pgn"), bytes): j.problem_len = keep_text("Could not copy the PGN file to the data folder.", j.problem[0..200])
+    else
+        index_games(str(bytes), &d.entries, &d.pool, &j.done)
+        d.count = d.entries.len as int
+        var out: [..]u8
+        defer out.free()
+        d.write(&out)
+        if d.count == 0: j.problem_len = keep_text("No games were found in the PGN file.", j.problem[0..200])
+        elif not write_index(format(&path, "{j.folder_text()}\\index.bin"), d.entries[0..d.entries.len], d.pool[0..d.pool.len]): j.problem_len = keep_text("Could not save the database index.", j.problem[0..200])
+        elif not save_whole(format(&path, "{j.folder_text()}\\database.json"), out[0..out.len]): j.problem_len = keep_text("Could not save the database metadata.", j.problem[0..200])
+    atomic_store(&j.work, DatabaseDone)
+    var e: SDL_Event
+    e.type = database_wake_event
+    SDL_PushEvent(&e)

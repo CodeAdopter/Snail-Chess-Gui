@@ -1,0 +1,128 @@
+use src/chess/notation
+use engine/core/text
+use src/uci/uci_text
+
+fn read_opening(line: str, start: *Board, moves: *[..]Move) -> bool
+    moves.clear()
+    var text = line
+    for i in 0..line.len
+        if line[i] == '\t'
+            text = line[0..i]
+            break
+    var after = ""
+    let marked = text.len >= 6 ? find(text, " moves") : -1
+    let position = marked >= 0 ? text[0..marked] : text
+    if marked >= 0: after = text[marked + 6..text.len]
+    if position == "startpos": start.load_fen(StartFen)
+    elif position.len > 4 and position[0..4] == "fen "
+        if not start.load_fen(position[4..position.len]): return false
+    else: return false
+    var b = *start
+    var w = UciWords(text: after)
+    loop
+        let word = w.next()
+        if word.len == 0: break
+        let (m, legal) = parse_move(&b, word)
+        if not legal: return false
+        moves.push(m)
+        b.play(m)
+    return true
+
+fn write_opening(start: *Board, moves: []Move, ops: str, out: *[..]u8)
+    var fen: ShortText
+    start.write_fen(&fen)
+    if fen.text() == StartFen: push_text(out, "startpos")
+    else
+        push_text(out, "fen ")
+        push_text(out, fen.text())
+    if moves.len > 0: push_text(out, " moves")
+    for m in moves
+        var uci: ShortText
+        write_uci(m, &uci)
+        out.push(' ')
+        push_text(out, uci.text())
+    if ops.len == 0: return
+    out.push('\t')
+    for i in 0..ops.len
+        out.push(ops[i] == '\t' or ops[i] == '\n' or ops[i] == '\r' ? ' ' : ops[i])
+
+fn opening_ops(line: str) -> str
+    for i in 0..line.len
+        if line[i] == '\t': return line[i + 1..line.len]
+    return ""
+
+fn write_opening_san(start: *Board, moves: []Move, out: *[..]u8)
+    var b = *start
+    var fen: ShortText
+    start.write_fen(&fen)
+    if fen.text() != StartFen
+        push_text(out, fen.text())
+        if moves.len > 0: push_text(out, "   ")
+    for i in 0..moves.len
+        var t: ShortText
+        if b.side == White or i == 0
+            t.add_int(b.fullmove)
+            t.add_str(b.side == White ? ". " : "... ")
+        write_san(&b, moves[i], &t)
+        if i + 1 < moves.len: t.add(' ')
+        push_text(out, t.text())
+        b.play(moves[i])
+
+fn opening_end(start: *Board, moves: []Move) -> Board
+    var b = *start
+    for m in moves
+        b.play(m)
+    return b
+
+struct KeySet
+    slots: [..]u64
+    count: int
+    has_zero: bool
+
+    fn add(key: u64) -> bool
+        if key == 0
+            if has_zero: return false
+            has_zero = true
+            return true
+        if (count + 1) * 2 > slots.len as int: grow()
+        let mask = slots.len as u64 - 1
+        var at = key & mask
+        while slots[at] != 0
+            if slots[at] == key: return false
+            at = (at + 1) & mask
+        slots[at] = key
+        count += 1
+        return true
+
+    fn has(key: u64) -> bool
+        if key == 0: return has_zero
+        if slots.len == 0: return false
+        let mask = slots.len as u64 - 1
+        var at = key & mask
+        while slots[at] != 0
+            if slots[at] == key: return true
+            at = (at + 1) & mask
+        return false
+
+    fn grow()
+        var old: [..]u64
+        defer old.free()
+        for k in slots
+            if k != 0: old.push(k)
+        let size = max(slots.len as int * 2, 1024)
+        slots.clear()
+        slots.resize(size)
+        for i in 0..size
+            slots[i] = 0
+        count = 0
+        for k in old
+            add(k)
+
+    fn clear()
+        for i in 0..slots.len
+            slots[i] = 0
+        count = 0
+        has_zero = false
+
+    fn release()
+        slots.free()

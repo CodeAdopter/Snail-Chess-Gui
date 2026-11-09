@@ -1,0 +1,87 @@
+use src/chess/board
+
+const SlideSeconds: f32 = 0.2
+const MaxSlides = 32
+
+struct PieceSlide
+    from: Square
+    to: Square
+    piece: Piece
+
+struct PieceFade
+    at: Square
+    piece: Piece
+
+struct PieceSlides
+    was: [64]Piece
+    slides: [MaxSlides]PieceSlide
+    slide_count: int
+    fades: [MaxSlides]PieceFade
+    fade_count: int
+    started_ns: i64
+    known: bool
+
+    fn change(board: *Board, dropped: Square, still: bool, carry: bool = false)
+        let kept = carry and known and not still and progress() < 1.0 ? slide_count : 0
+        slide_count = kept
+        fade_count = 0
+        let sliding = known and not still
+        known = true
+        var left: [64]bool
+        for sq in 0..64
+            left[sq] = was[sq] != NoPiece and was[sq] != board.squares[sq as Square]
+        for i in 0..kept
+            left[slides[i].to as int] = false
+        if sliding
+            for sq in 0..64
+                let s = sq as Square
+                let p = board.squares[s]
+                if p == NoPiece or p == was[sq]: continue
+                let from = nearest(&left, p, s)
+                if from == Square.none: continue
+                left[from as int] = false
+                if s == dropped or slide_count >= MaxSlides: continue
+                slides[slide_count] = PieceSlide(from, s, p)
+                slide_count += 1
+            for sq in 0..64
+                if not left[sq] or fade_count >= MaxSlides: continue
+                fades[fade_count] = PieceFade(sq as Square, was[sq])
+                fade_count += 1
+        for sq in 0..64
+            was[sq] = board.squares[sq as Square]
+        if kept == 0: started_ns = now_ns()
+
+    fn nearest(left: *[64]bool, p: Piece, to: Square) -> Square
+        var best = Square.none
+        var best_d = 1000
+        for sq in 0..64
+            if not left[sq] or was[sq] != p: continue
+            let s = sq as Square
+            let df = s.file as int - to.file as int
+            let dr = s.rank as int - to.rank as int
+            let d = df * df + dr * dr
+            if d < best_d
+                best = s
+                best_d = d
+        return best
+
+    fn progress() -> f32
+        if slide_count == 0 and fade_count == 0: return 1.0
+        let t = (now_ns() - started_ns) as f32 / (SlideSeconds * 1000000000.0)
+        if t >= 1.0
+            slide_count = 0
+            fade_count = 0
+            return 1.0
+        if t < 0.5: return 4.0 * t * t * t
+        let u = 2.0 - 2.0 * t
+        return 1.0 - u * u * u * 0.5
+
+    fn lands_on(s: Square) -> bool
+        for i in 0..slide_count
+            if slides[i].to == s: return true
+        return false
+
+    fn brings(s: Square, p: Piece) -> bool
+        for i in 0..slide_count
+            if slides[i].to == s and slides[i].piece == p: return true
+        return false

@@ -1,0 +1,65 @@
+use src/app/workspace
+
+const CardGap: f32 = 6.0
+
+extend Workspace
+    fn draw_event(app: *DesktopApp, look: *DesktopLook, theme: *GuiTheme, fonts: *GuiFonts, tab: *GuiTab, board_look: *BoardLook, lib: *EngineLibrary)
+        let r = tab.event
+        let view = &tab.event_view
+        let (ax, ay, aw, ah) = work_area(&app.ui)
+        let col_w = board_column(app, look, ax, ay, aw, ah)
+        let card_room = board_look.cards_on_table() ? 0.0 : EngineCardHeight + CardGap
+        let frame = backdrop_frame(board_look, min(col_w, ah))
+        let fit = board_place(0.0, 0.0, max(min(col_w - frame * 2.0, ah - card_room * 2.0 - frame * 2.0), 1.0), app.scale)
+        let size = fit.size
+        let slack = col_w - size
+        let board_x = ax + frame + max(slack - frame * 2.0, 0.0) * shift
+        if board_look.scene: tab.board.room = board_room(app, ax, col_w, TabRowHeight + CommandBarHeight)
+        else: draw_slack(app, ax, ay + card_room, col_w, size, slack, board_x)
+        let place = board_place(board_x, ay + card_room + frame, size, app.scale)
+        draw_backdrop_behind(app, board_look, ax, col_w, place)
+        board_look.sheet.prepare(&app.gpu, &app.ui_gpu, board_look.set, place.cell_px, board_look.costume)
+        let s = view.focused(r)
+        let game = &s.game
+        if board_look.arrows and s.busy() and game.at == s.live
+            let side = s.clock.side
+            let mover = &s.seat_of(side).player
+            let other = &s.seat_of(side.other()).player
+            let mine = mover.pv_count > 0 and mover.thinking() ? mover.pv[0] : NoMove
+            let theirs = other.pv_count > 1 and other.pv[0] == game.last_move() ? other.pv[1] : NoMove
+            if mine != NoMove and mine == theirs: tab.board.arrow(mine.from, mine.to, board_look.arrow_colors[AgreedMove as int], board_look.engine_width)
+            else
+                if theirs != NoMove: tab.board.arrow(theirs.from, theirs.to, board_look.arrow_colors[side == White ? BlackLine as int : WhiteLine as int], board_look.engine_width)
+                if mine != NoMove: tab.board.arrow(mine.from, mine.to, board_look.arrow_colors[side == White ? WhiteMove as int : BlackMove as int], board_look.engine_width)
+        if board_look.effects and board_look.effects.wants_story(): tab.board.story.follow(game)
+        if board_look.effects and board_look.effects.on(SacrificeMark)
+            var line: SacrificeLine
+            sacrifice_line_of(&line, game)
+            for k in 0..s.telemetry.len
+                let r = &s.telemetry[s.telemetry.len - 1 - k]
+                let from = r.ply as int - 1
+                if from < line.nodes[0]: break
+                let (cp, ok) = r.white_cp(10000)
+                if not ok: continue
+                for i in 0..line.count
+                    if line.nodes[i] == from: line.view(i as int, cp)
+            tab.board.sacrifice = find_sacrifice(&line)
+        if board_look.scene: view.draw_cards(app, board_look, r, s, place.x, ay, place.y + place.size + CardGap, place.size, tab.flipped, true)
+        tab.board.draw(app, board_look, game.board(), game.last_move(), place, tab.flipped, false)
+        view.draw_cards(app, board_look, r, s, place.x, ay, place.y + place.size + CardGap, place.size, tab.flipped, false)
+
+        let (px, py, pw, ph) = side_room(&app.ui, ax, col_w)
+        let panel_least = 160.0
+        analysis.least = 96.0
+        analysis.most = ph - graph.pos - panel_least - WorkspaceGap * 2.0
+        analysis.reset = 150.0
+        graph.least = 90.0
+        graph.most = ph - analysis.pos - panel_least - WorkspaceGap * 2.0
+        graph.reset = 170.0
+        analysis.draw(app, look, "analysis", false, px, py + analysis.pos + WorkspaceGap * 0.5, pw, py, lined: true)
+        graph.draw(app, look, "graph", false, px, py + ph - graph.pos - WorkspaceGap * 0.5, pw, py + ph, true, lined: true)
+        let a_h = clamp(analysis.pos, analysis.least, max(analysis.least, analysis.most))
+        let g_h = clamp(graph.pos, graph.least, max(graph.least, graph.most))
+        view.draw_mover(app, board_look, s, px, py, pw, a_h)
+        view.draw_panel(app, look, board_look, r, lib, &tab.moves, px, py + a_h + WorkspaceGap, pw, ph - a_h - g_h - WorkspaceGap * 2.0)
+        view.draw_graph(app, board_look, s, px, py + ph - g_h, pw, g_h)

@@ -1,0 +1,89 @@
+use src/database/db_lichess
+
+const DbJobChunk: i64 = 8388608
+const DbJobFile = 0
+const DbJobLichess = 1
+
+struct DbImportJob
+    db: *PositionDb
+    kind: int
+    what: [..]u8
+    most: int
+    thread: u64
+    running: bool
+    @volatile games: int
+    @volatile finished: int
+    ok: bool
+    problem: [..]u8
+
+    fn start(store: *PositionDb, job_kind: int, text: str, limit: int) -> bool
+        if running: return false
+        db = store
+        kind = job_kind
+        most = limit
+        what.clear()
+        db_add(&what, text)
+        problem.clear()
+        games = 0
+        finished = 0
+        ok = false
+        running = true
+        thread = spawn(db_import_work, self)
+        return true
+
+    fn working() -> bool
+        return running
+
+    fn update() -> bool
+        if not running or atomic_load(&finished) == 0: return false
+        join(thread)
+        running = false
+        return true
+
+    fn what_text() -> str
+        return str(what[0..what.len])
+
+    fn problem_text() -> str
+        return str(problem[0..problem.len])
+
+    fn release()
+        if running
+            join(thread)
+            running = false
+        what.free()
+        problem.free()
+
+fn db_import_work(job: *DbImportJob)
+    if job.kind == DbJobLichess
+        let n = db_lichess_user(job.db, job.what_text(), job.most, &job.problem)
+        atomic_store(&job.games, max(n, 0))
+        job.ok = n >= 0
+    else
+        db_import_file(job)
+    job.db.commit()
+    atomic_store(&job.finished, 1)
+
+fn db_import_file(job: *DbImportJob)
+    var f: DbFile
+    if not f.open(job.what_text(), DbRead)
+        db_add(&job.problem, "the file could not be opened")
+        return
+    defer f.close()
+    var imp = DbPgnImport(db: job.db, source: DbFromFile)
+    defer imp.release()
+    var chunk: [..]u8
+    defer chunk.free()
+    chunk.resize(DbJobChunk)
+    var at: i64 = 0
+    while at < f.size
+        let n = min(DbJobChunk, f.size - at)
+        if not f.read_at(at, chunk.ptr, n)
+            db_add(&job.problem, "the file could not be read")
+            return
+        imp.feed(str(chunk[0..n]))
+        atomic_store(&job.games, imp.games)
+        at += n
+    imp.feed_done()
+    atomic_store(&job.games, imp.games)
+    job.ok = imp.games > 0
+    if imp.games == 0: db_add(&job.problem, "no games were found in it")

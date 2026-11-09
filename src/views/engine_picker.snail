@@ -1,0 +1,127 @@
+use engine/ui/ui_edit
+use src/engines/folded_text
+use src/views/board_view
+use src/engines/engine_library
+
+const PickerWidth: f32 = 460.0
+
+struct EnginePicker
+    shown: bool
+    search: UiEditText
+    focus_asked: bool
+    adding: bool
+    picked_engine: int
+    picked_profile: int
+    added: int
+    counts: [..]int
+
+    fn open(query: str = "")
+        shown = true
+        adding = false
+        search.set(query)
+        focus_asked = true
+
+    fn open_adding()
+        open()
+        adding = true
+        added = 0
+
+    fn draw(ui: *UiCanvas, look: *BoardLook, lib: *EngineLibrary, engine_id: int, profile_id: int) -> bool
+        if not shown: return false
+        let theme = look.theme
+        let fonts = look.fonts
+        let query = search.text()
+        var taken = false
+        var count = 0
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        with ui.modal("enginepicker", ref shown, PickerWidth)
+            with ui.open(UiNode(name: "pickhead", width: UiSize.grow(), gap: 3.0))
+                ui.label(adding ? "Add engines" : "Choose an engine", UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink))
+                ui.label(adding ? "Click an engine or profile to add it. Add the same engine twice for self-play." : "Profiles are listed below each engine.", note)
+            let field = ui.open(UiNode(name: "searchrow", width: UiSize.grow()))
+            ui.text_field("enginesearch", &search, "Search engines and profiles", UiNode(width: UiSize.grow()))
+            ui.close()
+            if focus_asked
+                ui.focus = ui.elements[field.index + 1].id
+                focus_asked = false
+            with ui.scroll_area("engines", gap: 2.0, node: UiNode(width: UiSize.grow(), height: UiSize.fit(0.0, 380.0)))
+                if lib
+                    for i in 0..lib.entries.len
+                        let e = &lib.entries[i]
+                        let whole = query.len == 0 or has_folded(e.display_name(), query) or has_folded(e.text(e.author), query)
+                        var some = whole
+                        for p in e.profiles
+                            if has_folded(p.name_text(), query): some = true
+                        if not some: continue
+                        count += 1
+                        var aside: [80]u8
+                        let times = i < counts.len ? counts[i] : 0
+                        var side = e.text(e.author)
+                        if adding and times == 1: side = "Added once"
+                        elif adding and times == 2: side = "Added twice"
+                        elif adding and times > 2: side = format(&aside, "Added {times} times")
+                        if pick_row(ui, look, e.id * 1000, e.display_name(), side, not adding and e.id == engine_id and profile_id == 0, false)
+                            take(e.id, 0)
+                            taken = true
+                        for p in e.profiles
+                            if not whole and not has_folded(p.name_text(), query): continue
+                            if pick_row(ui, look, e.id * 1000 + p.id, p.name_text(), "", not adding and e.id == engine_id and profile_id == p.id, true)
+                                take(e.id, p.id)
+                                taken = true
+            if not lib or lib.entries.len == 0: ui.paragraph("No engines available. Add one in the Engines tab.", note)
+            elif count == 0: ui.paragraph("No matching engines or profiles.", note)
+            if adding
+                with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                    var line: [60]u8
+                    ui.label(added > 0 ? format(&line, "{added} added") : "", note, UiNode(width: UiSize.grow()))
+                    if ui.button("Done", true): shown = false
+        return taken
+
+    fn pick_row(ui: *UiCanvas, look: *BoardLook, key: int, name: str, aside: str, current: bool, profile: bool) -> bool
+        let theme = look.theme
+        let o = ui.open(UiNode(key: key, name: "pick", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(profile ? 28.0 : 34.0), padding: Vec4(profile ? 30.0 : 12.0, 0.0, 10.0, 0.0), gap: 8.0, align: Vec2(0.0, 0.5), hit: true, focusable: true))
+        let h = ui.interact(o.id)
+        let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 22.0)
+        let fill = current ? theme.accent.with_alpha(0.12) : theme.ink.with_alpha(0.07 * lit)
+        ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(6.0))
+        ui.label(name, UiTextStyle(face: current ? look.fonts.strong : look.fonts.text, size: profile ? 12.5 : 13.0, color: profile and not current ? theme.muted : theme.ink), UiNode(width: UiSize.grow(), clip: true))
+        if aside.len > 0: ui.label(aside, UiTextStyle(face: look.fonts.text, size: 11.5, color: theme.muted))
+        if adding: ui.label("+", UiTextStyle(face: look.fonts.strong, size: 16.0, color: theme.muted.lerp(theme.accent, lit)), UiNode(width: UiSize.fixed(14.0)))
+        ui.close()
+        return h.clicked
+
+    fn take(engine_id: int, profile_id: int)
+        picked_engine = engine_id
+        picked_profile = profile_id
+        if adding: added += 1
+        else: shown = false
+
+    fn release()
+        counts.free()
+
+fn engine_choice_button(ui: *UiCanvas, look: *BoardLook, name: str, key: int, engine: str, profile: str, open: bool, node: UiNode = UiNode()) -> bool
+    let theme = look.theme
+    let t = &ui.theme
+    var n = node
+    n.name = name
+    n.key = key
+    n.flow = FlowRow
+    n.gap = 8.0
+    n.padding = Vec4(12.0, 0.0, 10.0, 0.0)
+    n.align = Vec2(0.0, 0.5)
+    n.hit = true
+    n.focusable = true
+    n.clip = true
+    if n.height.sizing == SizeFit and n.height.least == 0.0: n.height = UiSize.fixed(34.0)
+    let o = ui.open(n)
+    let h = ui.interact(o.id)
+    let hover = ui.spring(o.id, 0, h.hovered or open ? 1.0 : 0.0)
+    let press = ui.spring(o.id, 1, h.held ? 1.0 : 0.0, 30.0)
+    let ring = ui.ring_of(o.id)
+    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(t.surface.lerp(t.raised, hover).lerp(t.sunken, press)), radius: Vec4.splat(t.radius), border: 1.0 + ring, border_color: t.line.lerp(t.focus, ring))
+    ui.label(engine, UiTextStyle(face: look.fonts.strong, size: 12.5, color: theme.ink), UiNode(clip: true))
+    if profile.len > 0: ui.label(profile, UiTextStyle(face: look.fonts.text, size: 12.0, color: theme.muted), UiNode(clip: true))
+    ui.spacer()
+    ui.mark(MarkDown, 14.0, theme.muted)
+    ui.close()
+    return h.clicked

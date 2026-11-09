@@ -1,0 +1,171 @@
+use engine/mesh/sweeps
+
+const CardWidth: f32 = 2.4
+const CardFace: f32 = 1.2
+const CardSpread: f32 = 0.33
+const CardThick: f32 = 0.012
+const ClockLong: f32 = 3.3
+const ClockDeep: f32 = 1.7
+const ClockTall: f32 = 0.95
+const ClockLow: f32 = 0.36
+const ClockTopFrom: f32 = 0.05
+const LcdLong: f32 = 1.3
+const LcdFrom: f32 = 0.2
+const LcdTo: f32 = 0.78
+const ButtonWide: f32 = 0.55
+const ButtonTall: f32 = 0.16
+const ButtonLong: f32 = 0.95
+const ButtonUp: f32 = 0.11
+const ButtonDown: f32 = 0.03
+
+fn add_tent_card(m: *Mesh, v0: f32, v1: f32)
+    let h = sqrt(CardFace * CardFace - CardSpread * CardSpread)
+    let x = CardWidth * 0.5
+    for side in 0..2
+        let s: f32 = side == 0 ? 1.0 : -1.0
+        let n = Vec3(0.0, CardSpread, h * s) * (1.0 / CardFace)
+        let r0 = Vec3(-x, h, 0.0)
+        let r1 = Vec3(x, h, 0.0)
+        let f0 = Vec3(-x, 0.0, CardSpread * s)
+        let f1 = Vec3(x, 0.0, CardSpread * s)
+        let left = s > 0.0 ? 0.0 : 1.0
+        let a = m.vertex(f0, n, Vec2(left, v1))
+        let b = m.vertex(f1, n, Vec2(1.0 - left, v1))
+        let c = m.vertex(r1, n, Vec2(1.0 - left, v0))
+        let d = m.vertex(r0, n, Vec2(left, v0))
+        if s > 0.0: m.quad(a, b, c, d)
+        else: m.quad(b, a, d, c)
+        let inward = -n
+        let k = n * CardThick
+        let e = m.vertex(f0 - k, inward, Vec2(-1.0, -1.0))
+        let f = m.vertex(f1 - k, inward, Vec2(-1.0, -1.0))
+        let g = m.vertex(r1 - k, inward, Vec2(-1.0, -1.0))
+        let i = m.vertex(r0 - k, inward, Vec2(-1.0, -1.0))
+        if s > 0.0: m.quad(e, i, g, f)
+        else: m.quad(f, g, i, e)
+
+fn add_print_face(m: *Mesh, mid: Vec3, right: Vec3, up: Vec3, wide: f32, tall: f32, raise: f32, v0: f32, v1: f32)
+    let n = right.cross(up)
+    let x = right * (wide * 0.5)
+    let y = up * (tall * 0.5)
+    let top = mid + n * raise
+    let a = m.vertex(top - x - y, n, Vec2(0.0, v1))
+    let b = m.vertex(top + x - y, n, Vec2(1.0, v1))
+    let c = m.vertex(top + x + y, n, Vec2(1.0, v0))
+    let d = m.vertex(top - x + y, n, Vec2(0.0, v0))
+    m.quad(a, b, c, d)
+    let corners = [-x - y, x - y, x + y, -x + y]
+    let outs = [-up, right, up, -right]
+    for i in 0..4
+        let p = corners[i]
+        let q = corners[(i + 1) % 4]
+        let o = outs[i]
+        let e = m.vertex(mid + p, o, Vec2(-1.0, -1.0))
+        let f = m.vertex(mid + q, o, Vec2(-1.0, -1.0))
+        let g = m.vertex(top + q, o, Vec2(-1.0, -1.0))
+        let h = m.vertex(top + p, o, Vec2(-1.0, -1.0))
+        m.quad(e, f, g, h)
+
+const BlockLong: f32 = 2.0
+const BlockFoot: f32 = 0.42
+const BlockTop: f32 = 0.12
+const BlockTall: f32 = 1.0
+const BlockPlateTall: f32 = 0.86
+
+fn add_block_body(m: *Mesh)
+    let c: f32 = 0.03
+    let slope = Vec2(BlockTop - BlockFoot, BlockTall)
+    let under = Vec2(BlockFoot, 0.0) + slope * (1.0 - c / slope.length)
+    var p = [Vec2(-BlockFoot, 0.0), Vec2(BlockFoot, 0.0), under, Vec2(BlockTop - c, BlockTall), Vec2(-BlockTop + c, BlockTall), Vec2(-under.x, under.y)]
+    let start = m.vertex_count
+    add_extrusion(m, p[0..6], BlockLong)
+    for i in start..m.vertex_count: m.vertices[i].position.z -= BlockLong * 0.5
+
+fn add_block_plates(m: *Mesh, v0: f32, v1: f32)
+    let slope = Vec2(BlockTop - BlockFoot, BlockTall)
+    let s = slope.normalized
+    let wide = BlockPlateTall * 2.0
+    for side in 0..2
+        let k: f32 = side == 0 ? 1.0 : -1.0
+        let mid = Vec3(0.0, BlockTall * 0.5, (BlockFoot + BlockTop) * 0.5 * k)
+        add_print_face(m, mid, Vec3(k, 0.0, 0.0), Vec3(0.0, s.y, s.x * k), wide, BlockPlateTall, 0.006, v0, v1)
+
+const StandLong: f32 = 2.6
+const StandDeep: f32 = 0.5
+const StandBase: f32 = 0.13
+const StandBoardThick: f32 = 0.03
+
+fn add_stand_base(m: *Mesh)
+    let x = StandDeep * 0.5
+    let c: f32 = 0.03
+    var p = [Vec2(-x, 0.0), Vec2(x, 0.0), Vec2(x, StandBase - c), Vec2(x - c, StandBase), Vec2(-x + c, StandBase), Vec2(-x, StandBase - c)]
+    let start = m.vertex_count
+    add_extrusion(m, p[0..6], StandLong)
+    for i in start..m.vertex_count: m.vertices[i].position.z -= StandLong * 0.5
+
+fn add_stand_board(m: *Mesh, v0: f32, v1: f32)
+    let mid = Vec3(0.0, StandBase - 0.02 + CardFace * 0.5, 0.0)
+    for side in 0..2
+        let k: f32 = side == 0 ? 1.0 : -1.0
+        add_print_face(m, mid, Vec3(k, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), CardWidth, CardFace, StandBoardThick * 0.5, v0, v1)
+
+fn add_clock_case(m: *Mesh)
+    let x = ClockDeep * 0.5
+    let c: f32 = 0.035
+    var p = [Vec2(-x, 0.0), Vec2(x, 0.0), Vec2(x, ClockTall - c), Vec2(x - c, ClockTall), Vec2(ClockTopFrom + c, ClockTall), Vec2(ClockTopFrom - c * 0.4, ClockTall - c * 0.6), Vec2(-x + c * 0.4, ClockLow + c * 0.6), Vec2(-x, ClockLow - c)]
+    let start = m.vertex_count
+    add_extrusion(m, p[0..8], ClockLong)
+    for i in start..m.vertex_count: m.vertices[i].position.z -= ClockLong * 0.5
+
+fn clock_slope() -> Vec2
+    return (Vec2(ClockTopFrom, ClockTall) - Vec2(-ClockDeep * 0.5, ClockLow)).normalized
+
+fn clock_face_at(along: f32, z: f32) -> Vec3
+    let foot = Vec2(-ClockDeep * 0.5, ClockLow)
+    let top = Vec2(ClockTopFrom, ClockTall)
+    let p = foot + (top - foot) * along
+    let s = clock_slope()
+    return Vec3(p.x - s.y * 0.004, p.y + s.x * 0.004, z)
+
+fn add_clock_lcd(m: *Mesh)
+    let s = clock_slope()
+    let n = Vec3(-s.y, s.x, 0.0)
+    let z0 = (ClockLong * 0.5 - LcdLong) * 0.5
+    let z1 = z0 + LcdLong
+    let a = m.vertex(clock_face_at(LcdFrom, z0), n, Vec2(0.0, 1.0))
+    let b = m.vertex(clock_face_at(LcdFrom, z1), n, Vec2(1.0, 1.0))
+    let c = m.vertex(clock_face_at(LcdTo, z1), n, Vec2(1.0, 0.0))
+    let d = m.vertex(clock_face_at(LcdTo, z0), n, Vec2(0.0, 0.0))
+    m.quad(a, b, c, d)
+
+fn clock_lcd_aspect() -> f32
+    let foot = Vec2(-ClockDeep * 0.5, ClockLow)
+    let top = Vec2(ClockTopFrom, ClockTall)
+    return LcdLong / ((top - foot).length * (LcdTo - LcdFrom))
+
+fn clock_lcd_shift(white: bool) -> f32
+    return white ? 0.0 : -ClockLong * 0.5
+
+fn clock_button_at(white: bool, up: f32) -> Vec3
+    let z = ClockLong * 0.25 + 0.02
+    let y = ClockTall + ButtonDown + (ButtonUp - ButtonDown) * up - ButtonTall * 0.5
+    return Vec3((ClockTopFrom + ClockDeep * 0.5) * 0.5, y, white ? z : -z)
+
+const DialRadius: f32 = 0.3
+
+fn add_clock_dial(m: *Mesh)
+    let s = clock_slope()
+    let n = Vec3(-s.y, s.x, 0.0)
+    let up = Vec3(s.x, s.y, 0.0)
+    let along = Vec3(0.0, 0.0, 1.0)
+    let mid = clock_face_at(0.49, ClockLong * 0.25) + n * 0.002
+    let middle = m.vertex(mid, n, Vec2(0.0, 0.0))
+    let steps = 64
+    var last = 0 as u32
+    for i in 0..steps + 1
+        let a = Tau * i as f32 / steps as f32
+        let c = cos(a)
+        let d = sin(a)
+        let k = m.vertex(mid + along * (c * DialRadius) + up * (d * DialRadius), n, Vec2(c, d))
+        if i > 0: m.triangle(middle, last, k)
+        last = k

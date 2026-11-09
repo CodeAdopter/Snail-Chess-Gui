@@ -1,0 +1,35 @@
+use engine/ui/ui_edit
+use src/views/settings_kit
+use src/books/book_library
+
+fn signed_text(n: int, buf: *[16]u8) -> str
+    return n > 0 ? format(buf, "+{n}") : format(buf, "{n}")
+
+fn band_words(low: int, high: int, both: bool, buf: *[80]u8) -> str
+    var a: [16]u8
+    var b: [16]u8
+    var c: [16]u8
+    var d: [16]u8
+    if both and low != -high: return format(buf, "{signed_text(low, &a)} to {signed_text(high, &b)} and {signed_text(-high, &c)} to {signed_text(-low, &d)} cp")
+    return format(buf, "{signed_text(low, &a)} to {signed_text(high, &b)} cp")
+
+fn book_band_text(e: *BookEntry, buf: *[80]u8) -> str
+    if e.favoured == 1: return band_words(-e.band_high, -e.band_low, false, buf)
+    return band_words(e.band_low, e.band_high, e.favoured == 2, buf)
+
+fn band_rows(kit: *SettingsKit, key: int, name: str, low: *UiEditText, high: *UiEditText, ref both: bool)
+    let ui = kit.ui
+    var id: [24]u8
+    with kit.row(key, "Evaluation range (cp)", "Final score from White's side, in centipawns.")
+        with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.text_field(format(&id, "{name}low"), low, "-30", UiNode(width: UiSize.fixed(80.0)))
+            ui.label("to", UiTextStyle(face: kit.fonts.text, size: 12.5, color: kit.theme.muted))
+            ui.text_field(format(&id, "{name}high"), high, "30", UiNode(width: UiSize.fixed(80.0)))
+    let (lo, lo_ok) = uci_number(low.text())
+    let (hi, hi_ok) = uci_number(high.text())
+    var note: [120]u8
+    var mirror: [80]u8
+    var said = "Also keep the same range for Black, with half the lines each."
+    if lo_ok and hi_ok and lo == -hi: said = "White and Black take turns as the side the range favours."
+    elif lo_ok and hi_ok: said = format(&note, "Also keep {band_words(-hi as int, -lo as int, false, &mirror)} for Black, with half the lines each.")
+    kit.switch(key + 1, "Both sides", said, ref both)

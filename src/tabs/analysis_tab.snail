@@ -1,0 +1,111 @@
+use engine/desktop/desktop_app
+use engine/ui/ui_widgets
+use src/game/paste
+use src/game/pgn_write
+use src/theme/theme
+use src/theme/fonts
+
+const PickerRows = 12
+
+fn analysis_keys(app: *DesktopApp, game: *Game)
+    let i = &app.pointer
+    if app.ui.wants_text or i.ctrl: return
+    if i.tapped(Left): game.back()
+    if i.tapped(Right): game.forward()
+    if i.pressed(Up) or i.pressed(Home): game.to_start()
+    if i.pressed(Down) or i.pressed(End): game.to_end()
+
+fn clipboard_text(out: *[..]u8) -> str
+    out.clear()
+    let raw = SDL_GetClipboardText()
+    if not raw: return ""
+    var k = 0
+    while raw[k] != 0
+        out.push(raw[k])
+        k += 1
+    SDL_free(raw as *void)
+    return str(out[0..out.len])
+
+fn set_clipboard(text: str, out: *[..]u8) -> bool
+    out.clear()
+    for k in 0..text.len
+        out.push(text[k])
+    out.push(0)
+    return SDL_SetClipboardText(out.ptr as cstr)
+
+fn copy_fen(ui: *UiCanvas, game: *Game, out: *[..]u8)
+    var fen: ShortText
+    game.board().write_fen(&fen)
+    if set_clipboard(fen.text(), out): ui.toast("FEN copied")
+    else: ui.toast("Could not copy to the clipboard.")
+
+fn copy_pgn(ui: *UiCanvas, game: *Game, out: *[..]u8)
+    var pgn: [..]u8
+    defer pgn.free()
+    write_pgn(game, &pgn)
+    if set_clipboard(str(pgn[0..pgn.len]), out): ui.toast("PGN copied")
+    else: ui.toast("Could not copy to the clipboard.")
+
+struct PastePicker
+    text: [..]u8
+    starts: [..]int
+    spare: Game
+    showing: bool
+    target: *Game
+
+    fn paste(ui: *UiCanvas, game: *Game, pasted: str)
+        let out = read_paste(pasted, game, &spare, &starts)
+        match out.kind
+            PasteGames
+                text.clear()
+                for k in 0..pasted.len
+                    text.push(pasted[k])
+                target = game
+                showing = true
+            PasteNothing
+                var line: [120]u8
+                if out.bad.len == 0: ui.toast("The clipboard is empty.")
+                else: ui.toast(format(&line, "Could not read {short_token(out.bad)}"))
+
+    fn draw(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = &app.ui
+        if not showing and starts.len == 0: return
+        var line: [160]u8
+        with ui.modal("pastepicker", ref showing, 460.0)
+            ui.label(format(&line, "Choose a game to open ({starts.len} games pasted)"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            with ui.scroll_area("games", gap: 2.0, node: UiNode(width: UiSize.grow(), height: UiSize.fit(0.0, 360.0)))
+                let all = str(text[0..text.len])
+                for g in 0..starts.len
+                    let o = ui.open(UiNode(key: g, name: "game", width: UiSize.grow(), padding: Vec4(10.0, 6.0, 10.0, 6.0), hit: true))
+                    let h = ui.interact(o.id)
+                    let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 22.0)
+                    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.1 * lit)), radius: Vec4.splat(5.0))
+                    ui.label(game_title(all, starts[g], &line), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+                    ui.close()
+                    if h.clicked
+                        let r = take_pasted_game(all, starts[g], target, &spare)
+                        if r.kind == PasteNothing: ui.toast(format(&line, "Could not read {short_token(r.bad)}"))
+                        showing = false
+        if not showing: starts.clear()
+
+fn game_title(text: str, start: int, line: *[160]u8) -> str
+    var lex = PgnLexer(text: text, at: start)
+    var white = "?"
+    var black = "?"
+    var event = ""
+    var result = ""
+    loop
+        let t = lex.next()
+        if t != PgnTag: break
+        if lex.tag_name == "White": white = lex.token
+        elif lex.tag_name == "Black": black = lex.token
+        elif lex.tag_name == "Event": event = lex.token
+        elif lex.tag_name == "Result": result = lex.token
+    let named = event.len > 0 and event != "?"
+    if result.len > 0 and named: return format(line, "{white} – {black}   {result}   {event}")
+    if result.len > 0: return format(line, "{white} – {black}   {result}")
+    if named: return format(line, "{white} – {black}   {event}")
+    return format(line, "{white} – {black}")
+
+fn short_token(t: str) -> str
+    return t.len > 40 ? t[0..40] : t

@@ -1,0 +1,73 @@
+use engine/core/json
+use src/chess/short_text
+
+enum LichessEventKind: u8
+    LichessOtherEvent
+    LichessGameStart
+    LichessGameFinish
+    LichessChallengeIn
+    LichessChallengeCanceled
+    LichessChallengeDeclined
+
+struct LichessEvent
+    kind: LichessEventKind
+    id: ShortText
+    white: bool
+    opponent: ShortText
+    opponent_rating: int
+    ai_level: int
+    speed: ShortText
+    rated: bool
+    source: ShortText
+    challenger: ShortText
+    dest: ShortText
+    variant: ShortText
+    limit_s: int = -1
+    increment_s: int
+
+fn read_lichess_event(line: str, e: *LichessEvent) -> bool
+    *e = LichessEvent()
+    var doc: JsonDoc
+    defer doc.free_all()
+    let root = doc.parse(line)
+    let kind = doc.get(root, "type")
+    if not doc.is(kind, JsonString): return false
+    let k = doc.str_of(kind)
+    if k == "gameStart" or k == "gameFinish"
+        e.kind = k == "gameStart" ? LichessGameStart : LichessGameFinish
+        let g = doc.get(root, "game")
+        lichess_keep(&doc, g, "gameId", &e.id)
+        e.white = doc.is(doc.get(g, "color"), JsonString) and doc.str_of(doc.get(g, "color")) == "white"
+        let o = doc.get(g, "opponent")
+        lichess_keep(&doc, o, "username", &e.opponent)
+        e.opponent_rating = doc.num_at(o, "rating", 0.0) as int
+        e.ai_level = doc.num_at(o, "ai", 0.0) as int
+        lichess_keep(&doc, g, "speed", &e.speed)
+        e.rated = lichess_flag(&doc, g, "rated")
+        lichess_keep(&doc, g, "source", &e.source)
+        return e.id.len > 0
+    let c = doc.get(root, "challenge")
+    if k == "challenge": e.kind = LichessChallengeIn
+    elif k == "challengeCanceled": e.kind = LichessChallengeCanceled
+    elif k == "challengeDeclined": e.kind = LichessChallengeDeclined
+    else: return true
+    lichess_keep(&doc, c, "id", &e.id)
+    lichess_keep(&doc, doc.get(c, "challenger"), "name", &e.challenger)
+    lichess_keep(&doc, doc.get(c, "destUser"), "name", &e.dest)
+    lichess_keep(&doc, doc.get(c, "variant"), "key", &e.variant)
+    lichess_keep(&doc, c, "speed", &e.speed)
+    e.rated = lichess_flag(&doc, c, "rated")
+    let clock = doc.get(c, "timeControl")
+    if doc.is(doc.get(clock, "limit"), JsonNumber)
+        e.limit_s = doc.num_at(clock, "limit", 0.0) as int
+        e.increment_s = doc.num_at(clock, "increment", 0.0) as int
+    return e.id.len > 0
+
+fn lichess_keep(doc: *JsonDoc, obj: int, key: str, into: *ShortText)
+    into.clear()
+    let v = doc.get(obj, key)
+    if doc.is(v, JsonString): into.add_str(doc.str_of(v))
+
+fn lichess_flag(doc: *JsonDoc, obj: int, key: str) -> bool
+    let v = doc.get(obj, key)
+    return doc.is(v, JsonBool) and doc.flag(v)

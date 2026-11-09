@@ -1,0 +1,233 @@
+use src/board3d/den_shapes
+use src/board3d/room_scene
+
+struct DenScene
+    built: bool
+    building: int
+    builder: u64
+    uploaded: int
+    disc: int
+    staged: bool
+    build: DenBuild
+    shapes: [DenParts]GpuMesh
+    made: [DenParts]bool
+    parts: [DenParts]int
+    quad_shape: GpuMesh
+    quad: int
+    materials: [DenParts]int
+    halo: int
+    lens: SceneLens
+    picture: DynamicTexture
+    glow: Vec3
+
+    fn parts_ready(shown_disc: int) -> bool
+        if built: return true
+        if building == 0
+            disc = shown_disc
+            building = 1
+            builder = spawn(den_builder, self)
+        return atomic_load(&building) >= 2
+
+    fn build_parts()
+        build.init(disc)
+        build.build()
+        build.scale_all()
+
+    fn carve(gpu: *Gpu, screen: *DenScreen, ns: i64 = 0) -> bool
+        if built: return true
+        if building == 0
+            disc = screen.disc
+            build_parts()
+        if building == 1 or building == 2: join(builder)
+        building = 3
+        let began = now_ns()
+        while uploaded < DenParts
+            if ns > 0 and now_ns() - began > ns: return false
+            let k = uploaded
+            made[k] = build.parts[k].vertex_count > 0
+            if made[k]: shapes[k] = gpu.upload_mesh(&build.parts[k])
+            uploaded += 1
+        built = true
+        building = 0
+        uploaded = 0
+        build.free_parts()
+        var m: Mesh
+        m.init(16, 16)
+        add_glow_quad(&m, -0.5)
+        quad_shape = gpu.upload_mesh(&m)
+        m.free_all()
+        let read = screen.refresh()
+        picture = gpu.dynamic_texture_mipped(DenScreenW, DenScreenH, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 4, screen.shown as *u8)
+        glow = screen.glow
+        return true
+
+    fn stage(r: *Renderer)
+        if staged: return
+        staged = true
+        let casting = [0, 4, 4, 7, 7, 0, 7, 7, 0, 7, 0, 0, 0, 3, 3, 0, 0, 7, 5]
+        for k in 0..DenParts
+            if not made[k]: continue
+            parts[k] = r.add_mesh(&shapes[k])
+            r.casts[parts[k]] = casting[k] as u8
+        quad = r.add_mesh(&quad_shape)
+        materials[DenCarpetPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "carpet_ps"))
+        materials[DenWallPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "paint_ps"))
+        materials[DenCeilingPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "ceiling_ps"))
+        materials[DenDeskPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "woodwork_ps"))
+        materials[DenWoodPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "woodwork_ps"))
+        materials[DenPlasticPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "plastic_ps"))
+        materials[DenGlassPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "crt_ps"))
+        materials[DenKeysPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "keys_ps"))
+        materials[DenMetalPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "metal_ps"))
+        materials[DenWindowPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "window_ps"))
+        materials[DenFabricPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "fabric_ps"))
+        materials[DenPosterPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "poster_ps"))
+        materials[DenLavaPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "lava_ps"))
+        materials[DenLedPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "led_ps"))
+        materials[DenPaperPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "paper_ps"), CullNone)
+        materials[DenDiscPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "disc_ps"))
+        materials[DenTvPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "tv_ps"))
+        materials[DenCorkPart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "cork_ps"))
+        materials[DenShadePart] = den_material(r, shader("shaders/den3d.hlsl", fragment: "enamel_ps"), CullNone)
+        halo = glow_material(r, shader("shaders/room3d.hlsl", fragment: "halo_ps"), 160)
+        let bounds = Vec4(DenWest, DenEast, DenNorth, DenSouth)
+        let heights = Vec4(0.0, DenHigh, 0.0, 0.0)
+        for k in [DenCarpetPart, DenWallPart, DenCeilingPart]
+            r.materials[materials[k]].values[2] = bounds
+            r.materials[materials[k]].values[3] = heights
+        set(r, DenCarpetPart, 0, srgb_with(0x56606C, 0.0))
+        set(r, DenWallPart, 0, srgb_with(0xD3CAB2, 0.0))
+        set(r, DenWallPart, 1, srgb_with(0xF0EEE6, 0.0))
+        set(r, DenCeilingPart, 0, srgb_with(0xE6E2D8, 0.0))
+        set(r, DenDeskPart, 0, srgb_with(0xC9A26E, 5.0))
+        set(r, DenDeskPart, 1, Vec4(0.45, 0.25, 0.6, 0.12))
+        set(r, DenWoodPart, 0, srgb_with(0xB98A5A, 4.0))
+        set(r, DenWoodPart, 1, Vec4(0.55, 0.35, 0.5, 0.1))
+        set(r, DenPlasticPart, 0, Vec4(0.7, 0.0, 0.0, 0.0))
+        set(r, DenMetalPart, 0, Vec4(0.35, 0.0, 0.0, 0.0))
+        set(r, DenGlassPart, 0, Vec4(0.045, 0.06, 0.965, 0.0))
+        set(r, DenGlassPart, 1, Vec4(1.45, 0.0, 0.0, 0.0))
+        set(r, DenWindowPart, 0, Vec4.of((den_street_at() - Vec3(DenWest, 1.5, -0.3)).normalized, 0.0))
+        set(r, DenLavaPart, 1, Vec4(1.6, 0.0, 0.0, 0.0))
+        set(r, DenTvPart, 1, Vec4(0.5, 0.0, 0.0, 0.0))
+        set(r, DenShadePart, 0, Vec4(2.5, 2.0, 1.4, 0.0))
+        r.materials[materials[DenGlassPart]].texture = &picture.texture
+        r.materials[halo].values[0] = Vec4(0.0, 0.12, 0.0, 0.0)
+        lens.init(r)
+
+    fn set(r: *Renderer, part: int, row: int, v: Vec4)
+        r.materials[materials[part]].values[row] = v
+
+    fn unstage()
+        staged = false
+
+    fn lens_on(r: *Renderer, on: bool)
+        if staged: lens.show(r, on)
+
+    fn show(gpu: *Gpu, frame: *Frame, screen: *DenScreen)
+        if not screen.refresh(): return
+        gpu.update_texture(frame, &picture, screen.shown as *void)
+        glow = screen.glow
+
+    fn lights(r: *Renderer, t: f32)
+        r.exposure = 1.0
+        r.lighting.sun_color = Vec4(0.0, 0.0, 0.0, 0.0)
+        let m2 = Metre * Metre
+        let tube = Vec3(0.0, DenGlassY, DenGlassZ + 0.07) * Metre
+        set_lamp(r, 0, tube, 3.5 * Metre, glow * (3.2 * m2), 1, Vec3(0.0, -0.15, 1.0).normalized, 0.2)
+        shadow_from(&r.shadows[0], tube, Vec3(0.0, 0.7, 0.3) * Metre, 2.2 * Metre, 1.6 * Metre, 4.5 * Metre, 2048, 3.0, 0.08, false)
+        let bulb = den_lamp_at() * Metre
+        set_lamp(r, 1, bulb, 2.5 * Metre, Vec3(1.0, 0.78, 0.52) * (0.9 * m2), 2, den_lamp_way(), 0.45)
+        shadow_from(&r.shadows[1], bulb, (den_lamp_at() + den_lamp_way() * 0.5) * Metre, 0.7 * Metre, 0.7 * Metre, 2.5 * Metre, 2048, 2.0, 0.06, false)
+        let street = den_street_at() * Metre
+        let window = Vec3(DenWest, 1.5, -0.3)
+        let way = (Vec3(0.0, 0.3, 0.5) - den_street_at()).normalized
+        set_lamp(r, 2, street, 14.0 * Metre, Vec3(1.0, 0.52, 0.17) * (60.0 * m2), 3, way, 0.85)
+        shadow_from(&r.shadows[2], street, (window + way * 2.0) * Metre, 3.4 * Metre, 3.4 * Metre, 13.0 * Metre, 2048, 1.5, 0.06, false)
+        let lava = (den_lava_at() + Vec3(0.0, 0.26, 0.0)) * Metre
+        let breath = 0.9 + 0.1 * sin(t * 0.7)
+        set_lamp(r, 3, lava, 1.8 * Metre, Vec3(1.0, 0.3, 0.12) * (0.18 * m2 * breath), 0, Vec3(0.0, -1.0, 0.0), -1.0)
+        r.lighting.lamp_room = Vec4(4.0, 1.0, 0.03, 0.22 * Metre)
+        r.lighting.sun_through = Vec4(0.0, 0.0, 0.0, 0.0)
+        r.lighting.sky_color = Vec4.of(Vec3(0.045, 0.05, 0.07) + glow * 0.05, 0.0)
+        r.lighting.ground_color = Vec4(0.03, 0.025, 0.022, 0.0)
+
+    fn focus(distance: f32, height: f32, t: f32)
+        lens.block.lens = Vec4(distance * 0.82, distance * 1.2, height * LensFarBlur, height * LensMostBlur)
+        lens.block.look.x = t
+
+    fn draw(r: *Renderer, camera: *Camera, t: f32)
+        lights(r, t)
+        let foot = den_lava_at()
+        set(r, DenLavaPart, 0, Vec4(t, foot.x, foot.y, foot.z))
+        set(r, DenLedPart, 0, Vec4(t, 0.0, 0.0, 0.0))
+        set(r, DenTvPart, 0, Vec4(t, 0.0, 0.0, 0.0))
+        r.materials[materials[DenGlassPart]].values[0].w = t
+        set(r, DenDiscPart, 0, Vec4.of(den_disc_at(), 0.0))
+        let white = Color.hex(0xFFFFFF)
+        for k in 0..DenParts
+            if made[k]: r.draw_with(materials[k], parts[k], Mat4.identity(), white)
+        for i in 0..build.halo_count
+            let h = &build.halos[i]
+            let c = build.halo_tints[i]
+            r.draw_with(halo, quad, Mat4.trs(h.at, camera.rotation, Vec3(h.size.x, h.size.y, 1.0)), c)
+
+    fn release(gpu: *Gpu)
+        if building == 1 or building == 2: join(builder)
+        if building == 3
+            for k in 0..uploaded
+                if made[k]: gpu.release_mesh(&shapes[k])
+                made[k] = false
+            uploaded = 0
+        if building != 0
+            building = 0
+            build.free_parts()
+        if not built: return
+        for k in 0..DenParts
+            if made[k]: gpu.release_mesh(&shapes[k])
+            made[k] = false
+        gpu.release_mesh(&quad_shape)
+        gpu.release_dynamic_texture(&picture)
+        built = false
+        staged = false
+
+fn den_material(r: *Renderer, fragment: ShaderCode, cull: Cull = CullBack) -> int
+    var desc = MaterialDesc.three(fragment)
+    desc.vertex = shader("shaders/den3d.hlsl", vertex: "wood_vs")
+    desc.cull = cull
+    return r.add_material_desc(&desc)
+
+fn den_eye(spot: int, close: bool) -> Vec3
+    if close: return Vec3(0.0, DenGlassY + 0.004, DenGlassZ + 0.36) * Metre
+    let leans = [Vec3(-0.1, 1.16, 0.3), Vec3(-0.08, 1.15, 0.22), Vec3(0.0, 1.15, 0.24), Vec3(0.2, 1.1, -0.02), Vec3(0.1, 1.16, 0.3)]
+    return leans[clamp(spot, -2, 2) + 2] * Metre
+
+fn den_look(spot: int, close: bool) -> Vec3
+    if close: return Vec3(0.0, DenGlassY, DenGlassZ) * Metre
+    return den_sight(clamp(spot, -2, 2) + 2) * Metre
+
+fn den_screen_point(g: Vec2) -> (int, int, bool)
+    let cx = g.x * 2.0 - 1.0
+    let cy = g.y * 2.0 - 1.0
+    let wx = cx * (1.0 + 0.045 * cy * cy) / 0.965
+    let wy = cy * (1.0 + 0.06 * cx * cx) / 0.965
+    let u = wx * 0.5 + 0.5
+    let v = wy * 0.5 + 0.5
+    if u < 0.0 or v < 0.0 or u >= 1.0 or v >= 1.0: return 0, 0, false
+    return (u * DenScreenW as f32) as int, (v * DenScreenH as f32) as int, true
+
+fn den_pixel(ray: Ray) -> (int, int, bool)
+    if abs(ray.direction.z) < 0.0001: return 0, 0, false
+    let along = ((DenGlassZ + DenBulge * 0.5) * Metre - ray.origin.z) / ray.direction.z
+    if along <= 0.0: return 0, 0, false
+    let hit = (ray.origin + ray.direction * along) * (1.0 / Metre)
+    return den_screen_point(Vec2(hit.x / DenGlassW + 0.5, 0.5 - (hit.y - DenGlassY) / DenGlassH))
+
+fn den_glass_at(x: f32, y: f32) -> Vec3
+    let gx = (x / DenScreenW as f32 - 0.5) * 0.965
+    let gy = (y / DenScreenH as f32 - 0.5) * 0.965
+    return Vec3(gx * DenGlassW, DenGlassY - gy * DenGlassH, DenGlassZ + DenBulge) * Metre
+
+fn den_builder(r: *DenScene)
+    r.build_parts()
+    atomic_store(&r.building, 2)

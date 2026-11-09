@@ -1,0 +1,19 @@
+use chess/movegen
+
+struct MoveList
+    items: [MaxMoves]Move
+    count: int
+
+    fn fill(board: *Board)
+        count = legal[board.side](board, &items[0])
+
+    fn has(move: Move) -> bool
+        for i in 0..count
+            if items[i] == move: return true
+        return false
+
+fn count_legal_moves(board: *Board) -> int
+    return count_legal[board.side](board)
+
+fn has_any_move(board: *Board) -> bool
+    return has_legal_move[board.side](board)

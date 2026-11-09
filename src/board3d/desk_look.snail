@@ -1,0 +1,230 @@
+use engine/render/renderer
+use engine/desktop/desktop_app
+use src/views/engine_card
+use src/board3d/desk_shapes
+use src/board3d/scene_style
+
+const CardTextRoom = 480
+const CardPx: f32 = 1024.0
+
+struct DeskCard
+    shown: bool
+    side: Side
+    to_move: bool
+    text: [CardTextRoom]u8
+    ends: [7]int
+
+    fn keep(c: *CardText, eval_from: str)
+        shown = true
+        side = c.side
+        to_move = c.to_move
+        let parts = [c.name, c.version, c.eval, eval_from, c.search, c.pv, c.clock]
+        var at = 0
+        for k in 0..7
+            let s = parts[k]
+            let n = min(s.len as int, CardTextRoom - at)
+            for i in 0..n: text[at + i] = s[i]
+            at += n
+            ends[k] = at
+
+    fn part(k: int) -> str
+        let from = k == 0 ? 0 : ends[k - 1]
+        return str(text[from..ends[k]])
+
+    fn key() -> u64
+        if not shown: return 0
+        var h: u64 = 0xCBF29CE484222325 ^ (side as u64) ^ (to_move ? 2 : 0) as u64
+        for i in 0..ends[6]: h = (h ^ text[i] as u64) * 0x100000001B3
+        for k in 0..7: h = (h ^ ends[k] as u64) * 0x100000001B3
+        return h
+
+struct DeskClock
+    on: bool
+    codes: [16]f32
+    counts: [2]int
+    seconds: [2]f32
+    up: Side
+    pressable: bool
+
+    fn set(side: Side, time: str)
+        let k = side as int
+        counts[k] = 0
+        var total: f32 = 0.0
+        var part: f32 = 0.0
+        var tenth: f32 = 0.0
+        for i in 0..time.len as int
+            let ch = time[i]
+            if ch >= '0' and ch <= '9'
+                let d = (ch - '0') as f32
+                if tenth > 0.0
+                    part += d * tenth
+                    tenth *= 0.1
+                else: part = part * 10.0 + d
+            elif ch == ':'
+                total = (total + part) * 60.0
+                part = 0.0
+            elif ch == '.': tenth = 0.1
+        seconds[k] = total + part
+        for i in 0..time.len as int
+            if counts[k] >= 8: break
+            let ch = time[i]
+            var code: f32 = 12.0
+            if ch >= '0' and ch <= '9': code = (ch - '0') as f32
+            elif ch == ':': code = 10.0
+            elif ch == '.': code = 11.0
+            elif ch == '-': code = 13.0
+            codes[k * 8 + counts[k]] = code
+            counts[k] += 1
+
+    fn key() -> u64
+        var h = hash_word(0x51ED27, (on ? 1 : 0) as u64 | (up as u64) << 1 | (pressable ? 4 : 0) as u64)
+        for s in 0..2
+            h = hash_word(h, counts[s] as u64)
+            for i in 0..counts[s]: h = hash_word(h, codes[s * 8 + i] as u64)
+        return h
+
+struct DeskShow
+    cards: [2]DeskCard
+    clock: DeskClock
+
+    fn card(side: Side) -> *DeskCard
+        return &cards[side as int]
+
+    fn clear()
+        cards[0].shown = false
+        cards[1].shown = false
+        clock.on = false
+        clock.pressable = false
+
+struct DeskLook
+    card: int
+    case: int
+    plastic: int
+    lcds: [2]int
+    dials: [2]int
+    printing: bool
+    canvas: UiCanvas
+    printer: UiRenderer
+    faces: Texture
+    sampler: *SDL_GPUSampler
+    printed: u64
+    aniso: f32 = 8.0
+
+    fn init(r: *Renderer)
+        var paper = MaterialDesc.three(shader("shaders/desk3d.hlsl", fragment: "card_ps"))
+        paper.vertex = shader("shaders/wood3d.hlsl", vertex: "wood_vs")
+        card = r.add_material_desc(&paper)
+        r.materials[card].values[0] = Vec4(0.95, 0.93, 0.89, 0.0)
+        var wood = MaterialDesc.three(shader("shaders/desk3d.hlsl", fragment: "case_ps"))
+        wood.vertex = shader("shaders/wood3d.hlsl", vertex: "wood_vs")
+        case = r.add_material_desc(&wood)
+        r.materials[case].values[0] = Vec4(0.42, 14.0, 0.35, 0.0015)
+        r.materials[case].values[1] = Vec4(0.7, 0.1, 0.0, 0.0)
+        var moulded = MaterialDesc.three(shader("shaders/desk3d.hlsl", fragment: "plastic_ps"))
+        moulded.vertex = shader("shaders/wood3d.hlsl", vertex: "wood_vs")
+        plastic = r.add_material_desc(&moulded)
+        r.materials[plastic].values[0] = Vec4(0.5, 0.25, 0.3, 0.0)
+        for k in 0..2
+            var lcd = MaterialDesc.three(shader("shaders/desk3d.hlsl", fragment: "lcd_ps"))
+            lcd.vertex = shader("shaders/wood3d.hlsl", vertex: "wood_vs")
+            lcds[k] = r.add_material_desc(&lcd)
+            var dial = MaterialDesc.three(shader("shaders/desk3d.hlsl", fragment: "dial_ps"))
+            dial.vertex = shader("shaders/wood3d.hlsl", vertex: "wood_vs")
+            dials[k] = r.add_material_desc(&dial)
+
+    fn show_clock(r: *Renderer, c: *DeskClock, style: ClockStyle)
+        for k in 0..2
+            let n = c.on ? c.counts[k] : 0
+            var code: [8]f32
+            for i in 0..8: code[i] = i < n ? c.codes[k * 8 + i] : 12.0
+            let m = &r.materials[lcds[k]]
+            m.values[0] = Vec4(code[0], code[1], code[2], code[3])
+            m.values[1] = Vec4(code[4], code[5], code[6], code[7])
+            m.values[2] = Vec4(n as f32, clock_lcd_aspect(), c.on ? 1.0 : 0.0, style == BlackClock ? 1.0 : 0.0)
+            let left = c.on and c.counts[k] > 0 ? max(c.seconds[k], 0.0) : 300.0
+            let hour = left / 3600.0
+            let minute = hour - floor(hour)
+            let face = 1.0 - left / 43200.0
+            let mins = left - floor(left / 3600.0) * 3600.0
+            let lift = left > 0.0 ? clamp(1.0 - mins / 240.0, 0.0, 1.0) : 0.0
+            r.materials[dials[k]].values[0] = Vec4((face - floor(face)) * Tau, (1.0 - minute) * Tau, lift, 0.0)
+
+    fn print(gpu: *Gpu, outer: *UiCanvas, r: *Renderer, frame: *Frame, show: *DeskShow, fonts: *GuiFonts, accent: Color, accent_ink: Color, style: CardStyle)
+        if not show.cards[0].shown and not show.cards[1].shown: return
+        if not printing
+            printing = true
+            canvas.init()
+            canvas.share_fonts(outer)
+            printer.init(gpu, &canvas, CaptureFormat)
+            faces = gpu.mipped_target(CardPx as int, CardPx as int, CaptureFormat)
+            sampler = gpu.sampler_aniso(aniso)
+            r.materials[card].texture = &faces
+            r.materials[card].sampler = sampler
+        if canvas.faces.len != outer.faces.len
+            canvas.faces.clear()
+            canvas.share_fonts(outer)
+        let key = hash_word(hash_word(hash_word(show.cards[0].key(), show.cards[1].key()), fonts.text as u64), pack_color(accent) as u64 | (style as u64) << 32)
+        let inks = card_inks(style)
+        let m = &r.materials[card]
+        m.values[0] = Vec4(inks.paper.r, inks.paper.g, inks.paper.b, 0.0)
+        m.values[1] = Vec4(inks.kind, style == SlateCard ? 0.9 : 0.85, style == SlateCard ? 0.06 : 0.12, 0.0)
+        if key == printed: return
+        printed = key
+        canvas.begin(CardPx, CardPx, 0.0)
+        with canvas.open(UiNode(width: UiSize.fixed(CardPx), height: UiSize.fixed(CardPx)))
+            for k in 0..2: print_card(&canvas, fonts, accent, accent_ink, &show.cards[k], inks)
+        printer.upload(frame)
+        printer.draw_into(frame, &faces, inks.paper, true)
+        printer.finish_frame()
+
+    fn release(gpu: *Gpu)
+        if not printing: return
+        printer.release()
+        canvas.free_all()
+        gpu.release_texture(&faces)
+        gpu.release_sampler(sampler)
+        printing = false
+        printed = 0
+
+struct CardInks
+    paper: Color
+    ink: Color
+    muted: Color
+    rule: Color
+    band: bool
+    kind: f32
+
+fn card_inks(style: CardStyle) -> CardInks
+    if style == SlateCard: return CardInks(Color.hex(CardColors[1]), Color.hex(0xF0EDE6), Color.hex(0x9AA0A8), Color.hex(0x9AA0A8).with_alpha(0.35), true, 1.0)
+    if style == KraftCard: return CardInks(Color.hex(CardColors[2]), Color.hex(0x2B1F14), Color.hex(0x5E4632), Color.hex(0x2B1F14).with_alpha(0.45), false, 2.0)
+    if style == NavyCard: return CardInks(Color.hex(CardColors[3]), Color.hex(0xF2EEE4), Color.hex(0xA3ADC2), Color.hex(0xC9A85C).with_alpha(0.6), false, 0.0)
+    if style == OxbloodCard: return CardInks(Color.hex(CardColors[4]), Color.hex(0xF3E9DC), Color.hex(0xCDAFA5), Color.hex(0xE0C9A0).with_alpha(0.5), false, 0.0)
+    return CardInks(Color.hex(CardColors[0]), Color.hex(0x1E1A16), Color.hex(0x7B7266), Color.hex(0x7B7266).with_alpha(0.55), false, 0.0)
+
+fn print_card(ui: *UiCanvas, fonts: *GuiFonts, accent: Color, accent_ink: Color, c: *DeskCard, inks: CardInks)
+    let paper = inks.paper
+    let ink = inks.ink
+    let muted = inks.muted
+    let half = CardPx * 0.5
+    with ui.open(UiNode(width: UiSize.fixed(CardPx), height: UiSize.fixed(half), padding: Vec4(72.0, 60.0, 72.0, 56.0), gap: 8.0, clip: true, box: UiBox(fill: UiFill.solid(paper))))
+        ui.leaf(UiNode(floating: true, offset: Vec2(28.0, 28.0), width: UiSize.fixed(CardPx - 56.0), height: UiSize.fixed(half - 56.0), box: UiBox(radius: Vec4.splat(12.0), border: 3.0, border_color: inks.rule)))
+        if inks.band: ui.leaf(UiNode(floating: true, offset: Vec2(28.0, 28.0), width: UiSize.fixed(14.0), height: UiSize.fixed(half - 56.0), box: UiBox(fill: UiFill.solid(accent), radius: Vec4(12.0, 0.0, 0.0, 12.0))))
+        if not c.shown: return
+
+        let disc = c.side == White ? Color(0.97, 0.96, 0.93, 1.0) : Color(0.08, 0.08, 0.09, 1.0)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 24.0, align: Vec2(0.0, 0.5)))
+            ui.leaf(UiNode(width: UiSize.fixed(46.0), height: UiSize.fixed(46.0), box: UiBox(fill: UiFill.solid(disc), radius: Vec4.splat(23.0), border: 3.0, border_color: ink)))
+            ui.label(c.part(0), UiTextStyle(face: fonts.strong, size: 72.0, color: ink), UiNode(width: UiSize.grow(), clip: true))
+            if c.to_move
+                with ui.open(UiNode(padding: Vec4(22.0, 8.0, 22.0, 8.0), box: UiBox(fill: UiFill.solid(accent), radius: Vec4.splat(26.0))))
+                    ui.label("to move", UiTextStyle(face: fonts.strong, size: 34.0, color: accent_ink))
+            if c.part(6).len > 0: ui.label(c.part(6), UiTextStyle(face: fonts.mono, size: 64.0, color: ink))
+        if c.part(1).len > 0: ui.label(c.part(1), UiTextStyle(face: fonts.text, size: 40.0, color: muted), UiNode(width: UiSize.grow(), clip: true))
+        ui.spacer()
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 18.0, align: Vec2(0.0, 0.5)))
+            if c.part(2).len > 0
+                ui.label(c.part(2), UiTextStyle(face: fonts.strong, size: 76.0, color: ink))
+                if c.part(3).len > 0: ui.label(c.part(3), UiTextStyle(face: fonts.text, size: 34.0, color: muted))
+            ui.spacer()
+            if c.part(4).len > 0: ui.label(c.part(4), UiTextStyle(face: fonts.mono, size: 34.0, color: muted))
+        if c.part(5).len > 0: ui.label(c.part(5), UiTextStyle(face: fonts.text, size: 38.0, color: ink), UiNode(width: UiSize.grow(), clip: true))

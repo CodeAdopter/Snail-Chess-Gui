@@ -1,0 +1,282 @@
+use engine/desktop/zip_archive
+use engine/desktop/file_tree
+use src/engines/releases
+use src/fastchess/fast_place
+
+const FastDownloadMost: i64 = 268435456
+const FastUnpackMost: i64 = 1073741824
+
+enum FastStep: u8
+    FastIdle
+    FastDownloading
+    FastUnpacking
+    FastFailed
+
+const FastWorkRunning = 1
+const FastWorkDone = 2
+const FastWorkFailed = 3
+
+struct FastInstall
+    releases: ReleaseList
+    get: HttpGet
+    zip: ZipArchive
+    step: FastStep
+    work: int
+    thread: u64
+    tag: [..]u8
+    url: [..]u8
+    digest: [..]u8
+    size: i64
+    program: [..]u8
+    installed: [64]u8
+    installed_len: int
+    exe_path: [720]u8
+    exe_len: int
+    failure: [400]u8
+    failure_len: int
+    data: *DataFolder
+    place: FastPlace
+    releases_read: bool
+
+    fn begin(folder: *DataFolder)
+        data = folder
+        place.set_root(folder.root_text())
+        read_installed()
+        if is_installed(): place_shim()
+
+    fn ready_releases()
+        if releases_read: return
+        releases_read = true
+        releases.choose_by("fastchess", FastRelease, false, data)
+
+    fn read_installed()
+        var p: [720]u8
+        var t: [64]u8
+        let (exe, version, ok) = place.installed(&p, &t)
+        installed_len = 0
+        exe_len = 0
+        if not ok or not file_exists(exe.ptr as cstr): return
+        exe_len = min(exe.len, 720) as int
+        for i in 0..exe_len
+            exe_path[i] = exe[i]
+        installed_len = min(version.len, 63) as int
+        for i in 0..installed_len
+            installed[i] = version[i]
+        if installed_len == 0
+            installed_len = 1
+            installed[0] = '?'
+
+    fn installed_text() -> str
+        return str(installed[0..installed_len])
+
+    fn exe_text() -> str
+        return str(exe_path[0..exe_len])
+
+    fn is_installed() -> bool
+        return installed_len > 0
+
+    fn busy() -> bool
+        return step == FastDownloading or step == FastUnpacking
+
+    fn newest() -> (int, int)
+        let set = &releases.set
+        for i in 0..set.releases.len as int
+            let r = &set.releases[i]
+            if r.count == 0 or r.prerelease: continue
+            var pick = r.first
+            for a in r.first..r.first + r.count
+                if find(set.text(set.assets[a].name), "x86-64") >= 0: pick = a as int
+            return (i, pick)
+        return (-1, -1)
+
+    fn offer() -> str
+        let (r, _a) = newest()
+        if r < 0: return ""
+        let t = releases.set.text(releases.set.releases[r].tag)
+        return t == installed_text() ? "" : t
+
+    fn start() -> bool
+        if busy(): return false
+        ready_releases()
+        let (r, a) = newest()
+        if r < 0: return fail("No Windows release of fastchess was found. Check for releases first.")
+        let set = &releases.set
+        let e = &set.assets[a]
+        hold_text(&tag, set.text(set.releases[r].tag))
+        hold_text(&url, set.text(e.url))
+        hold_text(&digest, set.text(e.digest))
+        size = e.size
+        failure_len = 0
+        var buf: [720]u8
+        fast_make_folder(place.path("fastchess", &buf))
+        fast_make_folder(place.path("fastchess\\app", &buf))
+        get.most = FastDownloadMost
+        get.hashing = true
+        if not get.start(str(url[0..url.len]), RegistryAgent, "", place.path("fastchess\\download.zip", &buf)): return fail("Could not start the download.")
+        step = FastDownloading
+        return true
+
+    fn update() -> bool
+        var changed = releases.update()
+        if step == FastDownloading
+            if not get.finished(): return changed
+            if get.state == HttpCancelled
+                step = FastIdle
+                return true
+            var line: [400]u8
+            if not get.done(): return fail(get.error_text())
+            if size >= 0 and get.received != size: return fail(format(&line, "Download size mismatch: received {get.received} bytes; expected {size}."))
+            if digest.len == 64
+                var hex: [64]u8
+                if sha256_hex(&get.digest, &hex) != str(digest[0..digest.len]): return fail("The download failed SHA-256 verification and was discarded.")
+            atomic_store(&work, FastWorkRunning)
+            thread = spawn(fast_unpack_work, self)
+            step = FastUnpacking
+            return true
+        if step == FastUnpacking
+            let w = atomic_load(&work)
+            if w == FastWorkRunning: return changed
+            join(thread)
+            thread = 0
+            if w == FastWorkFailed
+                step = FastFailed
+                return true
+            step = FastIdle
+            read_installed()
+            if not place_shim(): note("fastchess was installed, but snailfast.exe was not found beside the app.")
+            return true
+        return changed
+
+    fn progress() -> (i64, i64)
+        return get.progress()
+
+    fn place_shim() -> bool
+        var from: [720]u8
+        var to: [720]u8
+        let source = format(&from, "{str(SDL_GetBasePath())}{FastShimName}")
+        if not file_exists(source.ptr as cstr): return false
+        fast_make_folder(place.path("fastchess", &to))
+        fast_make_folder(place.path("fastchess\\bin", &to))
+        var inside: [64]u8
+        let target = place.path(format(&inside, "fastchess\\bin\\{FastShimName}"), &to)
+        if file_exists(target.ptr as cstr) and modified_time(target.ptr as cstr) >= modified_time(source.ptr as cstr): return true
+        fast_copy(source, target)
+        return true
+
+    fn fail(why: str) -> bool
+        note(why)
+        step = FastFailed
+        return true
+
+    fn note(why: str)
+        failure_len = min(why.len, 400) as int
+        for k in 0..failure_len
+            failure[k] = why[k]
+
+    fn failure_text() -> str
+        return str(failure[0..failure_len])
+
+    fn release()
+        if thread
+            join(thread)
+            thread = 0
+        get.release()
+        releases.release()
+        tag.free()
+        url.free()
+        digest.free()
+        program.free()
+
+fn fast_unpack_work(j: *FastInstall)
+    var buf: [720]u8
+    var down: [720]u8
+    let download = j.place.path("fastchess\\download.zip", &down)
+    var inside: [160]u8
+    let unpacked = format(&inside, "fastchess\\app\\{str(j.tag[0..j.tag.len])}")
+    let folder = j.place.path(unpacked, &buf)
+    remove_tree(folder)
+    fast_make_folder(folder)
+    let ok = j.zip.open(download) and j.zip.unpack_all(folder, FastUnpackMost)
+    if not ok: j.note(j.zip.error_text().len > 0 ? j.zip.error_text() : "The download could not be unpacked.")
+    j.zip.release()
+    SDL_RemovePath(download.ptr as cstr)
+    if not ok
+        atomic_store(&j.work, FastWorkFailed)
+        http_wake()
+        return
+    var found: [..]u8
+    defer found.free()
+    files_under(folder, ".exe", &found, 32)
+    var program = ""
+    var start = 0
+    for k in 0..found.len as int
+        if found[k] != '\n': continue
+        let relative = str(found[start..k])
+        start = k + 1
+        if fast_folded(file_name_of(relative), "fastchess.exe"): program = relative
+    if program.len == 0
+        j.note("fastchess.exe was not found in the download.")
+        atomic_store(&j.work, FastWorkFailed)
+        http_wake()
+        return
+    var record: [900]u8
+    var path: [720]u8
+    if not fast_save_whole(j.place.path("fastchess\\installed.txt", &path), format(&record, "tag {str(j.tag[0..j.tag.len])}\nprogram {unpacked}\\{program}\n"))
+        j.note("fastchess was unpacked, but installed.txt could not be written.")
+        atomic_store(&j.work, FastWorkFailed)
+        http_wake()
+        return
+    atomic_store(&j.work, FastWorkDone)
+    http_wake()
+
+fn fast_on_path(folder: str) -> bool
+    var text: [..]u8
+    defer text.free()
+    var kind: u32 = 2
+    if fast_user_path(&text, &kind) < 0: return false
+    return fast_path_find(str(text[0..text.len]), folder) >= 0
+
+fn fast_put_on_path(folder: str, on: bool) -> bool
+    var text: [..]u8
+    defer text.free()
+    var kind: u32 = 2
+    if fast_user_path(&text, &kind) < 0: return false
+    let path = str(text[0..text.len])
+    let at = fast_path_find(path, folder)
+    if on == (at >= 0): return true
+    var next: [..]u8
+    defer next.free()
+    if on
+        push_text(&next, path)
+        if next.len > 0 and next[next.len - 1] != ';': next.push(';')
+        push_text(&next, folder)
+    else
+        var end = at
+        while end < path.len and path[end] != ';'
+            end += 1
+        var from = at
+        if end < path.len: end += 1
+        elif from > 0: from -= 1
+        push_text(&next, path[0..from])
+        push_text(&next, path[end..path.len])
+    return sn_fc_set_user_path(next.ptr, next.len as int, kind) != 0
+
+fn fast_user_path(into: *[..]u8, kind: *u32) -> int
+    into.resize(65536)
+    let n = sn_fc_user_path(into.ptr, 65536, kind)
+    into.resize(max(n, 0))
+    return n
+
+fn fast_path_find(path: str, folder: str) -> int
+    var want = folder
+    while want.len > 0 and (want[want.len - 1] == '\\' or want[want.len - 1] == '/')
+        want = want[0..want.len - 1]
+    var from = 0
+    for i in 0..path.len + 1
+        if i < path.len and path[i] != ';': continue
+        var entry = trim(path[from..i])
+        while entry.len > 0 and (entry[entry.len - 1] == '\\' or entry[entry.len - 1] == '/')
+            entry = entry[0..entry.len - 1]
+        if fast_folded(entry, want): return from
+        from = i as int + 1
+    return -1

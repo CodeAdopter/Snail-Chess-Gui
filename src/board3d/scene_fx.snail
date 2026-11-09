@@ -1,0 +1,161 @@
+use engine/desktop/desktop_app
+use src/chess/primitives
+use src/board3d/wood_look
+
+const MossShells = 8
+const SceneDustLength: f32 = 0.8
+const SceneBurstLength: f32 = 0.9
+
+struct SceneFx
+    on: bool
+    time: f32
+    moss: [64]f32
+    flame: [64]f32
+    hue: [64]f32
+    seeds: [64]f32
+    glint: f32 = -1.0
+    glint_at: Square = Square.none
+    trail: f32 = -1.0
+    trail_reach: f32
+    trail_from: Square = Square.none
+    trail_to: Square = Square.none
+    trail_strength: f32
+    trail_length: f32
+    dust: f32 = -1.0
+    dust_at: Square = Square.none
+    dust_strength: f32
+    burst: f32 = -1.0
+    burst_at: Square = Square.none
+    burst_piece: Piece
+    burst_strength: f32
+    sacrifice: f32
+    sacrifice_at: Square = Square.none
+    sacrifice_seed: f32
+
+    fn burning() -> bool
+        if not on: return false
+        if sacrifice > 0.0: return true
+        for sq in 0..64
+            if flame[sq] > 0.0: return true
+        return false
+
+    fn passing() -> bool
+        return on and (glint >= 0.0 or trail >= 0.0 or dust >= 0.0 or burst >= 0.0)
+
+    fn key() -> u64
+        if not on: return 0
+        var h = hash_word(0x51ED270B27C3A1F5, burning() ? (time * 1000.0) as i64 as u64 : 0)
+        for sq in 0..64
+            if moss[sq] <= 0.0 and flame[sq] <= 0.0: continue
+            h = hash_word(h, sq as u64 | ((moss[sq] * 1000.0) as i64 as u64) << 8 | ((flame[sq] * 1000.0) as i64 as u64) << 24 | (hue[sq] as i64 as u64) << 44)
+        h = hash_word(h, ((glint * 1000.0) as i64 as u64) << 32 ^ (trail * 1000.0) as i64 as u64 ^ ((trail_reach * 4096.0) as i64 as u64) << 16)
+        h = hash_word(h, ((dust * 1000.0) as i64 as u64) << 32 ^ (burst * 1000.0) as i64 as u64 ^ ((sacrifice * 1000.0) as i64 as u64) << 48)
+        return h
+
+fn fx_hue(hue: f32) -> Vec3
+    if hue > 1.5: return Vec3(1.0, 0.62, 0.12)
+    if hue > 0.5: return Vec3(1.0, 0.07, 0.035)
+    return Vec3(1.0, 0.36, 0.06)
+
+fn fx_tint(c: Vec3, strength: f32, a: f32) -> Color
+    return Color(fx_srgb(c.x * strength), fx_srgb(c.y * strength), fx_srgb(c.z * strength), a)
+
+fn fx_srgb(c: f32) -> f32
+    let v = clamp(c, 0.0, 1.0)
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055
+
+struct SceneFxLook
+    flame: int
+    halo: int
+    spark: int
+    dust: int
+    shell: int
+
+    fn init(r: *Renderer, field: *WoodField)
+        flame = fx_glow_material(r, shader("shaders/fx3d.hlsl", fragment: "flame_fx_ps"), 150)
+        spark = fx_glow_material(r, shader("shaders/fx3d.hlsl", fragment: "spark_fx_ps"), 152)
+        halo = fx_glow_material(r, shader("shaders/fx3d.hlsl", fragment: "halo_fx_ps"), 154)
+        var puff = MaterialDesc.three(shader("shaders/fx3d.hlsl", fragment: "dust_fx_ps"))
+        puff.vertex = shader("shaders/wood3d.hlsl", vertex: "wood_vs")
+        puff.cull = CullNone
+        puff.blend = Glaze
+        puff.depth = TestOnly
+        dust = r.add_material_desc(&puff)
+        r.materials[dust].order = 156
+        var fuzz = MaterialDesc.three(shader("shaders/fx3d.hlsl", fragment: "moss_shell_ps"))
+        fuzz.vertex = shader("shaders/fx3d.hlsl", vertex: "moss_vs")
+        shell = r.add_material_desc(&fuzz)
+        r.materials[shell].block = field
+        r.materials[shell].block_bytes = sizeof(WoodField)
+
+    fn tick(r: *Renderer, time: f32)
+        for m in [flame, spark, halo, dust]: r.materials[m].values[0].x = time
+
+    fn fire_round(r: *Renderer, eye: Vec3, quad: int, middle: int, foot: Vec3, tall: f32, wide: f32, strength: f32, hue: Vec3, seed: f32)
+        let up = Vec3.up()
+        let turn = atan2(eye.x - foot.x, eye.z - foot.z)
+        let toward = Vec3(sin(turn), 0.0, cos(turn))
+        let side = Vec3(toward.z, 0.0, -toward.x)
+        let high = tall * (1.15 + 0.7 * strength)
+        let across = wide * 3.0
+        let face = Quat.axis_angle(up, turn)
+        let base = foot - Vec3(0.0, 0.02, 0.0)
+        let s0 = seed - floor(seed)
+        let s1 = seed + 0.31 - floor(seed + 0.31)
+        let s2 = seed + 0.57 - floor(seed + 0.57)
+        let s3 = seed + 0.83 - floor(seed + 0.83)
+        r.draw_with(flame, quad, Mat4.trs(base - toward * (wide * 0.9), face, Vec3(across * 1.1, high, 1.0)), fx_tint(hue, strength, s0))
+        r.draw_with(flame, quad, Mat4.trs(base + side * (wide * 0.7), face, Vec3(across * 0.7, high * 0.8, 1.0)), fx_tint(hue, strength * 0.85, s1))
+        r.draw_with(flame, quad, Mat4.trs(base - side * (wide * 0.7), face, Vec3(across * 0.7, high * 0.75, 1.0)), fx_tint(hue, strength * 0.85, s2))
+        r.draw_with(flame, quad, Mat4.trs(base + toward * (wide * 1.1), face, Vec3(across * 0.9, high * 0.45, 1.0)), fx_tint(hue, strength * 0.35, s3))
+        r.draw_with(spark, quad, Mat4.trs(foot + Vec3(0.0, tall * 0.35, 0.0), Quat.axis_angle(up, turn), Vec3(across * 1.2, tall * 1.6, 1.0)), fx_tint(hue, strength, seed))
+        let glow = Mat4.trs(foot + Vec3(0.0, tall * 0.45, 0.0), Quat.look_rotation(eye - foot, up), Vec3.splat(tall * 2.2))
+        r.draw_with(halo, middle, glow, fx_tint(hue * 0.6, strength, seed))
+
+    fn fire_on_square(r: *Renderer, eye: Vec3, quad: int, middle: Vec3, strength: f32, hue: Vec3, seed: f32)
+        let up = Vec3.up()
+        for k in 0..6
+            let a = k as f32 * Tau / 6.0 + seed
+            let foot = middle + Vec3(cos(a) * 0.36, 0.0, sin(a) * 0.36)
+            let turn = atan2(eye.x - foot.x, eye.z - foot.z)
+            let s = seed + k as f32 * 0.17
+            r.draw_with(flame, quad, Mat4.trs(foot, Quat.axis_angle(up, turn), Vec3(0.42, 0.32 + 0.35 * strength, 1.0)), fx_tint(hue, strength * 0.8, s - floor(s)))
+
+    fn dust_round(r: *Renderer, eye: Vec3, middle: int, at: Vec3, seconds: f32, strength: f32, seed: f32)
+        let life = clamp(seconds / SceneDustLength, 0.0, 1.0)
+        let ease = 1.0 - (1.0 - life) * (1.0 - life) * (1.0 - life)
+        let thick = pow(1.0 - life, 1.4) * strength * 0.55
+        if thick <= 0.0: return
+        let up = Vec3.up()
+        for k in 0..9
+            let h = fx_hash(k as f32 + seed)
+            let a = k as f32 * Tau / 9.0 + h * 0.6
+            let far = 0.28 + ease * (0.45 + 0.35 * fx_hash(k as f32 * 3.0 + seed))
+            let p = at + Vec3(cos(a) * far, 0.04 + ease * (0.06 + 0.1 * h), sin(a) * far)
+            let size = 0.12 + ease * (0.2 + 0.12 * fx_hash(k as f32 * 7.0 + seed))
+            r.draw_with(dust, middle, Mat4.trs(p, Quat.look_rotation(eye - p, up), Vec3.splat(size)), Color(0.86, 0.8, 0.7, thick))
+
+    fn embers_off(r: *Renderer, eye: Vec3, quad: int, foot: Vec3, tall: f32, seconds: f32, strength: f32, seed: f32)
+        let life = clamp(seconds / SceneBurstLength, 0.0, 1.0)
+        if life >= 1.0: return
+        let turn = atan2(eye.x - foot.x, eye.z - foot.z)
+        r.draw_with(spark, quad, Mat4.trs(foot + Vec3(0.0, tall * 0.2, 0.0), Quat.axis_angle(Vec3.up(), turn), Vec3(0.9, tall * 1.8, 1.0)), fx_tint(fx_hue(0.0), strength * (1.0 - life), seed))
+
+    fn moss_shells(r: *Renderer, mesh: int, model: Mat4)
+        for k in 1..MossShells + 1
+            r.draw_with(shell, mesh, model, Color(1.0, 1.0, 1.0, k as f32 / MossShells as f32))
+
+fn fx_glow_material(r: *Renderer, fragment: ShaderCode, order: int) -> int
+    var desc = MaterialDesc.three(fragment)
+    desc.vertex = shader("shaders/wood3d.hlsl", vertex: "wood_vs")
+    desc.cull = CullNone
+    desc.blend = Lighter
+    desc.depth = TestOnly
+    let m = r.add_material_desc(&desc)
+    r.materials[m].order = order as u8
+    r.materials[m].no_fog = true
+    return m
+
+fn fx_hash(n: f32) -> f32
+    let v = sin(n * 91.345) * 47453.5453
+    return v - floor(v)

@@ -1,0 +1,76 @@
+use src/pieces/piece_art
+
+enum CostumeItem: u8
+    SantaHat
+    WitchHat
+    Pumpkin
+    PartyHat
+
+struct CostumePart
+    item: CostumeItem
+    behind: bool
+    d: str
+    fill: u32
+    stroke: u32
+    width: f32
+    cap: UiCap
+    join: UiJoin
+    paint: int
+
+const CostumeItemBounds = [
+    Vec4(7.0, 15.343, 100.5, 100.0),
+    Vec4(0.0, 3.0, 100.0, 100.0),
+    Vec4(0.86, 50.163, 99.14, 100.418),
+    Vec4(27.0, 5.25, 73.0, 98.75),
+]
+
+const CostumeStops = [
+    PieceStop(0.0, 0xF0464CFF), PieceStop(0.6, 0xC81E28FF), PieceStop(1.0, 0x8A0E16FF),
+    PieceStop(0.0, 0xFFFFFFFF), PieceStop(0.7, 0xEEF1F5FF), PieceStop(1.0, 0xC9D0D9FF),
+    PieceStop(0.0, 0xFFFFFFFF), PieceStop(0.7, 0xEEF1F5FF), PieceStop(1.0, 0xC9D0D9FF),
+    PieceStop(0.0, 0x55357AFF), PieceStop(1.0, 0x170B20FF),
+    PieceStop(0.0, 0x2A1838FF), PieceStop(0.45, 0x5D3A80FF), PieceStop(1.0, 0x1D0F28FF),
+    PieceStop(0.0, 0x5A2304FF), PieceStop(1.0, 0xC25A0BFF),
+    PieceStop(0.0, 0xFFB347FF), PieceStop(0.65, 0xF07C12FF), PieceStop(1.0, 0xB44A06FF),
+    PieceStop(0.0, 0xFFF6A8FF), PieceStop(0.6, 0xFFD23FFF), PieceStop(1.0, 0xFF9F1AFF),
+    PieceStop(0.0, 0xFFF6A8FF), PieceStop(0.6, 0xFFD23FFF), PieceStop(1.0, 0xFF9F1AFF),
+    PieceStop(0.0, 0x2F7DE1FF), PieceStop(0.5, 0x5AB0FFFF), PieceStop(1.0, 0x1F5FB8FF),
+]
+
+const CostumePaints = [
+    PiecePaint(false, Vec2(14.0, 16.593), Vec2(82.516, 97.086), 0.0, 0.0, Vec2(1.0, 1.0), 0, 3),
+    PiecePaint(true, Vec2(43.28, 84.3), Vec2(43.28, 84.3), 0.0, 0.75, Vec2(84.0, 21.0), 3, 3),
+    PiecePaint(true, Vec2(89.64, 54.6), Vec2(89.64, 54.6), 0.0, 0.75, Vec2(17.0, 17.0), 6, 3),
+    PiecePaint(false, Vec2(1.0, 79.0), Vec2(1.0, 99.0), 0.0, 0.0, Vec2(1.0, 1.0), 9, 2),
+    PiecePaint(false, Vec2(25.0, 4.0), Vec2(76.0, 4.0), 0.0, 0.0, Vec2(1.0, 1.0), 11, 3),
+    PiecePaint(false, Vec2(14.0, 51.0), Vec2(14.0, 65.0), 0.0, 0.0, Vec2(1.0, 1.0), 14, 2),
+    PiecePaint(true, Vec2(45.191, 74.549), Vec2(45.191, 74.549), 0.0, 0.65, Vec2(96.188, 41.373), 16, 3),
+    PiecePaint(true, Vec2(50.0, 72.35), Vec2(50.0, 72.35), 0.0, 0.6, Vec2(46.0, 7.7), 19, 3),
+    PiecePaint(true, Vec2(50.0, 86.087), Vec2(50.0, 86.087), 0.0, 0.6, Vec2(52.0, 8.575), 22, 3),
+    PiecePaint(false, Vec2(28.0, 16.0), Vec2(72.0, 16.0), 0.0, 0.0, Vec2(1.0, 1.0), 25, 3),
+]
+
+const CostumeParts = [
+    CostumePart(SantaHat, false, "M14 86C16 58 30 30 54 20C70 13 86 17 93 30C97 38 96 48 92 56C88 47 82 41 74 41C67 43 67 55 74 66C78 72 83 79 86 86Z", 0x00000000, 0x5C0910FF, 2.5, CapButt, JoinRound, 0),
+    CostumePart(SantaHat, false, "M24 80C27 58 38 38 55 28C46 40 36 58 32 80Z", 0xFFFFFF38, 0x00000000, 1.0, CapButt, JoinMiter, -1),
+    CostumePart(SantaHat, false, "M8 89C8 82 14 79 21 80C29 77 39 79 50 78C61 79 71 77 79 80C86 79 92 82 92 89C92 96 86 99 79 98C71 100 61 98 50 99C39 98 29 100 21 98C14 99 8 96 8 89Z", 0x00000000, 0x8D97A3FF, 2.0, CapButt, JoinMiter, 1),
+    CostumePart(SantaHat, false, "M82.5 58C82.5 62.694 86.306 66.5 91 66.5C95.694 66.5 99.5 62.694 99.5 58C99.5 53.306 95.694 49.5 91 49.5C86.306 49.5 82.5 53.306 82.5 58Z", 0x00000000, 0x8D97A3FF, 2.0, CapButt, JoinMiter, 2),
+    CostumePart(WitchHat, false, "M1 89C1 94.523 22.938 99 50 99C77.062 99 99 94.523 99 89C99 83.477 77.062 79 50 79C22.938 79 1 83.477 1 89Z", 0x00000000, 0x0E0614FF, 2.0, CapButt, JoinMiter, 3),
+    CostumePart(WitchHat, false, "M25 89C33 70 39 50 45 33C49 21 57 8 76 4C67 11 62 20 60 31C63 52 69 71 75 89C58 95 41 95 25 89Z", 0x00000000, 0x0E0614FF, 2.0, CapButt, JoinRound, 4),
+    CostumePart(WitchHat, false, "M29 78C42 84 59 84 72 78L75 86C59 92 41 92 26 86Z", 0xF28C1CFF, 0x7A3F05FF, 1.5, CapButt, JoinMiter, -1),
+    CostumePart(WitchHat, false, "M45.5 77L54.5 77C55.328 77 56 77.672 56 78.5L56 86.5C56 87.328 55.328 88 54.5 88L45.5 88C44.672 88 44 87.328 44 86.5L44 78.5C44 77.672 44.672 77 45.5 77Z", 0x00000000, 0xFFD34DFF, 2.5, CapButt, JoinMiter, -1),
+    CostumePart(Pumpkin, true, "M14 58C14 61.866 30.118 65 50 65C69.882 65 86 61.866 86 58C86 54.134 69.882 51 50 51C30.118 51 14 54.134 14 58Z", 0x00000000, 0x4A1C03FF, 1.673, CapButt, JoinMiter, 5),
+    CostumePart(Pumpkin, false, "M14 58C26 65 74 65 86 58C97 62.9 101 76.2 96 86C91 95.8 72 100 50 99.3C28 100 9 95.8 4 86C-1 76.2 3 62.9 14 58Z", 0x00000000, 0x6B2C04FF, 2.092, CapButt, JoinRound, 6),
+    CostumePart(Pumpkin, false, "M50 63.6C45 74.8 45 88.8 50 99.3M32 62.2C22 72 22 88.8 31 97.9M68 62.2C78 72 78 88.8 69 97.9", 0x00000000, 0xB9520AFF, 1.673, CapRound, JoinMiter, -1),
+    CostumePart(Pumpkin, false, "M14 58C26 65 74 65 86 58", 0x00000000, 0x5A2304FF, 2.092, CapRound, JoinMiter, -1),
+    CostumePart(Pumpkin, false, "M27 74.8L36 68.5L41 76.2ZM73 74.8L64 68.5L59 76.2Z", 0x00000000, 0x6B2C04FF, 1.255, CapButt, JoinRound, 7),
+    CostumePart(Pumpkin, false, "M24 82.5C36 93 64 93 76 82.5L69 84.6L65 81.8L59 86.7L54 83.2L50 87.4L46 83.2L41 86.7L35 81.8L31 84.6Z", 0x00000000, 0x6B2C04FF, 1.255, CapButt, JoinRound, 8),
+    CostumePart(PartyHat, false, "M28 94L50 16L72 94C58 99 42 99 28 94Z", 0x00000000, 0x173F7AFF, 2.0, CapButt, JoinRound, 9),
+    CostumePart(PartyHat, false, "M46 40C46 42.209 47.791 44 50 44C52.209 44 54 42.209 54 40C54 37.791 52.209 36 50 36C47.791 36 46 37.791 46 40Z", 0xFFD23FFF, 0x00000000, 1.0, CapButt, JoinMiter, -1),
+    CostumePart(PartyHat, false, "M38 62C38 64.209 39.791 66 42 66C44.209 66 46 64.209 46 62C46 59.791 44.209 58 42 58C39.791 58 38 59.791 38 62Z", 0xFF5D8FFF, 0x00000000, 1.0, CapButt, JoinMiter, -1),
+    CostumePart(PartyHat, false, "M54 66C54 68.209 55.791 70 58 70C60.209 70 62 68.209 62 66C62 63.791 60.209 62 58 62C55.791 62 54 63.791 54 66Z", 0xFFD23FFF, 0x00000000, 1.0, CapButt, JoinMiter, -1),
+    CostumePart(PartyHat, false, "M43 84C43 86.209 44.791 88 47 88C49.209 88 51 86.209 51 84C51 81.791 49.209 80 47 80C44.791 80 43 81.791 43 84Z", 0x7EE081FF, 0x00000000, 1.0, CapButt, JoinMiter, -1),
+    CostumePart(PartyHat, false, "M58.5 86C58.5 87.933 60.067 89.5 62 89.5C63.933 89.5 65.5 87.933 65.5 86C65.5 84.067 63.933 82.5 62 82.5C60.067 82.5 58.5 84.067 58.5 86Z", 0xFF5D8FFF, 0x00000000, 1.0, CapButt, JoinMiter, -1),
+    CostumePart(PartyHat, false, "M32.5 86C32.5 87.933 34.067 89.5 36 89.5C37.933 89.5 39.5 87.933 39.5 86C39.5 84.067 37.933 82.5 36 82.5C34.067 82.5 32.5 84.067 32.5 86Z", 0xFFD23FFF, 0x00000000, 1.0, CapButt, JoinMiter, -1),
+    CostumePart(PartyHat, false, "M43 13C43 16.866 46.134 20 50 20C53.866 20 57 16.866 57 13C57 9.134 53.866 6 50 6C46.134 6 43 9.134 43 13Z", 0xFF5D8FFF, 0x9C1F4AFF, 1.5, CapButt, JoinMiter, -1),
+]

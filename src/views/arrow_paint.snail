@@ -1,0 +1,81 @@
+use src/theme/theme
+use src/views/board_palette
+
+enum ArrowKind: u8
+    WhiteMove
+    BlackMove
+    WhiteLine
+    BlackLine
+    AgreedMove
+
+const ArrowKinds = 5
+const ArrowKindWords = ["white_move", "black_move", "white_line", "black_line", "agreed"]
+const ArrowKindLabels = ["White's move", "Black's move", "White's predicted reply", "Black's predicted reply", "Matching predictions"]
+const ArrowKindNotes = ["The White engine's current best move.", "The Black engine's current best move.", "Black's reply predicted by White's engine in its last search.", "White's reply predicted by Black's engine in its last search.", "Show a single arrow when the current engine's best move matches the other engine's prediction."]
+const ArrowOpacities = [0.85, 0.85, 0.6, 0.6, 0.9]
+
+const ArrowSwatches = [0x2F7BE0, 0x46B3E6, 0x22A39A, 0x3DAA4F, 0x9BC53D, 0xE8C547, 0xF08C2E, 0xD9443A, 0xE05C9E, 0x8A5CD6, 0xF2F2F2, 0x3A3D44]
+
+const WhiteHue = 0x2F7BE0
+const BlackHue = 0xF08C2E
+const AgreeHue = 0x3DAA4F
+
+fn arrow_default(kind: ArrowKind, c: BoardColors, theme: *GuiTheme) -> Color
+    var base = Color.hex(WhiteHue)
+    if kind == BlackMove or kind == BlackLine: base = Color.hex(BlackHue)
+    if kind == AgreedMove
+        let a = theme.accent
+        let h = hue_of(a)
+        let apart = hue_gap(h, hue_of(Color.hex(WhiteHue))) > 40.0 and hue_gap(h, hue_of(Color.hex(BlackHue))) > 40.0
+        base = apart and saturation_of(a) > 0.25 ? a : Color.hex(AgreeHue)
+    let board = c.dark
+    if saturation_of(board) > 0.18
+        let h = hue_of(base)
+        let gap = hue_turn(h, hue_of(board))
+        if abs(gap) < 35.0: base = with_hue(base, h + (gap >= 0.0 ? 45.0 : -45.0))
+    if kind == WhiteLine or kind == BlackLine: base = base.lerp(Color.hex(0xFFFFFF), 0.35)
+    return Color(base.r, base.g, base.b, 1.0)
+
+fn hex_of(c: Color) -> u32
+    let r = (clamp(c.r, 0.0, 1.0) * 255.0 + 0.5) as u32
+    let g = (clamp(c.g, 0.0, 1.0) * 255.0 + 0.5) as u32
+    let b = (clamp(c.b, 0.0, 1.0) * 255.0 + 0.5) as u32
+    return r << 16 | g << 8 | b
+
+fn hue_of(c: Color) -> f32
+    let hi = max(c.r, max(c.g, c.b))
+    let lo = min(c.r, min(c.g, c.b))
+    let d = hi - lo
+    if d < 0.0001: return 0.0
+    var h: f32 = 0.0
+    if hi == c.r: h = (c.g - c.b) / d
+    elif hi == c.g: h = 2.0 + (c.b - c.r) / d
+    else: h = 4.0 + (c.r - c.g) / d
+    h *= 60.0
+    return h < 0.0 ? h + 360.0 : h
+
+fn saturation_of(c: Color) -> f32
+    let hi = max(c.r, max(c.g, c.b))
+    let lo = min(c.r, min(c.g, c.b))
+    return hi > 0.0001 ? (hi - lo) / hi : 0.0
+
+fn hue_turn(a: f32, b: f32) -> f32
+    let d = a - b + 540.0
+    return d - floor(d / 360.0) * 360.0 - 180.0
+
+fn hue_gap(a: f32, b: f32) -> f32
+    return abs(hue_turn(a, b))
+
+fn with_hue(c: Color, hue: f32) -> Color
+    let hi = max(c.r, max(c.g, c.b))
+    let lo = min(c.r, min(c.g, c.b))
+    let h = (hue - floor(hue / 360.0) * 360.0) / 60.0
+    let x = 1.0 - abs(h - floor(h / 2.0) * 2.0 - 1.0)
+    let k = floor(h) as int
+    let a = lo + (hi - lo) * x
+    if k == 0: return Color(hi, a, lo, c.a)
+    if k == 1: return Color(a, hi, lo, c.a)
+    if k == 2: return Color(lo, hi, a, c.a)
+    if k == 3: return Color(lo, a, hi, c.a)
+    if k == 4: return Color(a, lo, hi, c.a)
+    return Color(hi, lo, a, c.a)

@@ -1,0 +1,117 @@
+use src/books/opening
+use src/game/pgn_read
+
+const MostErrorNotes = 5
+
+struct BookRead
+    openings: [..]u8
+    count: int
+    duplicates: int
+    errors: int
+    notes: [..]u8
+    short: int
+    beyond: int
+    stopped: bool
+    done: int
+    cancelled: int
+    keys: KeySet
+
+    fn add(start: *Board, moves: []Move, ops: str) -> bool
+        let end = opening_end(start, moves)
+        if not keys.add(end.key)
+            duplicates += 1
+            return false
+        write_opening(start, moves, ops, &openings)
+        openings.push('\n')
+        count += 1
+        return true
+
+    fn error(text: str)
+        errors += 1
+        if errors > MostErrorNotes: return
+        push_text(&notes, text)
+        notes.push('\n')
+
+    fn notes_text() -> str
+        return str(notes[0..notes.len])
+
+    fn clear()
+        openings.clear()
+        notes.clear()
+        keys.clear()
+        count = 0
+        duplicates = 0
+        errors = 0
+        short = 0
+        beyond = 0
+        stopped = false
+        atomic_store(&done, 0)
+        atomic_store(&cancelled, 0)
+
+    fn release()
+        openings.free()
+        notes.free()
+        keys.release()
+
+fn read_pgn_openings(text: str, plies: int, whole: bool, into: *BookRead)
+    var starts: [..]int
+    defer starts.free()
+    scan_pgn(text, &starts, 2000000000)
+    var game: Game
+    defer free_game(&game)
+    var moves: [..]Move
+    defer moves.free()
+    var line: [200]u8
+    for g in 0..starts.len
+        atomic_store(&into.done, g as int)
+        if atomic_load(&into.cancelled) != 0
+            into.stopped = true
+            return
+        let r = read_pgn(text, starts[g], &game)
+        moves.clear()
+        var n = game.nodes[0].first
+        while n != NoNode and moves.len < plies
+            moves.push(game.nodes[n].move)
+            n = game.nodes[n].first
+        let enough = moves.len as int >= plies
+        if not r.ok and not enough
+            into.error(format(&line, "Could not parse game {g + 1} at {r.bad[0..min(r.bad.len, 40)]}"))
+            continue
+        if moves.len == 0 or not whole and not enough
+            into.short += 1
+            continue
+        into.add(game.start_board(), moves[0..moves.len], "")
+    atomic_store(&into.done, starts.len as int)
+
+fn read_epd_openings(text: str, into: *BookRead)
+    var from = 0
+    var number = 0
+    var b: Board
+    var none: [..]Move
+    var line: [120]u8
+    for i in 0..text.len + 1
+        if i < text.len and text[i] != '\n': continue
+        let raw = trim(text[from..i])
+        from = i as int + 1
+        number += 1
+        atomic_store(&into.done, number)
+        if atomic_load(&into.cancelled) != 0
+            into.stopped = true
+            return
+        if raw.len == 0: continue
+        var w = UciWords(text: raw)
+        for k in 0..4
+            w.next()
+        var end = w.at
+        let fifth = w.next()
+        let sixth = w.next()
+        if is_digits(fifth) and is_digits(sixth): end = w.at
+        if not b.load_fen(raw[0..end])
+            into.error(format(&line, "Line {number} contains an invalid chess position."))
+            continue
+        into.add(&b, none[0..0], trim(raw[end..raw.len]))
+
+fn free_game(game: *Game)
+    game.nodes.free()
+    game.text.free()
+    game.tags.free()

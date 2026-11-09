@@ -1,0 +1,129 @@
+use src/app/workspace
+use src/tabs/game_cards
+
+const RunCardHeight: f32 = 354.0
+const RunRowHeight: f32 = 22.0
+const RunMovesShown = 8
+const RunModeTips = ["One line: the engine's best move each turn, played to the end.", "Every move for the first 2 plies, then each line played to the end.", "Every move for the first 3 plies, then each line played to the end."]
+
+extend Workspace
+    fn draw_contribute(app: *DesktopApp, look: *DesktopLook, theme: *GuiTheme, fonts: *GuiFonts, tab: *GuiTab, board_look: *BoardLook, choices: *EngineChoices, sharing: bool) -> bool
+        let ui = &app.ui
+        let (ax, ay, aw, ah) = work_area(ui)
+        let col_w = board_column(app, look, ax, ay, aw, ah)
+        let (px, py, pw, ph) = side_room(ui, ax, col_w)
+        let frame = backdrop_frame(board_look, min(col_w, ah))
+        let fit = board_place(0.0, 0.0, max(min(col_w - frame * 2.0, ah - frame * 2.0), 1.0), app.scale)
+        let size = fit.size
+        let slack = col_w - size
+        let board_x = ax + frame + max(slack - frame * 2.0, 0.0) * shift
+        if board_look.scene: tab.board.room = board_room(app, ax, col_w, TabRowHeight + CommandBarHeight)
+        else: draw_slack(app, ax, ay, col_w, size, slack, board_x)
+        let place = board_place(board_x, ay + frame, size, app.scale)
+        draw_backdrop_behind(app, board_look, ax, col_w, place)
+        board_look.sheet.prepare(&app.gpu, &app.ui_gpu, board_look.set, place.cell_px, board_look.costume)
+        let game = tab.game
+        let a = tab.analysis
+        engine_arrows(tab, board_look)
+        tab.board.by_hand = false
+        tab.board.hand_waits = false
+        tab.board.draw(app, board_look, game.board(), game.last_move(), place, tab.flipped, false)
+        var asked = false
+        let a_h = a ? min(tab.panel.height(ui, a, choices), max(ph * 0.4, 96.0)) : 0.0
+        if a: tab.panel.draw(app, board_look, a, choices, px, py, pw, a_h, tab.flipped)
+        ui.rect(px, py + a_h + WorkspaceGap * 0.5 - 0.5, pw, 1.0, look.line, 0.5)
+        let c_y = py + a_h + WorkspaceGap * 0.5
+        let c_h = min(RunCardHeight, max(ph - a_h - 120.0, 160.0))
+        if tab.run and run_card(app, theme, fonts, tab.run, a, game, sharing, px, c_y, pw, c_h): asked = true
+        let m_y = c_y + c_h
+        ui.rect(px, m_y - 0.5, pw, 1.0, look.line, 0.5)
+        tab.moves.fixed = true
+        report.update(game)
+        tab.moves.draw(app, look, theme, fonts, game, px, m_y, pw, max(py + ph - m_y, 1.0), &report)
+        return asked
+
+fn run_card(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, run: *ContributeRun, a: *EngineAnalysis, game: *Game, sharing: bool, x: f32, y: f32, w: f32, h: f32) -> bool
+    let ui = &app.ui
+    var asked = false
+    let heading = UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8)
+    let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    var line: [160]u8
+    let on = a and a.on
+    with ui.open(UiNode(name: "runcard", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(14.0, 10.0, 10.0, 10.0), gap: 8.0, clip: true))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.label("CONTRIBUTION RUN", heading)
+            let state = not on ? "PAUSED" : run.finished ? "DONE" : "RUNNING"
+            card_chip(ui, theme, fonts, state, not on ? theme.muted : run.finished ? theme.gain() : theme.accent)
+            ui.spacer()
+            ui.stepper("Depth", ref run.depth, 8, 60, UiNode(width: UiSize.fixed(150.0)))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            if ui.text_field("runstart", &run.start_text, "Starting position", UiNode(width: UiSize.grow(), height: UiSize.fixed(ControlHeight), padding: Vec4(9.0, 5.0, 9.0, 5.0))): run.start_typed = true
+            let field = ui.last_widget
+            ui.tooltip("FEN to start from. Leave empty for the starting position.")
+            if run.start_typed and (ui.editing != field or app.pointer.pressed(Enter))
+                run.start_typed = false
+                let before = run.start.key
+                run.start_bad = not run.start_from(trim(run.start_text.text()))
+                if not run.start_bad and run.start.key != before: game.reset(&run.start)
+            if run.start_bad: ui.label("Not a legal position", UiTextStyle(face: fonts.text, size: 12.0, color: theme.warn))
+            let mode = clamp(run.mode, RunBestLine, RunDeeper)
+            if ui.button(RunModeWords[mode], false, UiNode(name: "runmode", width: UiSize.fixed(ui.measure("Best line", note).x + 30.0), height: UiSize.fixed(ControlHeight))): run.set_mode((mode + 1) % 3)
+            ui.tooltip(RunModeTips[mode])
+        if not on: ui.paragraph(format(&line, "Turn on the engine to start. Each position is searched to depth {run.depth}, then the run moves on to the next."), note, UiNode(width: UiSize.grow()))
+        elif run.finished: ui.paragraph("Every line has played to its end. Start over to go again deeper or in another mode.", note, UiNode(width: UiSize.grow()))
+        else
+            let reached = a.lines_fresh() ? a.lines[0].depth : 0
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+                ui.label(run.evaluating ? format(&line, "Depth {reached} of {run.depth}") : "Finding the next position", UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink))
+                with ui.open(UiNode(name: "runbar", width: UiSize.grow(), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(3.0))))
+                    let share = clamp(reached as f32 / max(run.depth, 1) as f32, 0.0, 1.0)
+                    if share > 0.0: ui.leaf(UiNode(width: UiSize.part(share), height: UiSize.grow(), box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(3.0))))
+        with ui.open(UiNode(name: "runtiles", flow: FlowRow, width: UiSize.grow(), gap: 8.0))
+            var b1: [48]u8
+            var b2: [48]u8
+            var b3: [48]u8
+            stat_tile(ui, fonts, theme, "Evaluated", group_digits(run.evaluated as i64, &b1), "this run", theme.ink)
+            stat_tile(ui, fonts, theme, "Already known", group_digits(run.skipped as i64, &b2), "passed over", theme.ink)
+            stat_tile(ui, fonts, theme, "Waiting", group_digits(run.waiting() as i64, &b3), "positions", theme.ink)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            if sharing: ui.paragraph("Lines go to the cloud as each position is done.", note, UiNode(width: UiSize.grow()))
+            else
+                ui.paragraph("Sharing is off, so the lines stay on this computer.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn), UiNode(width: UiSize.grow()))
+                if ui.button("Opt in", true): asked = true
+        ui.label("RECENT", heading, UiNode(padding: Vec4(0.0, 2.0, 0.0, 0.0)))
+        with ui.open(UiNode(name: "runrecent", width: UiSize.grow(), height: UiSize.grow(), gap: 2.0, clip: true))
+            if run.recent.len == 0: ui.label("Positions appear here as they are done.", note)
+            var k = run.recent.len as int - 1
+            while k >= 0
+                run_row(ui, theme, fonts, run, &run.recent[k], k)
+                k -= 1
+    return asked
+
+fn run_row(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, run: *ContributeRun, d: *RunDone, k: int)
+    var eval: [24]u8
+    var depth: [16]u8
+    var moves: ShortText
+    run_moves(run, d.node, &moves)
+    with ui.open(UiNode(key: k, name: "runrow", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(RunRowHeight), padding: Vec4(8.0, 0.0, 8.0, 0.0), gap: 10.0, align: Vec2(0.0, 0.5), clip: true, box: UiBox(fill: UiFill.solid(k % 2 == 0 ? theme.sunken : theme.surface), radius: Vec4.splat(4.0))))
+        ui.label(score_text(d.kind, d.score, White, &eval), UiTextStyle(face: fonts.strong, size: 12.0, color: theme.ink), UiNode(width: UiSize.fixed(50.0)))
+        ui.label(d.node == 0 ? "Start" : moves.text(), UiTextStyle(face: fonts.text, size: 12.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+        ui.label(format(&depth, "d{d.depth}"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+
+fn run_moves(run: *ContributeRun, at: int, out: *ShortText)
+    let path = run.path_of(at)
+    let n = path.len as int
+    let from = max(n - RunMovesShown, 0)
+    var b = run.start
+    if from > 0: out.add_str("… ")
+    for k in 0..n
+        let m = run.nodes[path[k]].move
+        if k >= from
+            if b.side == White
+                out.add_int(b.fullmove)
+                out.add_str(". ")
+            elif k == from
+                out.add_int(b.fullmove)
+                out.add_str("... ")
+            write_san(&b, m, out)
+            out.add(' ')
+        b.play(m)

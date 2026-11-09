@@ -1,0 +1,232 @@
+use src/app/gui_app
+use src/database/db_fast_evals
+
+const FastEvalGames = 40
+
+extend GuiApp
+    fn start_fastchess()
+        fast_ext.install.begin(&data)
+        fast_ext.runs = &fast_runs
+        settings_page.fast = &fast_ext
+        profile_page.fast_history.runs = &fast_runs
+        var own: [1024]u8
+        let n = sn_fc_own_path(&own[0], 1024)
+        fast_runs.start(data.root_text(), str(own[0..n]))
+        var runs_buf: [720]u8
+        names_in(fast_runs.place.path("fastchess\\runs", &runs_buf), &fast_back)
+        if has_arg("--fast-go") and not fast_ext.start_match(&library): app.ui.toast("snailfast could not be started.")
+
+    fn run_fastchess()
+        if fast_ext.install.update(): app.redraw()
+        if fast_ext.open_len > 0: reopen_fast(fast_ext.take_open())
+        catch_up_fast()
+        if profile_page.fast_history.open_len > 0: reopen_fast(profile_page.fast_history.take_open())
+        let shown = tabs.current()
+        let watching = shown.kind == FastChess and shown.fast != null
+        fast_runs.set_gap(not watching ? FastQuietMs : shown.fast_view.eco ? FastEcoMs : FastWatchMs)
+        if not fast_runs.update(): return
+        for r in fast_runs.runs
+            if take_fast_evals(r): app.ui.wake_in(0.0)
+        for r in fast_runs.fresh
+            open_fast(r)
+        fast_runs.fresh.clear()
+        var titles = false
+        for i in 0..tabs.tabs.len
+            let t = &tabs.tabs[i]
+            if not t.fast: continue
+            let live = t.fast.running()
+            var title: [64]u8
+            let name = fast_tab_title(t.fast, &title)
+            if live != t.live or name != t.title_text(): titles = true
+            t.live = live
+            t.set_title(name)
+        if titles or watching: app.redraw()
+
+    fn catch_up_fast()
+        if not fast_back_open
+            if fast_back.len == 0: return
+            var end = 0
+            while end < fast_back.len and fast_back[end] != '\n'
+                end += 1
+            var name: [64]u8
+            let n = min(end, 63) as int
+            for k in 0..n
+                name[k] = fast_back[k]
+            let rest = min(end + 1, fast_back.len as int)
+            for k in rest..fast_back.len
+                fast_back[k - rest] = fast_back[k]
+            fast_back.resize(fast_back.len as int - rest)
+            app.ui.wake_in(0.0)
+            if n == 0 or fast_runs.run_named(str(name[0..n])): return
+            fast_back_run = FastRun()
+            if not fast_back_run.open(&fast_runs.place, str(name[0..n])) or fast_back_run.running()
+                fast_back_run.release()
+                return
+            fast_back_open = true
+        if take_fast_evals(&fast_back_run)
+            app.ui.wake_in(0.0)
+            return
+        fast_back_run.release()
+        fast_back_open = false
+        if fast_back.len > 0: app.ui.wake_in(0.0)
+
+    fn take_fast_evals(r: *FastRun) -> bool
+        if r.pgn.len == 0 or not recorder.open: return false
+        if not fast_names_found(r): return true
+        var mark: [760]u8
+        let mark_path = r.file("evals_taken.txt", &mark)
+        if r.evals_at < 0
+            var kept: [..]u8
+            defer kept.free()
+            r.evals_at = fast_read_whole(mark_path, &kept) ? max(parse_int(str(kept[0..kept.len])), 0) : 0
+        var p: [800]u8
+        let path = format(&p, "{str(r.pgn[0..r.pgn.len])}")
+        var info: SDL_PathInfo
+        if not SDL_GetPathInfo(path.ptr as cstr, &info): return false
+        let size = info.size as i64
+        if size <= r.evals_at: return false
+        let io = SDL_IOFromFile(path.ptr as cstr, "rb")
+        if not io: return false
+        var bytes: [..]u8
+        defer bytes.free()
+        bytes.resize((size - r.evals_at) as int)
+        SDL_SeekIO(io, r.evals_at, SDL_IO_SEEK_SET)
+        let got = SDL_ReadIO(io, bytes.ptr, bytes.len as u64) as int
+        SDL_CloseIO(io)
+        if got <= 0: return false
+        let text = str(bytes[0..got])
+        var cut = got
+        if r.running()
+            cut = 0
+            var i = got - 8
+            while i > 0
+                if text[i] == '\n' and text[i + 1..i + 8] == "[Event "
+                    cut = i + 1
+                    break
+                i -= 1
+        if cut == 0: return false
+        let (kept, reach) = db_fast_evals(&recorder, text[0..cut], FastEvalGames, str(r.uci_names[0..r.uci_names.len]))
+        if reach <= 0: return false
+        r.evals_at += reach as i64
+        var n: [32]u8
+        fast_save_whole(mark_path, format(&n, "{r.evals_at}"))
+        return reach < cut
+
+    fn fast_names_found(r: *FastRun) -> bool
+        if r.names_ready: return true
+        var buf: [760]u8
+        let file = r.file("engine_names.txt", &buf)
+        if not r.names_read
+            r.names_read = true
+            r.uci_names.clear()
+            fast_read_whole(file, &r.uci_names)
+        var typed: [..]FastTyped
+        defer typed.free()
+        fast_typed_engines(str(r.typed[0..r.typed.len]), str(r.cwd[0..r.cwd.len]), &typed)
+        var p: [600]u8
+        for t in typed
+            let label = t.label_text()
+            if label.len == 0: continue
+            if db_uci_name(str(r.uci_names[0..r.uci_names.len]), label).ptr != label.ptr: continue
+            var named = ""
+            for e in library.entries
+                if e.probed and same_path(library.exe_path(e.id, &p), t.cmd_text()): named = e.display_name()
+            if named.len == 0
+                if fast_probing and fast_probe_for != r: return false
+                if not fast_probing
+                    fast_probe = EngineProbe()
+                    fast_probe.start(t.cmd_text(), folder_of(t.cmd_text()))
+                    fast_probing = true
+                    fast_probe_for = r
+                if fast_probe.state == ProbeRunning
+                    fast_probe.update(&app)
+                    if fast_probe.state == ProbeRunning: return false
+                let e = &fast_probe.engine
+                named = fast_probe.state == ProbeDone and e.name_len > 0 ? str(e.name[0..e.name_len]) : label
+            push_text(&r.uci_names, label)
+            r.uci_names.push('\t')
+            push_text(&r.uci_names, named)
+            r.uci_names.push('\n')
+            if fast_probing and fast_probe_for == r
+                fast_probe.release()
+                fast_probing = false
+                fast_probe_for = null
+        r.names_ready = true
+        fast_save_whole(file, str(r.uci_names[0..r.uci_names.len]))
+        return true
+
+    fn continue_fast(t: *GuiTab)
+        let r = t.fast
+        if not r or not r.can_continue(): return
+        var exe_buf: [720]u8
+        var config_buf: [760]u8
+        let exe = fast_runs.place.path("fastchess\\bin\\snailfast.exe", &exe_buf)
+        let config = r.file("config.json", &config_buf)
+        var line: [1800]u8
+        let command = format(&line, "\"{exe}\" -config \"file={config}\" \"outname={config}\"")
+        let cwd = str(r.cwd[0..r.cwd.len])
+        let folder = r.folder_text()
+        if sn_fc_launch(command.ptr, command.len as int, cwd.ptr, cwd.len as int, 1) == 0 and sn_fc_launch(command.ptr, command.len as int, folder.ptr, folder.len as int, 1) == 0
+            app.ui.toast("snailfast could not be started.")
+            return
+        r.continuing = true
+        r.continue_ms = sn_fc_now_ms()
+        app.redraw()
+
+    fn show_fast_eco(t: *GuiTab, on: bool)
+        t.fast_view.eco = on
+        fast_runs.set_eco_default(on)
+        app.redraw()
+
+    fn open_fast(r: *FastRun)
+        let from = tabs.current()
+        let keep = from.kind == Play and from.play and from.play.state == PlayRunning or from.kind == Lichess
+        let from_id = from.id
+        tabs.open(FastChess)
+        let t = tabs.current()
+        t.fast = r
+        t.live = r.running()
+        t.fast_view.eco = fast_runs.eco_default()
+        t.fast_view.panel = clamp(arg_int("--fast-panel", 0), 0, 3)
+        var title: [64]u8
+        t.set_title(fast_tab_title(r, &title))
+        if keep
+            for i in 0..tabs.tabs.len
+                if tabs.tabs[i].id == from_id: tabs.active = i as int
+
+    fn reopen_fast(id: str)
+        let r = fast_runs.reopen(id)
+        if not r
+            app.ui.toast("That run could not be read.")
+            return
+        for i in 0..tabs.tabs.len
+            if tabs.tabs[i].fast == r
+                tabs.active = i as int
+                return
+        open_fast(r)
+        app.redraw()
+
+    fn tab_lock(t: *GuiTab) -> str
+        if t.fast and t.fast.running(): return "Stop the fastchess run first, or let it finish."
+        if t.event and (t.event.state == EventRunning or t.event.state == EventPausing): return "Pause or stop the tournament first."
+        if t.play and t.play.state == PlayRunning: return "Finish or resign the game first."
+        return ""
+
+    fn close_fast(t: *GuiTab)
+        if not t.fast: return
+        if not t.fast.running(): fast_runs.forget(t.fast)
+        t.fast = null
+        t.fast_view.release()
+
+    fn release_fastchess()
+        for t in tabs.tabs
+            t.fast_view.release()
+        fast_runs.release()
+        fast_ext.release()
+
+fn fast_tab_title(r: *FastRun, buf: *[64]u8) -> str
+    let a = &r.args
+    let kind = a.sprt ? "SPRT" : "Match"
+    if a.engines == 2 and a.first_len > 0 and a.second_len > 0: return format(buf, "{kind} {a.first_name()} vs {a.second_name()}")
+    if a.engines > 2: return format(buf, "fastchess, {a.engines} engines")
+    return format(buf, "fastchess")

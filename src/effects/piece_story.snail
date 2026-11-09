@@ -1,0 +1,117 @@
+use src/game/game
+
+const MossFromMoves: f32 = 12.0
+const MossFullMoves: f32 = 30.0
+const KingWorth = 4
+const StoryReach = 1024
+
+struct PieceStory
+    node: int = -1
+    key: u64
+    ready: bool
+    moss: [64]f32
+    heat: [64]f32
+    ids: [64]int
+
+    fn follow(g: *Game)
+        ready = true
+        let b = g.board()
+        if g.at == node and b.key == key: return
+        node = g.at
+        key = b.key
+        var chain: [StoryReach]int
+        var n = 0
+        var at = g.at
+        while at != NoNode and n < StoryReach
+            chain[n] = at
+            n += 1
+            at = g.nodes[at].parent
+        var held: [64]int
+        var won: [64]int
+        var moved: [64]int
+        let first = &g.nodes[chain[n - 1]].board
+        for sq in 0..64
+            held[sq] = first.squares[sq as Square] == NoPiece ? -1 : sq as int
+            won[sq] = 0
+            moved[sq] = 0
+        for k in 1..n
+            let ply = k as int
+            let i = chain[n - 1 - k]
+            let m = g.nodes[i].move
+            let before = &g.nodes[g.nodes[i].parent].board
+            let after = &g.nodes[i].board
+            let mover = held[m.from as int]
+            if m.is_capture()
+                var taken = m.to
+                if m.kind == EnPassant: taken = (m.from.rank as int * 8 + m.to.file as int) as Square
+                let victim = before.squares[taken]
+                if mover >= 0 and victim != NoPiece: won[mover] += story_worth(victim.kind())
+                held[taken as int] = -1
+            if m.is_castle()
+                let side = before.squares[m.from].side()
+                let rook = Piece.of(side, Rook)
+                let king_to = after.king_square(side)
+                var rook_from = -1
+                var rook_to = -1
+                let row = m.from.rank as int * 8
+                for f in 0..8
+                    let s = (row + f as int) as Square
+                    if before.squares[s] == rook and after.squares[s] != rook: rook_from = s as int
+                    if after.squares[s] == rook and before.squares[s] != rook: rook_to = s as int
+                held[m.from as int] = -1
+                if rook_from >= 0 and rook_to >= 0
+                    let r = held[rook_from]
+                    held[rook_from] = -1
+                    held[rook_to] = r
+                    if r >= 0: moved[r] = ply
+                held[king_to as int] = mover
+            else
+                held[m.from as int] = -1
+                held[m.to as int] = mover
+            if mover >= 0: moved[mover] = ply
+        let last = (n - 1) as int
+        for sq in 0..64
+            moss[sq] = 0.0
+            heat[sq] = 0.0
+            let piece = b.squares[sq as Square]
+            let id = held[sq]
+            self.ids[sq] = id
+            if piece == NoPiece or id < 0: continue
+            let worth = story_worth(piece.kind())
+            if won[id] > worth: heat[sq] = clamp(0.45 + 0.55 * (won[id] - worth) as f32 / (worth + 1) as f32, 0.45, 1.0)
+            let still = (last - moved[id]) as f32 * 0.5
+            moss[sq] = clamp((still - MossFromMoves) / (MossFullMoves - MossFromMoves), 0.0, 1.0)
+
+fn story_worth(kind: Kind) -> int
+    match kind
+        Pawn: return 1
+        Knight, Bishop: return 3
+        Rook: return 5
+        Queen: return 9
+        King: return KingWorth
+    return 0
+
+struct TakenMark
+    move: Move
+    played: bool
+    slid: bool
+    piece: Piece
+    at: Square = Square.none
+
+    fn note(was: *[64]Piece, board: *Board, last: Move)
+        move = last
+        played = false
+        slid = false
+        piece = NoPiece
+        at = Square.none
+        if last == NoMove: return
+        let mover = was[last.from as int]
+        let now = board.squares[last.to]
+        if mover == NoPiece or now == NoPiece or board.squares[last.from] != NoPiece and not last.is_castle(): return
+        if now != mover and not (last.is_promotion() and now.side() == mover.side()) and not last.is_castle(): return
+        played = true
+        if not last.is_capture(): return
+        var taken = last.to
+        if last.kind == EnPassant: taken = (last.from.rank as int * 8 + last.to.file as int) as Square
+        piece = was[taken as int]
+        at = taken

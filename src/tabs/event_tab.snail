@@ -1,0 +1,584 @@
+use src/tournament/resources
+use src/views/standing_mark
+use src/views/moves_panel
+use src/views/fact_row
+use src/views/telemetry_graph
+use src/views/list_rows
+
+const EventPanelNames = ["Moves", "Standings", "Games", "Details"]
+const EventEndLabels = ["In progress", "Checkmate", "Stalemate", "Threefold repetition", "Fifty-move rule", "Dead position", "Time forfeit", "Time expired; no possible mate", "Resignation", "Draw by agreement", "Engine failure", "Illegal move", "Abandoned", "Adjudicated win", "Adjudicated draw", "Illegal move; no possible mate"]
+const EventRowsLeast: f32 = 400.0
+const EventLead: f32 = 66.0
+const StandingFigures: f32 = 296.0
+const RowBarWidth: f32 = 110.0
+const LiveFigures: f32 = 180.0
+const PeekBoard: f32 = 248.0
+const PeekBar: f32 = 10.0
+const ScoreCardWidth: f32 = 300.0
+const PopCurve: f32 = 6.0
+
+struct PvText
+    text: [..]u8
+    player: *EnginePlayer
+    made_for: u64
+    skipped: bool
+
+    fn of(p: *EnginePlayer, skip_first: bool, most: int) -> str
+        if p == player and p.version == made_for and skip_first == skipped: return str(text[0..text.len])
+        player = p
+        made_for = p.version
+        skipped = skip_first
+        text.clear()
+        var b = p.board
+        let from = skip_first ? 1 : 0
+        for k in 0..min(p.pv_count, from + most)
+            if k >= from
+                var t: ShortText
+                if b.side == White
+                    t.add_int(b.fullmove)
+                    t.add_str(". ")
+                elif k == from
+                    t.add_int(b.fullmove)
+                    t.add_str("... ")
+                write_san(&b, p.pv[k], &t)
+                if text.len > 0: text.push(' ')
+                push_text(&text, t.text())
+            b.play(p.pv[k])
+        return str(text[0..text.len])
+
+    fn release()
+        text.free()
+
+struct EventView
+    focus: int
+    watched: int
+    panel: int
+    stopping: bool
+    open_game: int = -1
+    mover_pv: PvText
+    graph: *TelemetryGraph
+    play_found: bool
+    peek_slot: int = -1
+    peek_entrant: int = -1
+    peek_y: f32
+    live: [..]int
+    clip: [..]u8
+
+    fn focused(r: *EventRunner) -> *GameSlot
+        watch(r)
+        focus = clamp(focus, 0, max(r.slots.len as int - 1, 0))
+        return r.slots[focus]
+
+    fn watch(r: *EventRunner)
+        if watched < 0: return
+        var theirs = -1
+        var first = -1
+        for n in 0..r.slots.len
+            let s = r.slots[n]
+            if not s.busy(): continue
+            let g = r.schedule[s.index]
+            let plays = g.white == watched or g.black == watched
+            if plays and n as int == focus: return
+            if plays and (theirs < 0 or s.index < r.slots[theirs].index): theirs = n as int
+            if first < 0 or s.index < r.slots[first].index: first = n as int
+        let shown = focus >= 0 and focus < r.slots.len and r.slots[focus].busy()
+        if theirs >= 0: focus = theirs
+        elif first >= 0 and not shown: focus = first
+
+    fn draw_cards(app: *DesktopApp, look: *BoardLook, r: *EventRunner, s: *GameSlot, x: f32, top_y: f32, bottom_y: f32, w: f32, flipped: bool, handing: bool)
+        if not handing and look.cards_on_table(): return
+        let now = now_ns()
+        let top = flipped ? White : Black
+        for (side, y, id) in [(top, top_y, "topcard"), (top.other(), bottom_y, "bottomcard")]
+            var clock: [24]u8
+            var search: [120]u8
+            var eval: [24]u8
+            var c: CardText
+            c.side = side
+            c.name = s.busy() or s.game.nodes.len > 1 ? s.name_of(side) : "Waiting for a game"
+            let p = &s.seat_of(side).player
+            c.version = p.engine.name_len > 0 and p.engine.display_name() != c.name ? p.engine.display_name() : ""
+            c.to_move = s.busy() and s.clock.side == side
+            c.running = c.to_move and s.clock.running
+            if p.heard.depth > 0: c.search = search_text(&p.heard, &search)
+            elif s.busy(): c.search = c.to_move ? "Thinking" : "Waiting"
+            if p.score_kind != NoScore: c.eval = score_text(p.score_kind, p.score, side, &eval)
+            if s.clock.timed() and (s.busy() or s.game.nodes.len > 1)
+                let left = s.clock.left_ns(side, now)
+                c.clock = clock_text(left, &clock)
+                let whole = s.clock.control.kind == TimePerMove ? s.clock.control.move_ms : s.clock.control.base_ms
+                c.gauge = left as f32 / max(whole as f32 * 1.0e6, 1.0)
+            if handing
+                if look.desk_clock
+                    look.scene.desk.clock.set(side, c.clock)
+                    look.scene.desk.clock.on = c.clock.len > 0
+                    c.clock = ""
+                if look.desk_cards: look.scene.desk.card(side).keep(&c, "")
+            else: draw_engine_card(&app.ui, look.theme, look.fonts, id, x, y, w, &c)
+        if handing: look.scene.desk.clock.up = s.clock.side
+        let wait = s.clock.next_change_s(now)
+        if s.busy() and wait >= 0.0: app.wake_in(wait)
+
+    fn draw_mover(app: *DesktopApp, look: *BoardLook, s: *GameSlot, x: f32, y: f32, w: f32, h: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        if w < 1.0 or h < 1.0: return
+        let small = UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted)
+        with ui.open(UiNode(name: "mover", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(14.0, 10.0, 14.0, 10.0), gap: 6.0, clip: true))
+            if not s.busy()
+                ui.paragraph("No game is being played here.", small)
+                return
+            let side = s.clock.side
+            let p = &s.seat_of(side).player
+            var title: [120]u8
+            var eval: [24]u8
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+                let shown = p.score_kind != NoScore ? score_text(p.score_kind, p.score, side, &eval) : "–"
+                ui.label(shown, UiTextStyle(face: fonts.strong, size: 19.0, color: theme.ink))
+                ui.label(format(&title, "{s.name_of(side)} to move"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+            var facts: [160]u8
+            var speed: [32]u8
+            let n = &p.heard
+            let hash = n.hashfull >= 0 ? n.hashfull / 10 : 0
+            var depth: [24]u8
+            ui.label(format(&facts, "{depth_text(n, &depth)}   {speed_text(n.nps, &speed)}   {n.nodes} nodes   hash {hash}%   tb {n.tbhits}"), small)
+            ui.paragraph(mover_pv.of(p, false, MaxPvMoves), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+
+    fn draw_panel(app: *DesktopApp, look: *DesktopLook, board_look: *BoardLook, r: *EventRunner, lib: *EngineLibrary, moves: *MovesPanel, x: f32, y: f32, w: f32, h: f32)
+        let ui = &app.ui
+        let theme = board_look.theme
+        let fonts = board_look.fonts
+        if w < 1.0 or h < 40.0: return
+        with ui.open(UiNode(name: "eventtabs", floating: true, offset: Vec2(x + 4.0, y), height: UiSize.fixed(34.0)))
+            ui.tabs("eventpanel", ref panel, EventPanelNames)
+        let top = y + 38.0
+        let rest = h - 38.0
+        if r.waiting_for_book()
+            with ui.open(UiNode(name: "eventbooking", floating: true, offset: Vec2(x, top), width: UiSize.fixed(w), height: UiSize.fixed(rest), padding: Vec4(12.0, 8.0, 12.0, 8.0), gap: 6.0, clip: true))
+                booking(ui, board_look, r)
+            return
+        if panel == 0
+            let s = focused(r)
+            moves.fixed = true
+            moves.draw(app, look, theme, fonts, &s.game, x, top, w, rest)
+            return
+        peek_slot = -1
+        peek_entrant = -1
+        with ui.open(UiNode(name: "eventpanelbody", floating: true, offset: Vec2(x, top), width: UiSize.fixed(w), height: UiSize.fixed(rest), padding: Vec4(12.0, 8.0, 12.0, 8.0), gap: 4.0, clip: true))
+            match panel
+                1: standings(app, board_look, r, w - 24.0)
+                2: games(app, board_look, r, w - 24.0)
+                else: details(app, board_look, r, lib)
+        if peek_slot >= 0 and peek_slot < r.slots.len: peek_game(app, board_look, r.slots[peek_slot], x - 12.0)
+        if peek_entrant >= 0: score_card(app, board_look, r, peek_entrant, x - 12.0)
+
+    fn booking(ui: *UiCanvas, look: *BoardLook, r: *EventRunner)
+        let theme = look.theme
+        let fonts = look.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let warn = UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn)
+        let c = &r.config
+        var line: [400]u8
+        ui.label("Generating consensus book", UiTextStyle(face: fonts.strong, size: 14.0, color: theme.ink))
+        let m = r.book_maker
+        if not m
+            ui.paragraph("The consensus book is no longer in your library, so generation cannot continue. Stop the tournament.", warn)
+            return
+        let wanted = m.book.wanted
+        fact(ui, fonts, theme, "Accepted", format(&line, "{m.accepted} of {wanted}"))
+        fact(ui, fonts, theme, "Rejected", format(&line, "{m.rejected}"))
+        fact(ui, fonts, theme, "Pending", format(&line, "{max(wanted - m.accepted, 0)}"))
+        for i in 0..min(c.entrants.len, m.checks.len)
+            fact(ui, fonts, theme, c.entrants[i].name_text(), format(&line, "{m.checks[i]} evaluations · {m.agreed[i]} within range"))
+        if m.state == MakerRunning
+            ui.paragraph(format(&line, "{c.entrants[m.by].name_text()} is generating opening {m.accepted + 1} for {m.target == White ? "White" : "Black"} · Attempt {m.tries + 1}"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+        elif m.state == MakerShort
+            ui.paragraph(format(&line, "No line passed all engine evaluations for opening {m.accepted + 1} after {m.book.tries} attempts. Generation cannot finish with the current evaluation range. Start with the openings found so far, or stop the tournament."), warn)
+            if m.accepted > 0 and ui.button(format(&line, "Start with {m.accepted} openings")): play_found = true
+        elif m.state == MakerFailed: ui.paragraph(m.failure_text(), warn)
+        else: ui.paragraph("Paused. Resume will continue generating the current opening.", note)
+        let needed = openings_needed(c)
+        if needed < c.entrants.len: ui.paragraph(format(&line, "Only {needed} opening{needed == 1 ? "" : "s"} needed for {c.entrants.len} engines; some engines will not generate an opening this cycle. Use at least {c.entrants.len * 2} games per pairing for every engine to contribute."), note)
+        if m.last.len > 0: ui.paragraph(str(m.last[0..m.last.len]), UiTextStyle(face: fonts.mono, size: 11.0, color: theme.muted))
+
+    fn standings(app: *DesktopApp, look: *BoardLook, r: *EventRunner, width: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let st = &r.standings
+        with list = row_list(ui, theme, fonts, "standingrows", 0, st.order.len as int, width, EventRowsLeast, StandingFigures, false, EventLead)
+            for place in list.first()..list.last()
+                let i = st.order[place]
+                let t = &st.tallies[i]
+                var score: [32]u8
+                var games: [16]u8
+                var wdl: [48]u8
+                var elo: [48]u8
+                var number: [8]u8
+                with list.row(place, i, i == watched)
+                    with list.middle()
+                        ui.label(r.config.entrants[i].name_text(), UiTextStyle(face: fonts.strong, size: 13.5, color: theme.ink))
+                        form_strip(ui, look, st, i)
+                    lead_tile(&list, look, r, place as int, format(&number, "{place + 1}"))
+                    with list.actions()
+                        figure(ui, look, format(&wdl, "+{t.wins} ={t.draws} −{t.losses}"), "W · D · L", 96.0, false)
+                        figure(ui, look, t.games() > 0 ? estimate_games(t).text(&elo) : "–", "ELO", 110.0, false)
+                        figure(ui, look, format(&score, "{t.points():.1}"), format(&games, "OF {t.games()}"), 58.0, true)
+                if list.hovered
+                    peek_entrant = i
+                    peek_y = app.pointer.mouse.y
+                    app.cursor = SDL_SYSTEM_CURSOR_POINTER
+                if list.clicked: watched = i
+
+    fn lead_tile(list: *RowList, look: *BoardLook, r: *EventRunner, place: int, number: str)
+        let theme = look.theme
+        let t = &r.standings.tallies[r.standings.order[place]]
+        let tint = place == 0 and t.games() > 0 ? theme.accent : theme.muted
+        list.lead_in(number, "", tint, standing_box(look, r, place, tint.with_alpha(theme.dark ? 0.16 : 0.11), 6.0))
+
+    fn form_strip(ui: *UiCanvas, look: *BoardLook, st: *Standings, i: int)
+        let theme = look.theme
+        let shown = min(st.tallies[i].games(), 10)
+        if shown == 0
+            ui.label("No games yet", UiTextStyle(face: look.fonts.text, size: 12.0, color: theme.muted))
+            return
+        with ui.open(UiNode(name: "form", flow: FlowRow, gap: 3.0, align: Vec2(0.0, 0.5), height: UiSize.fixed(14.0)))
+            for k in 0..shown
+                let result = st.recent(i, shown - 1 - k as int)
+                let c = result == 3 ? theme.gain() : result == 1 ? theme.loss() : theme.muted.with_alpha(0.55)
+                ui.leaf(UiNode(key: k, width: UiSize.fixed(8.0), height: UiSize.fixed(8.0), box: UiBox(fill: UiFill.solid(c), radius: Vec4.splat(2.0))))
+
+    fn figure(ui: *UiCanvas, look: *BoardLook, value: str, caption: str, width: f32, big: bool)
+        let theme = look.theme
+        let fonts = look.fonts
+        with ui.open(UiNode(name: caption, width: UiSize.fixed(width), gap: 2.0, align: Vec2(1.0, 0.5)))
+            ui.label(value, UiTextStyle(face: big ? fonts.strong : fonts.text, size: big ? 17.0 : 13.0, color: theme.ink))
+            ui.label(caption, UiTextStyle(face: fonts.strong, size: 9.5, color: theme.muted, tracking: 0.6))
+
+    fn score_card(app: *DesktopApp, look: *BoardLook, r: *EventRunner, i: int, right: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let st = &r.standings
+        let t = &st.tallies[i]
+        let n = st.n
+        let rows = n - 1
+        let tall = 112.0 + rows as f32 * 26.0 + (n == 2 ? 44.0 : 0.0)
+        let x = max(right - ScoreCardWidth, 8.0)
+        let y = clamp(peek_y - 40.0, 8.0, max(ui.height - tall - 8.0, 8.0))
+        let muted = UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted)
+        let ink = UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink)
+        let strong = UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink)
+        var line: [160]u8
+        var elo: [48]u8
+        with ui.open(UiNode(name: "scorecard", floating: true, layer: 7, offset: Vec2(x, y), width: UiSize.fixed(ScoreCardWidth), padding: Vec4(16.0, 14.0, 16.0, 14.0), gap: 4.0, box: UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(PopCurve), border: 1.0, border_color: theme.line, shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.3), 0.0, 8.0, 24.0, 0.0, false))))
+            let place = standing_place(r, i)
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                ui.label(r.config.entrants[i].name_text(), UiTextStyle(face: fonts.strong, size: 14.5, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+                ui.label(format(&line, "{t.points():.1} / {t.games()}"), UiTextStyle(face: fonts.strong, size: 14.5, color: theme.ink))
+            let s = st.streak(i)
+            let run = s >= 2 ? format(&elo, "  ·  {s} wins in a row") : s <= -2 ? format(&elo, "  ·  {-s} losses in a row") : ""
+            ui.label(format(&line, "Place {place + 1} of {n}  ·  +{t.wins} ={t.draws} −{t.losses}{run}"), muted)
+            var by_games: [48]u8
+            ui.label(format(&line, "Elo {t.games() > 0 ? estimate_games(t).text(&by_games) : "–"}  ·  SB {st.tiebreak[i]:.2}"), muted)
+            pop_rule(ui, theme)
+            ui.label("AGAINST", UiTextStyle(face: fonts.strong, size: 9.5, color: theme.muted, tracking: 0.6))
+            for k in 0..n
+                let j = st.order[k]
+                if j == i: continue
+                let a = st.against(i, j)
+                var points: [32]u8
+                with ui.open(UiNode(key: j, flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(22.0), gap: 8.0, align: Vec2(0.0, 0.5)))
+                    ui.label(r.config.entrants[j].name_text(), ink, UiNode(width: UiSize.grow(), clip: true))
+                    if a.games() > 0
+                        ui.label(format(&points, "+{a.wins} ={a.draws} −{a.losses}"), muted)
+                        ui.label(format(&line, "{a.points():.1} / {a.games()}"), strong, UiNode(width: UiSize.fixed(64.0), align: Vec2(1.0, 0.5)))
+                    else: ui.label("Not played", muted)
+            if n == 2
+                let g = estimate_games(t)
+                var by_pairs: [48]u8
+                pop_rule(ui, theme)
+                ui.label(format(&line, "LOS {g.los * 100.0:.1}%  ·  Paired Elo {estimate_pairs(t).text(&by_pairs)}"), muted)
+                ui.label(format(&line, "Pair scores 0 / ½ / 1 / 1½ / 2:  {t.pairs[0]} / {t.pairs[1]} / {t.pairs[2]} / {t.pairs[3]} / {t.pairs[4]}"), muted)
+
+    fn games(app: *DesktopApp, look: *BoardLook, r: *EventRunner, width: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        live.clear()
+        for n in 0..r.slots.len
+            if not r.slots[n].busy(): continue
+            live.push(n as int)
+            var j = live.len as int - 1
+            while j > 0 and r.slots[live[j]].index < r.slots[live[j - 1]].index
+                let t = live[j]
+                live[j] = live[j - 1]
+                live[j - 1] = t
+                j -= 1
+        with list = row_list(ui, theme, fonts, "eventgames", 0, r.schedule.len as int, width, EventRowsLeast, LiveFigures, false, EventLead)
+            for k in list.first()..list.last()
+                var slot = -1
+                var i = k as int - live.len as int
+                if k as int < live.len as int
+                    slot = live[k]
+                    i = r.slots[slot].index
+                else
+                    for n in live
+                        if r.slots[n].index <= i: i += 1
+                let g = r.schedule[i]
+                let rec = r.records[i]
+                var line: [120]u8
+                var end: [48]u8
+                var moved: [24]u8
+                with list.row(k as int, i, slot == focus and slot >= 0)
+                    with list.middle()
+                        with list.line()
+                            player_tag(ui, theme, fonts, 0, r.config.entrants[g.white].name_text(), 0, true)
+                            versus(ui, theme, fonts)
+                            player_tag(ui, theme, fonts, 1, r.config.entrants[g.black].name_text(), 0, false)
+                        var how = rec.done ? format(&end, "  ·  {EventEndLabels[rec.end as int]}") : "  ·  waiting"
+                        if slot >= 0: how = format(&moved, "  ·  move {r.slots[slot].game.nodes[r.slots[slot].live].board.fullmove}")
+                        list.note(format(&line, "Game {i + 1}  ·  round {g.round}{how}"))
+                    if slot >= 0
+                        list.lead("Live", "", theme.accent, 15.0)
+                        with list.actions()
+                            live_bar(ui, look, r.slots[slot], i)
+                    elif rec.done: list.lead(rec.result == Drawn ? "½-½" : result_text(rec.result), "", rec.result == Drawn ? theme.muted : theme.ink, 15.0)
+                    else: list.lead("–", "", theme.muted)
+                if list.hovered and (rec.done or slot >= 0): app.cursor = SDL_SYSTEM_CURSOR_POINTER
+                if list.hovered and slot >= 0
+                    peek_slot = slot
+                    peek_y = app.pointer.mouse.y
+                if list.clicked and slot >= 0
+                    focus = slot
+                    watched = -1
+                if list.clicked and rec.done and slot < 0: open_game = i
+
+    fn live_bar(ui: *UiCanvas, look: *BoardLook, s: *GameSlot, key: int)
+        let theme = look.theme
+        let fonts = look.fonts
+        let (kind, white) = live_eval(s)
+        var eval: [24]u8
+        let shown = kind != NoScore ? score_text(kind, white, White, &eval) : "–"
+        ui.label(shown, UiTextStyle(face: fonts.mono, size: 13.0, color: theme.ink), UiNode(width: UiSize.fixed(56.0), align: Vec2(1.0, 0.5)))
+        let bar = ui.open(UiNode(key: key, name: "livebar", width: UiSize.fixed(RowBarWidth), height: UiSize.fixed(8.0), box: UiBox(fill: UiFill.solid(Color(0.1, 0.1, 0.11, 1.0)), radius: Vec4.splat(2.0), border: 1.0, border_color: theme.line)))
+        let share = ui.spring(bar.id, 0, white_share(kind, white), 10.0)
+        ui.leaf(UiNode(floating: true, width: UiSize.fixed(max(RowBarWidth * share, 0.0)), height: UiSize.fixed(8.0), box: UiBox(fill: UiFill.solid(Color(0.93, 0.93, 0.9, 1.0)), radius: Vec4.splat(2.0))))
+        ui.close()
+
+    fn peek_game(app: *DesktopApp, look: *BoardLook, s: *GameSlot, right: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let pad: f32 = 12.0
+        let w = pad * 2.0 + PeekBar + 8.0 + PeekBoard
+        let h = pad * 2.0 + 26.0 + PeekBoard + 26.0 + 30.0
+        let x = max(right - w, 8.0)
+        let y = clamp(peek_y - h * 0.5, 8.0, max(ui.height - h - 8.0, 8.0))
+        let keep = ui.layer
+        ui.layer = 7
+        ui.box(x, y, w, h, UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(PopCurve), border: 1.0, border_color: theme.line, shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.32), 0.0, 8.0, 24.0, 0.0, false)))
+        let now = now_ns()
+        let name = UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink)
+        let bx = x + pad + PeekBar + 8.0
+        let by = y + pad + 26.0
+        for (side, ty) in [(Black, y + pad), (White, by + PeekBoard + 8.0)]
+            var clock: [24]u8
+            let lit = s.clock.side == side and s.clock.running
+            ui.circle(bx + 4.0, ty + 8.0, 5.0, theme.muted)
+            ui.circle(bx + 4.0, ty + 8.0, 4.0, side == White ? Color(0.95, 0.95, 0.93, 1.0) : Color(0.08, 0.08, 0.09, 1.0))
+            ui.text(bx + 14.0, ty, s.name_of(side), name)
+            if s.clock.timed(): ui.text(bx + PeekBoard - 52.0, ty, whole_clock(s.clock.left_ns(side, now), &clock), UiTextStyle(face: fonts.mono, size: 12.5, color: lit ? theme.accent : theme.muted))
+        let (kind, white) = live_eval(s)
+        let share = ui.spring(id_hash("peekbar"), 0, white_share(kind, white), 10.0)
+        ui.box(x + pad, by, PeekBar, PeekBoard, UiBox(fill: UiFill.solid(Color(0.1, 0.1, 0.11, 1.0)), radius: Vec4.splat(2.0)))
+        ui.box(x + pad, by + PeekBoard * (1.0 - share), PeekBar, PeekBoard * share, UiBox(fill: UiFill.solid(Color(0.93, 0.93, 0.9, 1.0)), radius: Vec4.splat(2.0)))
+        let node = &s.game.nodes[s.live]
+        draw_small_board(ui, look, &node.board, node.move, bx, by, PeekBoard, false)
+        var eval: [24]u8
+        var line: [64]u8
+        let shown = kind != NoScore ? score_text(kind, white, White, &eval) : "–"
+        let mover = node.board.side == White ? "White" : "Black"
+        let fy = by + PeekBoard + 34.0
+        ui.rect(x + pad, fy - 6.0, w - pad * 2.0, 1.0, theme.line)
+        ui.text(x + pad, fy, format(&line, "Move {node.board.fullmove}  ·  {mover} to move"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+        ui.text(bx + PeekBoard - 52.0, fy, shown, UiTextStyle(face: fonts.mono, size: 12.5, color: theme.ink))
+        ui.layer = keep
+        let wait = s.clock.next_change_s(now)
+        if s.clock.running and wait >= 0.0: app.wake_in(wait)
+
+    fn details(app: *DesktopApp, look: *BoardLook, r: *EventRunner, lib: *EngineLibrary)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let c = &r.config
+        var line: [200]u8
+        var tc: [32]u8
+        with ui.scroll_area("details", gap: 4.0)
+            if r.faults.len > 0: crash_card(ui, look, r)
+            var copying = false
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5)))
+                ui.label("EVENT", UiTextStyle(face: fonts.strong, size: 9.5, color: theme.muted, tracking: 0.6), UiNode(width: UiSize.grow()))
+                copying = ui.button("Copy details")
+            if copying
+                clip.clear()
+                push_text(&clip, format(&line, "Event: {c.name_text()}\n"))
+            detail(ui, look, "Format", format(&line, "{format_label(c.format)} · {c.games_per_pairing} games per pairing · {r.schedule.len} total"), copying)
+            detail(ui, look, "Time", format(&line, "{c.control.text(&tc)} · Time-forfeit margin: {c.margin_ms} ms"), copying)
+            if c.at_once == 1: detail(ui, look, "Concurrency", "1 game at a time", copying)
+            else: detail(ui, look, "Concurrency", format(&line, "{c.at_once} games at once"), copying)
+            let a = &c.adjudication
+            let resign_text = a.resign ? "" : ", off"
+            let draw_text = a.draw ? "" : ", off"
+            detail(ui, look, "Adjudication", format(&line, "Win: >{a.resign_cp} cp for {a.resign_moves} moves each{resign_text}. Draw: ±{a.draw_cp} cp for {a.draw_moves} moves each, from move {a.draw_after}{draw_text}"), copying)
+            if c.book == NoEventBook: detail(ui, look, "Book", "None · Standard starting position for every game", copying)
+            elif c.book == ConsensusBook: detail(ui, look, "Book", format(&line, "{c.book_name_text()} · Engine-generated · {openings_needed(c)} shared openings per pairing, each played with both colours"), copying)
+            else: detail(ui, look, "Book", format(&line, "{c.book_name_text()} · {r.openings.count()} seeded openings, each played with both colours"), copying)
+            var seed: [24]u8
+            detail(ui, look, "Seed", format(&seed, "{c.seed:016X}"), copying)
+            let machines = str(r.machines[0..r.machines.len])
+            detail(ui, look, "Computer", machines.len > 0 ? machines[0..machines.len - 1] : "Not recorded", copying)
+            detail(ui, look, "CPU affinity", "None · engines run on any core", copying)
+            for i in 0..c.entrants.len
+                let e = &c.entrants[i]
+                let entry = lib.find(e.engine_id)
+                let profile = entry ? entry.profile(e.profile_id) : null
+                let engine_name = entry ? entry.display_name() : "No longer in the library"
+                let profile_name = profile ? profile.name_text() : "Default"
+                var hash: [24]u8
+                var threads: [24]u8
+                let hash_mb = entrant_value(c, entry, profile, e, "Hash", &hash)
+                let thread_count = entrant_value(c, entry, profile, e, "Threads", &threads)
+                var resources: [64]u8
+                var shown = ""
+                if hash_mb.len > 0 and thread_count.len > 0: shown = format(&resources, ", hash {hash_mb} MB, threads {thread_count}")
+                elif thread_count.len > 0: shown = format(&resources, ", threads {thread_count}")
+                elif hash_mb.len > 0: shown = format(&resources, ", hash {hash_mb} MB")
+                detail(ui, look, e.name_text(), format(&line, "{engine_name}, profile {profile_name}{shown}{changes_text(e)}"), copying)
+            if copying: copy_clip(ui, "Details copied")
+            if r.faults.len > 0
+                section_label(ui, look, "CRASH LOG")
+                with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5)))
+                    ui.paragraph("Every engine crash and illegal move, game by game.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+                    if ui.button("Copy crash log")
+                        clip.clear()
+                        for f in r.faults
+                            var said: [520]u8
+                            let name = f.entrant >= 0 and f.entrant < c.entrants.len ? c.entrants[f.entrant].name_text() : "Unknown engine"
+                            push_text(&clip, format(&said, "Game {f.game + 1} · Move {f.fullmove} · {name} · {EventEndLabels[f.end as int]} · {f.reason()}\n"))
+                        copy_clip(ui, "Crash log copied")
+                for f in r.faults
+                    var said: [400]u8
+                    var when: [64]u8
+                    fact(ui, fonts, theme, format(&when, "Game {f.game + 1}"), format(&said, "Move {f.fullmove} · {EventEndLabels[f.end as int]} · {f.reason()}"))
+            section_label(ui, look, "UCI LOG")
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5)))
+                ui.paragraph("Every command sent to the engines, game by game.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+                if ui.button("Copy commands")
+                    r.told_text(&clip)
+                    copy_clip(ui, "Commands copied")
+
+    fn detail(ui: *UiCanvas, look: *BoardLook, name: str, value: str, copying: bool)
+        fact(ui, look.fonts, look.theme, name, value)
+        if not copying: return
+        push_text(&clip, name)
+        push_text(&clip, ": ")
+        push_text(&clip, value)
+        clip.push('\n')
+
+    fn copy_clip(ui: *UiCanvas, done: str)
+        clip.push(0)
+        if SDL_SetClipboardText(clip.ptr as cstr): ui.toast(done)
+        clip.free()
+
+    fn crash_card(ui: *UiCanvas, look: *BoardLook, r: *EventRunner)
+        let theme = look.theme
+        let fonts = look.fonts
+        let red = theme.loss()
+        var line: [200]u8
+        with ui.open(UiNode(name: "crashes", width: UiSize.grow(), padding: Vec4(14.0, 12.0, 14.0, 12.0), gap: 5.0, box: UiBox(fill: UiFill.solid(red.with_alpha(theme.dark ? 0.16 : 0.1)), radius: Vec4.splat(PopCurve), border: 1.0, border_color: red.with_alpha(0.7))))
+            let n = r.faults.len as int
+            ui.label(n == 1 ? "Engine failure" : format(&line, "{n} engine failures"), UiTextStyle(face: fonts.strong, size: 15.0, color: red))
+            let from = max(n - 4, 0)
+            for k in from..n
+                let f = &r.faults[k]
+                let name = f.entrant >= 0 and f.entrant < r.config.entrants.len ? r.config.entrants[f.entrant].name_text() : "An engine"
+                let what = f.end == ByIllegalMove ? "played an illegal move" : "crashed"
+                ui.label(format(&line, "{name} {what} at move {f.fullmove} in game {f.game + 1}."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(key: k))
+            if from > 0: ui.label(format(&line, "And {from} earlier. The crash log below has them all."), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+        ui.leaf(UiNode(height: UiSize.fixed(6.0)))
+
+    fn section_label(ui: *UiCanvas, look: *BoardLook, text: str)
+        ui.label(text, UiTextStyle(face: look.fonts.strong, size: 9.5, color: look.theme.muted, tracking: 0.6), UiNode(padding: Vec4(0.0, 12.0, 0.0, 2.0)))
+
+    fn draw_stop(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, r: *EventRunner)
+        if not stopping: return
+        let ui = &app.ui
+        with ui.modal("stopevent", ref stopping, 380.0)
+            ui.label("Stop the tournament?", UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph("Stop all games in progress and discard them. Completed games remain in the results.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                ui.spacer()
+                if ui.button("Keep playing"): stopping = false
+                if ui.button("Stop", true)
+                    r.stop()
+                    stopping = false
+
+    fn draw_graph(app: *DesktopApp, look: *BoardLook, s: *GameSlot, x: f32, y: f32, w: f32, h: f32)
+        let named = s.busy() or s.game.nodes.len > 1
+        let ply = made_graph().draw(app, look.theme, look.fonts, s.telemetry[0..s.telemetry.len], named ? s.name_of(White) : "White", named ? s.name_of(Black) : "Black", x, y, w, h)
+        if ply >= 0 and ply < s.game.nodes.len: s.game.go(ply)
+
+    fn made_graph() -> *TelemetryGraph
+        if not graph: graph = new TelemetryGraph
+        return graph
+
+    fn release(gpu: *Gpu)
+        mover_pv.release()
+        live.free()
+        clip.free()
+        if graph
+            graph.release(gpu)
+            free(graph)
+            graph = null
+
+fn depth_text(n: *SearchNote, buf: *[24]u8) -> str
+    if n.seldepth > 0: return format(buf, "depth {n.depth}/{n.seldepth}")
+    return format(buf, "depth {n.depth}")
+
+fn search_text(n: *SearchNote, buf: *[120]u8) -> str
+    var depth: [24]u8
+    var speed: [32]u8
+    var count: [24]u8
+    var filled: [24]u8
+    let hash = n.hashfull > 0 ? format(&filled, "  ·  hash {n.hashfull / 10}%") : ""
+    return format(buf, "{depth_text(n, &depth)}  ·  {speed_text(n.nps, &speed)}  ·  {big_count(n.nodes, &count)} nodes{hash}")
+
+fn big_count(n: i64, buf: *[24]u8) -> str
+    if n >= 1000000000: return format(buf, "{n as f64 / 1.0e9:.1}G")
+    if n >= 1000000: return format(buf, "{n as f64 / 1.0e6:.1}M")
+    if n >= 10000: return format(buf, "{n as f64 / 1.0e3:.0}k")
+    return format(buf, "{n}")
+
+fn live_eval(s: *GameSlot) -> (ScoreKind, int)
+    let p = &s.seat_of(s.clock.side).player
+    if p.thinking() and p.score_kind != NoScore and p.heard.depth > 0: return p.score_kind, s.clock.side == White ? p.score : -p.score
+    return s.eval_kind, s.eval_white
+
+fn white_share(kind: ScoreKind, white: int) -> f32
+    if kind == MateIn: return white > 0 ? 1.0 : 0.0
+    if kind == Centipawns: return clamp(0.5 + white as f32 / 800.0, 0.0, 1.0)
+    return 0.5
+
+fn whole_clock(ns: i64, buf: *[24]u8) -> str
+    let s = max(ns, 0) / 1000000000
+    if s >= 3600: return format(buf, "{s / 3600}:{s / 60 % 60:02}:{s % 60:02}")
+    return format(buf, "{s / 60}:{s % 60:02}")
+
+fn changes_text(e: *Entrant) -> str
+    return e.changes.values.len > 0 ? ", with tournament-specific options" : ""
+
+fn pop_rule(ui: *UiCanvas, theme: *GuiTheme)
+    with ui.open(UiNode(width: UiSize.grow(), padding: Vec4(0.0, 6.0, 0.0, 4.0)))
+        ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.fixed(1.0), box: UiBox(fill: UiFill.solid(theme.line))))

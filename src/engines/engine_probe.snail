@@ -1,0 +1,64 @@
+use engine/desktop/desktop_app
+use src/uci/uci_engine
+
+const ProbeOutputBytes = 4000
+
+enum ProbeState: u8
+    ProbeIdle
+    ProbeRunning
+    ProbeDone
+    ProbeFailed
+
+struct EngineProbe
+    engine: UciEngine
+    state: ProbeState
+    output: [..]u8
+
+    fn start(path: str, folder: str)
+        output.clear()
+        engine.unlogged = true
+        state = engine.start(path, folder) ? ProbeRunning : ProbeFailed
+
+    fn update(app: *DesktopApp) -> bool
+        if state != ProbeRunning: return false
+        let e = &engine
+        if e.child.waiting()
+            e.take()
+            for i in 0..e.batch.lines.len
+                let line = e.batch.line(i as int)
+                note(line)
+                e.handshake(line)
+        if e.state == EngineIdle
+            e.quit()
+            state = ProbeDone
+            return true
+        let now = now_ns()
+        if e.check(now)
+            state = ProbeFailed
+            return true
+        app.wake_in((e.asked_ns + EngineAnswerNs - now) as f64 / 1.0e9 + 0.01)
+        return false
+
+    fn cancel()
+        if state == ProbeRunning: engine.quit()
+        state = ProbeIdle
+
+    fn note(line: str)
+        for k in 0..line.len
+            output.push(line[k])
+        output.push('\n')
+        if output.len <= ProbeOutputBytes: return
+        var cut = output.len as int - ProbeOutputBytes
+        while cut < output.len and output[cut - 1] != '\n'
+            cut += 1
+        let keep = output.len as int - cut
+        for k in 0..keep
+            output[k] = output[cut + k]
+        output.resize(keep)
+
+    fn output_text() -> str
+        return str(output[0..output.len])
+
+    fn release()
+        engine.release()
+        output.free()

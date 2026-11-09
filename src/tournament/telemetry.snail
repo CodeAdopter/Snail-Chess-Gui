@@ -1,0 +1,68 @@
+use src/uci/engine_player
+
+const TelemetryMagic = "SCGTEL01"
+
+struct TelemetryRecord
+    nodes: i64
+    nps: i64
+    tbhits: i64
+    game: i32
+    ply: i32
+    depth: i32
+    seldepth: i32
+    time_ms: i32
+    cpu_ms: i32
+    score: i32
+    kind: i32
+    hashfull: i32
+    side: i32
+
+    fn white_cp(cap: int) -> (int, bool)
+        if kind == NoScore as i32: return 0, false
+        var own = clamp(score as int, -cap, cap)
+        if kind == MateIn as i32: own = score > 0 ? cap : -cap
+        return side == White as i32 ? own : -own, true
+
+fn telemetry_of(n: *SearchNote, game: int, ply: int, side: Side, time_ms: i64, cpu_ms: f64) -> TelemetryRecord
+    var r: TelemetryRecord
+    r.nodes = n.nodes
+    r.nps = n.nps
+    r.tbhits = n.tbhits
+    r.game = game as i32
+    r.ply = ply as i32
+    r.depth = n.depth as i32
+    r.seldepth = n.seldepth as i32
+    r.time_ms = clamp(time_ms, 0, 2000000000) as i32
+    r.cpu_ms = clamp(cpu_ms, 0.0, 2.0e9) as i32
+    r.score = n.score as i32
+    r.kind = n.kind as i32
+    r.hashfull = n.hashfull as i32
+    r.side = side as i32
+    return r
+
+fn append_telemetry(path: str, records: []TelemetryRecord) -> bool
+    if records.len == 0: return true
+    var bytes: [..]u8
+    defer bytes.free()
+    if not file_exists(path.ptr as cstr): push_text(&bytes, TelemetryMagic)
+    let raw = records.ptr as *u8
+    for i in 0..records.len * sizeof(TelemetryRecord)
+        bytes.push(raw[i])
+    let io = SDL_IOFromFile(path.ptr as cstr, "ab")
+    if not io: return false
+    let wrote = SDL_WriteIO(io, &bytes[0], bytes.len as u64)
+    let closed = SDL_CloseIO(io)
+    return wrote == bytes.len as u64 and closed
+
+fn read_telemetry(path: str, game: int, into: *[..]TelemetryRecord) -> bool
+    into.clear()
+    let bytes = read_file(path.ptr as cstr)
+    defer free_file(bytes)
+    if bytes.len < 8 or str(bytes[0..8]) != TelemetryMagic: return false
+    let size = sizeof(TelemetryRecord) as int
+    var at = 8
+    while at + size <= bytes.len
+        let r = *(&bytes[at] as *TelemetryRecord)
+        if r.game == game as i32: into.push(r)
+        at += size
+    return true

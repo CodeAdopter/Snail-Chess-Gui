@@ -1,0 +1,129 @@
+use engine/render/renderer
+use engine/render/renderer_views
+
+struct LensBlock
+    lens: Vec4
+    look: Vec4
+
+const LensFarBlur: f32 = 0.035
+const LensMostBlur: f32 = 0.025
+
+struct SceneLens
+    block: LensBlock
+    post: int
+    smooth: int
+
+    fn init(r: *Renderer)
+        block.look = Vec4(0.0, 0.0, 0.3, 0.03)
+        post = r.add_post(shader("shaders/lens3d.hlsl", fragment: "lens_ps"), &block, sizeof(LensBlock))
+        smooth = r.add_post(shader("shaders/lens3d.hlsl", fragment: "lens_smooth_ps"), &block, sizeof(LensBlock))
+
+    fn focus(camera: *Camera, at: Vec3, height: f32, t: f32)
+        let low = lowest(Vec3(-4.8, -0.4, -5.7), at - Vec3.splat(1.5))
+        let high = highest(Vec3(4.8, 1.8, 5.7), at + Vec3.splat(1.5))
+        var near: f32 = 1.0e9
+        var far: f32 = 0.0
+        for k in 0..8
+            let corner = Vec3(k & 1 == 0 ? low.x : high.x, k & 2 == 0 ? low.y : high.y, k & 4 == 0 ? low.z : high.z)
+            let d = (corner - camera.position).dot(camera.forward)
+            near = min(near, d)
+            far = max(far, d)
+        block.lens = Vec4(max(near, camera.near), far, height * LensFarBlur, height * LensMostBlur)
+        block.look.x = t
+
+    fn show(r: *Renderer, on: bool)
+        r.post_off[post] = not on or LensMostBlur <= 0.0
+        r.post_off[smooth] = not on
+
+    fn aside(on: bool)
+        block.look.y = on ? 1.0 : 0.0
+
+struct SceneBackdrop
+    texture: Texture
+    shape: GpuMesh
+    made: bool
+    mesh: int
+    material: int
+    unseen: int
+    staged: bool
+    held: [MaxShadowMaps]bool
+
+    fn carve(gpu: *Gpu)
+        if made: return
+        made = true
+        var m: Mesh
+        m.init(8, 8)
+        let n = Vec3(0.0, 0.0, 1.0)
+        let a = m.vertex(Vec3(-1.0, -1.0, 0.0), n, Vec2(0.0, 0.0))
+        let b = m.vertex(Vec3(1.0, -1.0, 0.0), n, Vec2(1.0, 0.0))
+        let c = m.vertex(Vec3(1.0, 1.0, 0.0), n, Vec2(1.0, 1.0))
+        let d = m.vertex(Vec3(-1.0, 1.0, 0.0), n, Vec2(0.0, 1.0))
+        m.quad(a, b, c, d)
+        shape = gpu.upload_mesh(&m)
+        m.free_all()
+
+    fn stage(r: *Renderer)
+        if staged: return
+        staged = true
+        mesh = r.add_mesh(&shape)
+        var desc = MaterialDesc.three(shader("shaders/backdrop3d.hlsl", fragment: "backdrop_ps"))
+        desc.vertex = shader("shaders/backdrop3d.hlsl", vertex: "backdrop_vs")
+        desc.depth = TestOnly
+        desc.cull = CullNone
+        material = r.add_material_desc(&desc)
+        r.materials[material].texture = &texture
+        r.materials[material].no_fog = true
+        var hidden = MaterialDesc.three(shader("shaders/backdrop3d.hlsl", fragment: "unseen_ps"))
+        unseen = r.add_material_desc(&hidden)
+
+    fn unstage()
+        staged = false
+
+    fn fit(r: *Renderer, w: int, h: int)
+        let share = LensMostBlur > 0.0 ? 3 : 1
+        r.fit(&texture, max(w / share, 8), max(h / share, 8), HdrFormat)
+
+    fn draw(r: *Renderer, lens: *SceneLens)
+        r.materials[material].values[0] = Vec4(lens.block.lens.y, 0.0, 0.0, 0.0)
+        r.draw_with(material, mesh, Mat4.identity(), Color.hex(0xFFFFFF))
+
+    fn hold_shadows(r: *Renderer, first: int)
+        for k in 0..MaxShadowMaps
+            held[k] = r.shadows[k].every_frame
+            if k < first: continue
+            r.shadows[k].every_frame = false
+            r.shadows[k].dirty = false
+
+    fn free_shadows(r: *Renderer)
+        for k in 0..MaxShadowMaps: r.shadows[k].every_frame = held[k]
+
+    fn release(gpu: *Gpu)
+        if texture.handle: gpu.release_texture(&texture)
+        if made: gpu.release_mesh(&shape)
+        made = false
+        staged = false
+
+fn lowest(a: Vec3, b: Vec3) -> Vec3
+    return Vec3(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z))
+
+fn highest(a: Vec3, b: Vec3) -> Vec3
+    return Vec3(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z))
+
+fn shadow_from(s: *SunShadow, from: Vec3, to: Vec3, half_w: f32, half_h: f32, far: f32, size: int, radius: f32, nudge: f32, every: bool, bias: f32 = -0.0002)
+    let moved = not s.on or (s.position - from).length > 0.0001 or (s.target - to).length > 0.0001 or s.right != half_w or s.top != half_h or s.far != far or s.width != size
+    s.on = true
+    s.every_frame = every
+    if moved: s.dirty = true
+    s.position = from
+    s.target = to
+    s.left = -half_w
+    s.right = half_w
+    s.bottom = -half_h
+    s.top = half_h
+    s.near = 0.5
+    s.far = far
+    s.width = size
+    s.height = size
+    s.bias = bias
+    s.normal_bias = nudge
+    s.radius = radius

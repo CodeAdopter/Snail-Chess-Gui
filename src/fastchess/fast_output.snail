@@ -1,0 +1,309 @@
+use engine/core/text
+
+const FastWhiteWon = 0
+const FastBlackWon = 1
+const FastDrawn = 2
+const FastNoResult = 3
+
+enum FastFault: u8
+    FastNoFault
+    FastIllegal
+    FastCrash
+    FastTimeLoss
+    FastInterrupted
+    FastWarning
+
+struct FastSpan
+    at: int
+    len: int
+
+struct FastEntrant
+    name: FastSpan
+    wins: int
+    draws: int
+    losses: int
+
+    fn games() -> int
+        return wins + draws + losses
+
+    fn points() -> f64
+        return wins as f64 + draws as f64 * 0.5
+
+struct FastGame
+    id: int
+    white: int
+    black: int
+    result: int
+    reason: FastSpan
+    fault: FastFault
+
+struct FastFaultNote
+    kind: FastFault
+    game: int
+    text: FastSpan
+
+struct FastRank
+    name: FastSpan
+    elo: FastSpan
+    games: int
+    score: FastSpan
+
+struct FastPoint
+    games: int
+    llr: f64
+
+struct FastTally
+    pool: [..]u8
+    entrants: [..]FastEntrant
+    games: [..]FastGame
+    faults: [..]FastFaultNote
+    ranks: [..]FastRank
+    points: [..]FastPoint
+    started: int
+    total: int
+    title: FastSpan
+    elo: FastSpan
+    nelo: FastSpan
+    los: FastSpan
+    draw_ratio: FastSpan
+    score: FastSpan
+    rated: int
+    rated_wins: int
+    rated_losses: int
+    rated_draws: int
+    ptnml: [5]int
+    has_ptnml: bool
+    sprt: bool
+    llr: f64
+    llr_share: f64
+    lower: f64
+    upper: f64
+    elo0: f64
+    elo1: f64
+    finished: bool
+    total_time: FastSpan
+    ranking: bool
+    lines: int
+    resumed: int
+    session_from: int
+    resume_top: int
+    top_id: int
+
+    fn text(s: FastSpan) -> str
+        return str(pool[s.at..s.at + s.len])
+
+    fn keep(s: str) -> FastSpan
+        let at = pool.len as int
+        push_text(&pool, s)
+        return FastSpan(at, s.len as int)
+
+    fn name(i: int) -> str
+        return i >= 0 and i < entrants.len ? text(entrants[i].name) : "?"
+
+    fn entrant(s: str) -> int
+        for i in 0..entrants.len
+            if text(entrants[i].name) == s: return i as int
+        entrants.push(FastEntrant(name: keep(s)))
+        return entrants.len as int - 1
+
+    fn feed(line: str)
+        let t = trim(line)
+        lines += 1
+        if t.len == 0: return
+        if t[0] == '-' and starts_with(t, "-----")
+            ranking = false
+            return
+        if ranking
+            rank_row(t)
+            return
+        if starts_with(t, "Started game "): started_line(t[13..t.len])
+        elif starts_with(t, "Finished game "): finished_line(t[14..t.len])
+        elif starts_with(t, "Results of "): title = keep(t[11..ends_with(t, ":") ? t.len - 1 : t.len])
+        elif starts_with(t, "Elo: ")
+            let cut = find(t, ", nElo: ")
+            if cut > 0
+                elo = keep(t[5..cut])
+                nelo = keep(t[cut + 8..t.len])
+            else: elo = keep(t[5..t.len])
+        elif starts_with(t, "LOS: ")
+            let a = find(t, ", DrawRatio: ")
+            let b = find(t, ", PairsRatio: ")
+            if a > 0
+                los = keep(t[5..a])
+                draw_ratio = keep(t[a + 13..b > a ? b : t.len])
+        elif starts_with(t, "Games: "): games_line(t)
+        elif starts_with(t, "Ptnml(0-2): "): ptnml_line(t)
+        elif starts_with(t, "LLR: "): llr_line(t)
+        elif starts_with(t, "Rank ") and find(t, " Elo ") > 0
+            ranks.clear()
+            ranking = true
+        elif starts_with(t, "Loading config file")
+            resumed += 1
+            session_from = games.len as int
+            resume_top = top_id
+            finished = false
+        elif t == "Finished match" or t == "Tournament finished": finished = true
+        elif starts_with(t, "Total Time: ")
+            total_time = keep(t[12..t.len])
+            finished = true
+        elif starts_with(t, "Warning") or starts_with(t, "Error") or find(t, "rror:") >= 0: faults.push(FastFaultNote(FastWarning, -1, keep(t)))
+
+    fn started_line(t: str)
+        var words: [4]str
+        split_words(t, words[0..4])
+        let n = parse_int(words[0]) as int
+        if words[2].len > 0 and is_digits(words[2]): total = max(total, parse_int(words[2]) as int)
+        started = max(started, n)
+        let open = find(t, " (")
+        if open < 0: return
+        let pair = t[open + 2..ends_with(t, ")") ? t.len - 1 : t.len]
+        let vs = find(pair, " vs ")
+        if vs < 0: return
+        entrant(pair[0..vs])
+        entrant(pair[vs + 4..pair.len])
+
+    fn finished_line(t: str)
+        let open = find(t, " (")
+        let close = find(t, "): ")
+        if open < 0 or close < open: return
+        var g = FastGame(id: parse_int(t[0..open]) as int, result: FastNoResult)
+        let pair = t[open + 2..close]
+        let vs = find(pair, " vs ")
+        if vs < 0: return
+        g.white = entrant(pair[0..vs])
+        g.black = entrant(pair[vs + 4..pair.len])
+        let rest = t[close + 3..t.len]
+        var cut = 0
+        while cut < rest.len and rest[cut] != ' '
+            cut += 1
+        let result = rest[0..cut]
+        if result == "1-0": g.result = FastWhiteWon
+        elif result == "0-1": g.result = FastBlackWon
+        elif result == "1/2-1/2": g.result = FastDrawn
+        let a = fast_byte(rest, '{')
+        let b = fast_byte(rest, '}')
+        let reason = a >= 0 and b > a ? rest[a + 1..b] : ""
+        g.reason = keep(reason)
+        g.fault = fast_fault_of(reason)
+        count(&g, 1)
+        top_id = max(top_id, g.id)
+        if g.fault != FastNoFault: faults.push(FastFaultNote(g.fault, g.id, g.reason))
+        if resumed > 0 and g.id <= resume_top
+            var k = session_from - 1
+            while k >= 0 and k >= session_from - 512
+                if games[k].id == g.id
+                    count(&games[k], -1)
+                    games[k] = g
+                    return
+                k -= 1
+        games.push(g)
+
+    fn count(g: *FastGame, sign: int)
+        let w = &entrants[g.white]
+        let k = &entrants[g.black]
+        if g.result == FastWhiteWon
+            w.wins += sign
+            k.losses += sign
+        elif g.result == FastBlackWon
+            w.losses += sign
+            k.wins += sign
+        elif g.result == FastDrawn
+            w.draws += sign
+            k.draws += sign
+
+    fn games_line(t: str)
+        rated = fast_field(t, "Games: ")
+        rated_wins = fast_field(t, "Wins: ")
+        rated_losses = fast_field(t, "Losses: ")
+        rated_draws = fast_field(t, "Draws: ")
+        let p = find(t, "Points: ")
+        if p >= 0: score = keep(t[p + 8..t.len])
+
+    fn ptnml_line(t: str)
+        let a = fast_byte(t, '[')
+        let b = fast_byte(t, ']')
+        if a < 0 or b < a: return
+        var at = a + 1
+        for k in 0..5
+            while at < b and (t[at] == ' ' or t[at] == ',')
+                at += 1
+            let from = at
+            while at < b and t[at] >= '0' and t[at] <= '9'
+                at += 1
+            ptnml[k] = parse_int(t[from..at]) as int
+        has_ptnml = true
+
+    fn llr_line(t: str)
+        var words: [8]str
+        if split_words(t, words[0..8]) < 7: return
+        let (v, ok) = fast_number(words[1])
+        if not ok: return
+        sprt = true
+        llr = v
+        let (share, _a) = fast_number(words[2])
+        let (low, _b) = fast_number(words[3])
+        let (high, _c) = fast_number(words[4])
+        let (h0, _d) = fast_number(words[5])
+        let (h1, _e) = fast_number(words[6])
+        llr_share = share / 100.0
+        lower = low
+        upper = high
+        elo0 = h0
+        elo1 = h1
+        points.push(FastPoint(max(rated, games.len as int), llr))
+
+    fn rank_row(t: str)
+        var words: [9]str
+        if split_words(t, words[0..9]) < 9 or not is_digits(words[0]): return
+        var r: FastRank
+        r.name = keep(words[1])
+        var elo: [48]u8
+        r.elo = keep(format(&elo, "{words[2]} +/- {words[3]}"))
+        r.games = parse_int(words[6]) as int
+        r.score = keep(words[7])
+        ranks.push(r)
+
+    fn release()
+        pool.free()
+        entrants.free()
+        games.free()
+        faults.free()
+        ranks.free()
+        points.free()
+
+fn fast_fault_of(reason: str) -> FastFault
+    if find(reason, "illegal move") >= 0: return FastIllegal
+    if find(reason, "disconnects") >= 0 or find(reason, "stalls") >= 0: return FastCrash
+    if find(reason, "loses on time") >= 0: return FastTimeLoss
+    if find(reason, "interrupted") >= 0: return FastInterrupted
+    return FastNoFault
+
+fn fast_field(t: str, label: str) -> int
+    let at = find(t, label)
+    if at < 0: return 0
+    var end = at + label.len as int
+    let from = end
+    while end < t.len and t[end] >= '0' and t[end] <= '9'
+        end += 1
+    return parse_int(t[from..end]) as int
+
+fn fast_number(s: str) -> (f64, bool)
+    var a = 0
+    var b = s.len
+    while a < b and (s[a] == '(' or s[a] == '[')
+        a += 1
+    while b > a and (s[b - 1] == ')' or s[b - 1] == ']' or s[b - 1] == ',' or s[b - 1] == '%')
+        b -= 1
+    let t = s[a..b]
+    var digits = 0
+    for i in 0..t.len
+        let c = t[i]
+        if c >= '0' and c <= '9': digits += 1
+        elif c != '-' and c != '+' and c != '.' and c != 'e' and c != 'E': return (0.0, false)
+    if digits == 0: return (0.0, false)
+    return (parse_float(t), true)
+
+fn fast_byte(s: str, c: u8) -> int
+    for i in 0..s.len
+        if s[i] == c: return i as int
+    return -1

@@ -1,0 +1,187 @@
+use engine/desktop/command_bar
+use engine/ui/ui_edit
+use src/tournament/resources
+use src/tournament/event_runner
+use src/views/board_view
+use src/views/rail
+
+const IndexRowHeight: f32 = 84.0
+const IndexHead: f32 = 96.0
+const IndexColumn: f32 = 1120.0
+const IndexBoard: f32 = 62.0
+const IndexWideRow: f32 = 640.0
+const IndexStates = ["All", "Running", "Paused", "Finished", "Stopped"]
+const IndexBoardGapNs: i64 = 250000000
+
+enum IndexAsk: u8
+    IndexNothing
+    IndexOpen
+    IndexNew
+
+struct TournamentIndex
+    search: UiEditText
+    filter: int
+    shown: [..]int
+    first: int
+    boards: [..]int
+    boards_ns: i64
+    chosen: int = -1
+    words: [..]u8
+
+    fn draw(app: *DesktopApp, desk: *DesktopLook, look: *BoardLook, events: []*EventRunner) -> IndexAsk
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        var asked = IndexNothing
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let rail_w = list_rail_width(ui)
+        command_bar_rail(app, desk, rail_w, PageCurve)
+        narrow(events)
+        var line: [80]u8
+        with rail_room(ui, "indexrail", rail_w, 2.0)
+            ui.text_field("indexsearch", &search, "Search names and engines", UiNode(width: UiSize.grow()))
+            rail_group(ui, theme, fonts, 0, "STATE", false)
+            for i in 0..IndexStates.len
+                var n = 0
+                for r in events
+                    if state_fits(r, i as int): n += 1
+                if rail_place(ui, theme, fonts, "indexstate", i as int, IndexStates[i], format(&line, "{n}"), filter == i)
+                    filter = i as int
+                    first = 0
+            ui.spacer()
+            if ui.button("New tournament", true, UiNode(width: UiSize.grow(), height: UiSize.fixed(36.0))): asked = IndexNew
+        let bar = TabRowHeight + CommandBarHeight
+        let side = page_side(max(ui.width - rail_w, 1.0))
+        let x = rail_w + side
+        let w = page_column(ui, rail_w, IndexColumn)
+        let y = bar + PageTop
+        var kit = SettingsKit(ui, theme, fonts, w, 0, 0.0)
+        with ui.open(UiNode(name: "indexhead", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(IndexHead), clip: true))
+            let count = events.len == 1 ? "1 tournament" : format(&line, "{events.len} tournaments · Newest first")
+            kit.title("TOURNAMENTS", filter == 0 ? "All tournaments" : IndexStates[filter], events.len == 0 ? "None yet." : count)
+        if events.len == 0
+            with ui.open(UiNode(name: "noevents", floating: true, offset: Vec2(x, y + IndexHead + 10.0), width: UiSize.fixed(w), padding: Vec4.splat(28.0), gap: 10.0, align: Vec2(0.5, 0.0), box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(12.0), border: 1.0, border_color: theme.line))))
+                ui.label("No tournaments yet", UiTextStyle(face: fonts.serif, size: 20.0, color: theme.ink))
+                ui.label("Pick engines, a format and a time control, and watch them play.", note)
+                if ui.button("New tournament", true): asked = IndexNew
+            return asked
+        let room = max(ui.height - (y + IndexHead) - 16.0, 1.0)
+        let top = y + IndexHead
+        let fit = max(floor(room / (IndexRowHeight + 10.0)) as int, 1)
+        let mouse = &app.pointer.mouse
+        if mouse.wheel != 0.0 and mouse.x >= x and mouse.x < x + w and mouse.y >= top and mouse.y < top + room: first += mouse.wheel > 0.0 ? -1 : 1
+        first = clamp(first, 0, max(shown.len as int - fit, 0))
+        if shown.len == 0: ui.text(x + 4.0, top + 6.0, "No matching tournaments.", note)
+        refresh_boards(app, events)
+        look.sheet.prepare(&app.gpu, &app.ui_gpu, look.set, max(floor(IndexBoard / 8.0 * app.scale) as int, 8), look.costume)
+        for k in first..min(first + fit, shown.len as int)
+            if row(app, look, events, shown[k], x, top + (k - first) as f32 * (IndexRowHeight + 10.0), w)
+                chosen = shown[k]
+                asked = IndexOpen
+        return asked
+
+    fn narrow(events: []*EventRunner)
+        shown.clear()
+        let want = search.text()
+        var i = events.len as int - 1
+        while i >= 0
+            let r = events[i]
+            let state_ok = state_fits(r, filter)
+            var found = want.len == 0 or has_folded(r.config.name_text(), want)
+            for e in r.config.entrants
+                if not found and has_folded(e.name_text(), want): found = true
+            if state_ok and found: shown.push(i)
+            i -= 1
+
+    fn refresh_boards(app: *DesktopApp, events: []*EventRunner)
+        let now = now_ns()
+        boards.resize(events.len)
+        var changed = boards_ns == 0
+        for i in 0..events.len
+            if boards[i] != board_slot(events[i]).live: changed = true
+        if not changed: return
+        if now - boards_ns < IndexBoardGapNs
+            app.wake_in((IndexBoardGapNs - (now - boards_ns)) as f64 / 1.0e9)
+            return
+        for i in 0..events.len
+            boards[i] = board_slot(events[i]).live
+        boards_ns = now
+
+    fn row(app: *DesktopApp, look: *BoardLook, events: []*EventRunner, i: int, x: f32, y: f32, w: f32) -> bool
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let r = events[i]
+        let o = ui.open(UiNode(key: i, name: "eventrow", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(IndexRowHeight), hit: true, focusable: true))
+        let hv = ui.interact(o.id)
+        ui.close()
+        let lit = ui.spring(o.id, 0, hv.hovered or hv.focused and ui.keyboard_nav ? 1.0 : 0.0, 20.0)
+        ui.box(x, y, w, IndexRowHeight, theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.4 * lit)), radius: Vec4.splat(12.0), border: 1.0, border_color: theme.line)))
+        let s = board_slot(r)
+        let node = clamp(boards[i], 0, s.game.nodes.len as int - 1)
+        draw_small_board(ui, look, &s.game.nodes[node].board, s.game.nodes[node].move, x + 11.0, y + 11.0, IndexBoard, false)
+        let tx = x + IndexBoard + 30.0
+        let wide = w >= IndexWideRow
+        let right = wide ? 230.0 : 0.0
+        let text_w = max(w - (tx - x) - right - 16.0, 40.0)
+        let muted = UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted)
+        var tc: [32]u8
+        var line: [200]u8
+        let done = r.finished_games()
+        let total = max(r.schedule.len as int, 1)
+        ui.clip_to(tx, y, text_w, IndexRowHeight, 0.0)
+        ui.text(tx, y + 11.0, r.config.name_text(), UiTextStyle(face: fonts.serif, size: 17.0, color: theme.ink))
+        ui.text(tx, y + 37.0, format(&line, "{state_label(r.state)}  ·  {format_label(r.config.format)}  ·  {r.config.control.text(&tc)}  ·  {r.config.entrants.len} engines  ·  {r.config.book == NoEventBook ? "No book" : r.config.book_name_text()}"), muted)
+        if wide: ui.text(tx, y + 56.0, engines_text(r), muted)
+        else
+            ui.text(tx, y + 54.0, format(&line, "{done} of {r.schedule.len} games  ·  {engines_text(r)}"), muted)
+            ui.box(tx, y + IndexRowHeight - 9.0, text_w, 3.0, UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(1.5)))
+            ui.box(tx, y + IndexRowHeight - 9.0, text_w * done as f32 / total as f32, 3.0, UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(1.5)))
+        ui.unclip()
+        if not wide
+            if hv.hovered: app.cursor = SDL_SYSTEM_CURSOR_POINTER
+            return hv.clicked
+        let rx = x + w - right
+        ui.text(rx, y + 12.0, format(&line, "{done} of {r.schedule.len} games"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.ink))
+        ui.box(rx, y + 34.0, right - 16.0, 4.0, UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(2.0)))
+        ui.box(rx, y + 34.0, (right - 16.0) * done as f32 / total as f32, 4.0, UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(2.0)))
+        if done > 0 and r.standings.order.len > 0
+            let lead = r.standings.order[0]
+            let t = &r.standings.tallies[lead]
+            ui.clip_to(rx, y + 44.0, right - 16.0, 24.0, 0.0)
+            ui.text(rx, y + 48.0, format(&line, "Leader {r.config.entrants[lead].name_text()}  {t.points():.1}/{t.games()}"), muted)
+            ui.unclip()
+        if hv.hovered: app.cursor = SDL_SYSTEM_CURSOR_POINTER
+        return hv.clicked
+
+    fn engines_text(r: *EventRunner) -> str
+        words.clear()
+        for i in 0..r.config.entrants.len
+            if i > 0: push_text(&words, ", ")
+            push_text(&words, r.config.entrants[i].name_text())
+        return str(words[0..words.len])
+
+    fn release()
+        shown.free()
+        boards.free()
+        words.free()
+
+fn state_fits(r: *EventRunner, k: int) -> bool
+    if k == 1: return r.state == EventRunning or r.state == EventPausing
+    if k == 2: return r.state == EventPaused
+    if k == 3: return r.state == EventFinished
+    if k == 4: return r.state == EventStopped
+    return true
+
+fn board_slot(r: *EventRunner) -> *GameSlot
+    for s in r.slots
+        if s.busy(): return s
+    return r.slots[0]
+
+fn state_label(s: EventState) -> str
+    match s
+        EventRunning: return "Running"
+        EventPausing: return "Pausing"
+        EventPaused: return "Paused"
+        EventStopped: return "Stopped"
+    return "Finished"

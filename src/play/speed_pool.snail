@@ -1,0 +1,67 @@
+use src/play/time_control
+
+const SpeedNames = ["Bullet", "Blitz", "Rapid", "Classical", "Infinite"]
+const SpeedWords = ["bullet", "blitz", "rapid", "classical", "infinite"]
+const RatedSpeeds = 4
+const SpeedBullet = 0
+const SpeedBlitz = 1
+const SpeedRapid = 2
+const SpeedClassical = 3
+const SpeedInfinite = 4
+
+const QuickBase = [60, 120, 180, 180, 300, 300, 600, 600, 900, 1800, 1800]
+const QuickIncrement = [0, 1, 0, 2, 0, 3, 0, 5, 10, 0, 20]
+const QuickSpeed = [0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3]
+const QuickFirst = [0, 3, 7, 10]
+
+fn speed_of_seconds(base_s: i64, increment_s: i64) -> int
+    let whole = base_s + 40 * increment_s
+    if whole < 180: return SpeedBullet
+    if whole < 480: return SpeedBlitz
+    if whole < 1500: return SpeedRapid
+    return SpeedClassical
+
+fn speed_of(t: *TimeControl) -> int
+    match t.kind
+        BaseIncrement: return speed_of_seconds(t.base_ms / 1000, t.increment_ms / 1000)
+        MovesInTime: return speed_of_seconds(t.base_ms / 1000 * 40 / max(t.moves, 1) as i64, 0)
+        TimePerMove: return speed_of_seconds(t.move_ms * 40 / 1000, 0)
+    return SpeedInfinite
+
+fn speed_of_pgn(s: str) -> int
+    var first = 0
+    var second = 0
+    var mark: u8 = 0
+    var digits = 0
+    for i in 0..s.len
+        let c = s[i]
+        if c >= '0' and c <= '9'
+            if mark == 0: first = first * 10 + (c - '0') as int
+            else: second = second * 10 + (c - '0') as int
+            digits += 1
+        elif (c == '+' or c == '/') and mark == 0: mark = c
+        else: break
+    if digits == 0: return SpeedInfinite
+    if mark == '/': return speed_of_seconds(second as i64 * 40 / max(first, 1) as i64, 0)
+    return speed_of_seconds(first as i64, second as i64)
+
+fn clock_of_pgn(s: str, buf: *[24]u8) -> str
+    var at = -1
+    for i in 0..s.len
+        if s[i] == '+' or s[i] == '/': at = i as int
+    if at < 0: return format(buf, "{s}")
+    let (base, base_ok) = uci_number(s[0..at])
+    let (rest, rest_ok) = uci_number(s[at + 1..s.len])
+    if s[at] == '+' and base_ok and rest_ok and base % 60 == 0: return format(buf, "{base / 60}+{rest}")
+    if s[at] == '/' and base_ok and rest_ok and rest % 60 == 0: return format(buf, "{base}/{rest / 60}")
+    return format(buf, "{s}")
+
+fn quick_clock(i: int) -> TimeControl
+    var t: TimeControl
+    t.kind = BaseIncrement
+    t.base_ms = QuickBase[i] as i64 * 1000
+    t.increment_ms = QuickIncrement[i] as i64 * 1000
+    return t
+
+fn quick_clock_text(i: int, buf: *[16]u8) -> str
+    return format(buf, "{QuickBase[i] / 60}+{QuickIncrement[i]}")

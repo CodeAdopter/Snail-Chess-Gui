@@ -1,0 +1,87 @@
+use src/app/workspace
+use src/tabs/play_tab
+
+const BarGap: f32 = 6.0
+const GamePanelHeight: f32 = 118.0
+const PlayGraphHeight: f32 = 150.0
+const GamePanelShort: f32 = 84.0
+
+extend Workspace
+    fn draw_play(app: *DesktopApp, look: *DesktopLook, theme: *GuiTheme, fonts: *GuiFonts, tab: *GuiTab, board_look: *BoardLook, choices: *EngineChoices) -> PlayPanelAsk
+        let play = tab.play
+        let (ax, ay, aw, ah) = work_area(&app.ui)
+        let col_w = board_column(app, look, ax, ay, aw, ah)
+        let bar_room = board_look.cards_on_table() ? 0.0 : PlayerBarHeight + BarGap
+        let frame = backdrop_frame(board_look, min(col_w, ah))
+        let fit = board_place(0.0, 0.0, max(min(col_w - frame * 2.0, ah - bar_room * 2.0 - frame * 2.0), 1.0), app.scale)
+        let size = fit.size
+        let slack = col_w - size
+        let board_x = ax + frame + max(slack - frame * 2.0, 0.0) * shift
+        if board_look.scene: tab.board.room = board_room(app, ax, col_w, TabRowHeight + CommandBarHeight)
+        else: draw_slack(app, ax, ay + bar_room, col_w, size, slack, board_x)
+        let place = board_place(board_x, ay + bar_room + frame, size, app.scale)
+        draw_backdrop_behind(app, board_look, ax, col_w, place)
+        board_look.sheet.prepare(&app.gpu, &app.ui_gpu, board_look.set, place.cell_px, board_look.costume)
+        let game = tab.game
+        if board_look.effects and board_look.effects.wants_story(): tab.board.story.follow(game)
+        if board_look.effects and board_look.effects.on(SacrificeMark)
+            var line: SacrificeLine
+            sacrifice_line_of(&line, game)
+            let p = &play.player
+            if p.score_kind != NoScore and game.nodes[line.nodes[line.count - 1]].first == NoNode: line.view(line.count - 1, white_view(p.score_kind, p.score, play.human.other()))
+            tab.board.sacrifice = find_sacrifice(&line)
+        var engine_name = play.engine_text()
+        if play.state == PlayChoosing
+            let i = choices.index_of(play.setup.engine_id)
+            engine_name = i >= 0 ? choices.names[i] : "Engine"
+        if play.state != PlayChoosing and play.helps(): engine_arrows(tab, board_look)
+        if board_look.scene: draw_player_bars(app, board_look, play, engine_name, place.x, ay, place.y + place.size + BarGap, place.size, tab.flipped, true)
+        tab.board.by_hand = true
+        tab.board.hand_waits = true
+        let made = tab.board.draw(app, board_look, game.board(), game.last_move(), place, tab.flipped, play.can_move(), play.can_premove())
+        play.by_hand = tab.board.free_on
+        play.in_3d = board_look.scene != null
+        play.table_clock = board_look.scene != null and board_look.desk_clock
+        if tab.board.free_on
+            let pressed = tab.board.clock_hit or tab.board.space_hit
+            tab.board.space_hit = false
+            if pressed and play.can_move()
+                let b = game.board()
+                let m = tab.board.free.match(b)
+                if m != NoMove: play.human_move(m)
+                elif not tab.board.free.same(b)
+                    play.illegal_move()
+                    tab.board.free.unsync()
+        else
+            let table_clock = board_look.scene != null and board_look.desk_clock
+            if made != NoMove: play.human_move(made, table_clock)
+            if tab.board.clock_hit or play.pressing and not table_clock: play.hit_clock()
+        draw_player_bars(app, board_look, play, engine_name, place.x, ay, place.y + place.size + BarGap, place.size, tab.flipped, false)
+
+        let (px, py, pw, ph) = side_room(&app.ui, ax, col_w)
+        if play.state == PlayChoosing
+            if tab.setup.draw(app, board_look, play, choices, px, py, pw, ph, &tab.flipped): return PanelAsksStart
+            return PanelAsksNothing
+        let game_h = play.state == PlayOver ? GamePanelHeight : GamePanelShort
+        let asked = draw_game_panel(app, board_look, play, px, py, pw, game_h)
+        app.ui.rect(px, py + game_h + WorkspaceGap * 0.5 - 0.5, pw, 1.0, theme.line)
+        var top = py + game_h + WorkspaceGap
+        let a = play.helps() ? tab.analysis : null
+        if a
+            let a_h = a.on ? min(tab.panel.height(&app.ui, a, choices), (py + ph - top) * 0.45) : tab.panel.closed_height()
+            tab.panel.draw(app, board_look, a, choices, px, top, pw, a_h, tab.flipped)
+            app.ui.rect(px, top + a_h + WorkspaceGap * 0.5 - 0.5, pw, 1.0, theme.line)
+            top += a_h + WorkspaceGap
+        draw_opening_row(&app.ui, theme, fonts, game, px, top - WorkspaceGap * 0.5, pw, OpeningRowHeight)
+        top += OpeningRowHeight - WorkspaceGap * 0.5
+        app.ui.rect(px, top - 0.5, pw, 1.0, theme.line)
+        let moves_h = py + ph - top
+        let shows = play.setup.show_eval or play.state == PlayOver or a != null and a.on
+        let graph_h = shows ? min(PlayGraphHeight, moves_h * 0.45) : 0.0
+        tab.moves.fixed = true
+        tab.moves.draw(app, look, theme, fonts, game, px, top, pw, moves_h - (graph_h > 0.0 ? graph_h + WorkspaceGap : 0.0))
+        if tab.moves.clicked: tab.board.free.unsync()
+        if graph_h > 0.0
+            app.ui.rect(px, py + ph - graph_h - WorkspaceGap * 0.5 - 0.5, pw, 1.0, theme.line)
+            draw_eval(app, board_look, game, px, py + ph - graph_h, pw, graph_h, "The evaluation graph updates as the engine plays.", null, null)
+        return asked

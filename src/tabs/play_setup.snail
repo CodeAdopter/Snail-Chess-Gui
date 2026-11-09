@@ -1,0 +1,150 @@
+use src/play/play_game
+use src/views/engine_picker
+use src/views/rail
+
+const SideNames = ["White", "Random", "Black"]
+const ClockNames = ["None", "Base + increment", "Moves in time"]
+
+struct PlaySetupPanel
+    loaded: bool
+    minutes: UiEditText
+    increment: UiEditText
+    moves: UiEditText
+    nodes: UiEditText
+    seconds: UiEditText
+    kinds: [..]StrengthKind
+    kind_names: [..]str
+    picker: EnginePicker
+
+    fn load(s: *PlaySetup)
+        var a: [16]u8
+        var t: [24]u8
+        minutes.set(amount_text(s.time.base_ms, 60000, &a))
+        increment.set(amount_text(s.time.increment_ms, 1000, &a))
+        moves.set(format(&t, "{s.time.moves}"))
+        nodes.set(format(&t, "{s.strength.nodes}"))
+        seconds.set(amount_text(s.strength.move_ms, 1000, &a))
+        loaded = true
+
+    fn draw(app: *DesktopApp, look: *BoardLook, play: *PlayGame, choices: *EngineChoices, x: f32, y: f32, w: f32, h: f32, flipped: *bool) -> bool
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        if w < 1.0 or h < 1.0: return false
+        let s = &play.setup
+        if not loaded: load(s)
+        if choices.index_of(s.engine_id) < 0 and choices.lib: s.engine_id = choices.lib.chosen_id()
+        let entry = choices.lib ? choices.lib.find(s.engine_id) : null
+        if entry and s.profile_id != 0 and not entry.profile(s.profile_id): s.profile_id = 0
+        if not strength_offered(entry, s.strength.kind): s.strength.kind = FullStrength
+        s.strength.fit(entry)
+        let text = UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink)
+        let muted = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let side = w < 420.0 ? 16.0 : 28.0
+        var kit = SettingsKit(ui, theme, fonts, max(w - side * 2.0, 1.0), 0, 0.0)
+        var started = false
+        with ui.open(UiNode(name: "playsetup", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), clip: true))
+            with ui.scroll_area("playsetupscroll", gap: 8.0, node: UiNode(width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(side, 26.0, side, 24.0)))
+                kit.title("PLAY", "New game", "Choose an engine, difficulty and time control.")
+                with kit.card(1, "Your opponent")
+                    with kit.row(10, "Engine", "")
+                        if entry
+                            let profile = entry.profile(s.profile_id)
+                            if engine_choice_button(ui, look, "engine", 0, entry.display_name(), profile ? profile.name_text() : "", picker.shown, UiNode(width: UiSize.fixed(KitControl))): picker.open()
+                        else: ui.label("No engine available. Add one in the Engines tab.", muted)
+                    strength_kinds(entry, &kinds)
+                    kind_names.clear()
+                    var chosen = 0
+                    for i in 0..kinds.len
+                        kind_names.push(strength_label(kinds[i]))
+                        if kinds[i] == s.strength.kind: chosen = i as int
+                    with kit.block(11, "Strength", strength_note(s.strength.kind))
+                        if kit_pick(&kit, "strength", kind_names[0..kind_names.len], ref chosen): s.strength.kind = kinds[chosen]
+                        if s.strength.kind != FullStrength
+                            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+                                strength_value(ui, look, s, entry)
+                    kit.switch(12, "Show the engine's evaluation", "Display an evaluation bar beside the board during the game.", ref s.show_eval)
+                    kit.switch(13, "Natural move timing", "Let the engine manage its thinking time based on the clock. When disabled, it uses a fixed response time.", ref s.natural)
+                with kit.card(2, "Colour and time control")
+                    with kit.block(20, "You play", "")
+                        var side_choice = s.side as int
+                        if kit_pick(&kit, "side", SideNames, ref side_choice)
+                            s.side = side_choice as SideChoice
+                            if s.side != ChooseRandom: *flipped = s.side == ChooseBlack
+                    with kit.block(21, "Clock", "")
+                        var kind = s.time.kind as int
+                        if kit_pick(&kit, "clock", ClockNames, ref kind): s.time.kind = kind as ClockKind
+                        if s.time.kind != NoClock
+                            with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                                if s.time.kind == MovesInTime
+                                    if ui.text_field("moves", &moves, "40", UiNode(width: UiSize.fixed(64.0))): take_moves(s)
+                                    ui.label("moves in", muted)
+                                if ui.text_field("minutes", &minutes, "5", UiNode(width: UiSize.fixed(64.0))): take_minutes(s)
+                                ui.label("min", muted)
+                                if s.time.kind == BaseIncrement
+                                    ui.label("+", muted)
+                                    if ui.text_field("increment", &increment, "0", UiNode(width: UiSize.fixed(64.0))): take_increment(s)
+                                    ui.label("s per move", muted)
+                if play.note_len > 0: ui.paragraph(play.note_text(), text, UiNode(width: UiSize.grow(), padding: Vec4(2.0, 10.0, 0.0, 0.0)))
+                with ui.open(UiNode(width: UiSize.grow(), padding: Vec4(0.0, 16.0, 0.0, 0.0)))
+                    if ui.button("Start game", true, UiNode(width: UiSize.grow(), height: UiSize.fixed(40.0))): started = true
+        if picker.draw(ui, look, choices.lib, s.engine_id, s.profile_id)
+            s.engine_id = picker.picked_engine
+            s.profile_id = picker.picked_profile
+        return started
+
+    fn strength_value(ui: *UiCanvas, look: *BoardLook, s: *PlaySetup, entry: *EngineEntry)
+        let theme = look.theme
+        let shown = UiTextStyle(face: look.fonts.strong, size: 12.5, color: theme.ink)
+        let muted = UiTextStyle(face: look.fonts.text, size: 12.5, color: theme.muted)
+        var n: [24]u8
+        match s.strength.kind
+            EloStrength
+                let (least, most) = elo_range(entry)
+                var v = s.strength.elo as f32
+                with ui.open(UiNode(width: UiSize.fixed(220.0), align: Vec2(0.0, 0.5)))
+                    if ui.slider_track("elo", ref v, least as f32, most as f32, 10.0): s.strength.elo = v as int
+                ui.label(format(&n, "Elo {s.strength.elo}"), shown)
+            SkillStrength
+                let o = &entry.options[skill_index(entry)]
+                var v = s.strength.skill as f32
+                with ui.open(UiNode(width: UiSize.fixed(220.0), align: Vec2(0.0, 0.5)))
+                    if ui.slider_track("skill", ref v, o.least as f32, o.most as f32, 1.0): s.strength.skill = v as int
+                ui.label(format(&n, "{entry.text(o.name)} {s.strength.skill}"), shown)
+            DepthStrength: ui.stepper("Search depth (plies)", ref s.strength.depth, 1, 60, UiNode(width: UiSize.fixed(180.0)))
+            NodesStrength
+                if ui.text_field("nodes", &nodes, "50000", UiNode(width: UiSize.fixed(110.0)))
+                    let (v, ok) = uci_number(nodes.text())
+                    if ok and v >= 1 and v <= 1000000000: s.strength.nodes = v
+                ui.label("nodes per move", muted)
+            TimeStrength
+                if ui.text_field("seconds", &seconds, "1", UiNode(width: UiSize.fixed(64.0)))
+                    let (v, ok) = read_amount(seconds.text(), 1000)
+                    if ok and v >= 10 and v <= 3600000: s.strength.move_ms = v
+                ui.label("s per move", muted)
+
+    fn take_minutes(s: *PlaySetup)
+        let (v, ok) = read_amount(minutes.text(), 60000)
+        if ok and v >= 1000 and v <= 36000000: s.time.base_ms = v
+
+    fn take_increment(s: *PlaySetup)
+        let (v, ok) = read_amount(increment.text(), 1000)
+        if ok and v <= 60000: s.time.increment_ms = v
+
+    fn take_moves(s: *PlaySetup)
+        let (v, ok) = uci_number(moves.text())
+        if ok and v >= 1 and v <= 200: s.time.moves = v as int
+
+    fn release()
+        kinds.free()
+        kind_names.free()
+        picker.release()
+
+fn strength_note(k: StrengthKind) -> str
+    match k
+        EloStrength: return "Limit the engine to a target Elo rating within its supported range."
+        SkillStrength: return "Use the engine's built-in skill setting."
+        DepthStrength: return "Limit the search depth in half-moves (plies)."
+        NodesStrength: return "Limit the number of nodes searched per move."
+        TimeStrength: return "Set a fixed thinking time for each move."
+    return "Use the engine at full strength."

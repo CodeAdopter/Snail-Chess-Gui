@@ -1,0 +1,214 @@
+use src/tabs/game_cards
+use src/store/player_record
+use src/views/settings_kit
+
+const HighlightBoard: f32 = 128.0
+const TrendTall: f32 = 44.0
+const TileGap: f32 = 10.0
+const FormGames = 20
+
+struct OverviewView
+    trend: [..]f32
+    trend_at: [5]int
+    peaks: [4]int
+    sides: [6]int
+    form: [..]int
+    paths: [4]UiPath
+    boards: GameCards
+    made_for: u64
+    opened: int = -1
+
+    fn draw(ui: *UiCanvas, look: *BoardLook, record: *PlayerRecord, played: *PlayedIndex, kit: *SettingsKit, best: [..]int, upsets: [..]int)
+        if played.version != made_for or made_for == 0
+            made_for = played.version
+            gather(played)
+        let theme = look.theme
+        var note: [80]u8
+        let h = kit.heading(1, "Ratings", "Your rating at each speed and how it has moved.")
+        h.end()
+        let across = kit.narrow() ? 2 : RatedSpeeds as int
+        let tile = floor((kit.width - TileGap * (across - 1) as f32) / across as f32)
+        with ui.open(UiNode(name: "ratingtiles", width: UiSize.grow(), gap: TileGap))
+            for at in 0..(RatedSpeeds as int + across - 1) / across
+                with ui.open(UiNode(key: at, flow: FlowRow, width: UiSize.grow(), gap: TileGap))
+                    for s in at * across..min(at * across + across, RatedSpeeds as int)
+                        rating_tile(ui, look, record, s, tile)
+        results(ui, look, played, kit)
+        let pieces = PieceSource(look.sheet, null, look.set)
+        var over = false
+        let wins = kit.heading(3, "Best wins", "The strongest opponents you have beaten.")
+        wins.end()
+        if shelf(ui, look, pieces, played, best, false, kit.width, 3): over = true
+        let ups = kit.heading(4, "Biggest upsets", "Wins over opponents rated furthest above you.")
+        ups.end()
+        if shelf(ui, look, pieces, played, upsets, true, kit.width, 4): over = true
+        if not over: boards.hover = -1
+
+    fn rating_tile(ui: *UiCanvas, look: *BoardLook, record: *PlayerRecord, s: int, w: f32)
+        let theme = look.theme
+        let fonts = look.fonts
+        let r = &record.ratings[s]
+        var n: [16]u8
+        var line: [80]u8
+        with ui.open(UiNode(key: s, name: "ratingtile", width: UiSize.fixed(w), padding: Vec4(14.0, 12.0, 14.0, 12.0), gap: 8.0, box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(RowCurve), border: 1.0, border_color: theme.line))))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 7.0, align: Vec2(0.0, 0.5)))
+                boards.icons.show(ui, SpeedIcons[s], 15.0, theme.muted)
+                ui.label(SpeedNames[s], UiTextStyle(face: fonts.strong, size: 12.0, color: theme.muted))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 3.0, align: Vec2(0.0, 1.0)))
+                ui.label(format(&n, "{r.shown()}"), UiTextStyle(face: fonts.strong, size: 26.0, color: r.games == 0 ? theme.muted : theme.ink))
+                if r.provisional(): ui.label("?", UiTextStyle(face: fonts.strong, size: 20.0, color: theme.muted))
+                ui.spacer()
+                if peaks[s] > 0: ui.label(format(&line, "Peak {peaks[s]}"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted), UiNode(padding: Vec4(0.0, 0.0, 0.0, 4.0)))
+            trend_line(ui, theme, fonts, s, w - 28.0)
+            wdl_bar(ui, theme, r.wins, r.draws, r.losses, 5.0)
+            ui.label(r.games == 0 ? format(&line, "No games yet") : format(&line, "{r.games} games  ·  {r.wins}W {r.draws}D {r.losses}L"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+
+    fn trend_line(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, s: int, w: f32)
+        let pts = trend[trend_at[s]..trend_at[s + 1]]
+        let h = TrendTall
+        with ui.open(UiNode(name: "trend", width: UiSize.fixed(w), height: UiSize.fixed(h), align: Vec2(0.0, 0.5)))
+            if pts.len < 2: ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.fixed(2.0), box: UiBox(fill: UiFill.solid(theme.line.with_alpha(0.6)), radius: Vec4.splat(1.0))))
+            else
+                var lo = pts[0]
+                var hi = pts[0]
+                for v in pts
+                    lo = min(lo, v)
+                    hi = max(hi, v)
+                let span = max(hi - lo, 30.0)
+                let base = (hi + lo - span) * 0.5
+                let shift = (w - h) * 0.5
+                let p = &paths[s]
+                p.clear()
+                var x: f32 = 0.0
+                var y: f32 = 0.0
+                for k in 0..pts.len
+                    x = 3.0 + (w - 6.0) * k as f32 / (pts.len - 1) as f32
+                    y = h - 4.0 - (pts[k] - base) / span * (h - 8.0)
+                    if k == 0: p.move_to(x - shift, y)
+                    else: p.line_to(x - shift, y)
+                ui.drawing(p, h, 2.0, h, theme.accent, UiNode(width: UiSize.fixed(w), height: UiSize.fixed(h)))
+                ui.leaf(UiNode(name: "trendend", floating: true, offset: Vec2(x - 3.5, y - 3.5), width: UiSize.fixed(7.0), height: UiSize.fixed(7.0), box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(3.5), border: 1.5, border_color: theme.surface)))
+
+    fn results(ui: *UiCanvas, look: *BoardLook, played: *PlayedIndex, kit: *SettingsKit)
+        let theme = look.theme
+        let fonts = look.fonts
+        let won = sides[0] + sides[3]
+        let drawn = sides[1] + sides[4]
+        let lost = sides[2] + sides[5]
+        let decided = won + drawn + lost
+        var line: [80]u8
+        let h = kit.heading(2, "Results", decided == 0 ? "Your games against engines." : format(&line, "{decided} finished games against engines."))
+        h.end()
+        with ui.open(UiNode(name: "resultscard", width: UiSize.grow(), padding: Vec4.splat(18.0), gap: 14.0, box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(RowCurve), border: 1.0, border_color: theme.line))))
+            var score: [16]u8
+            with ui.open(UiNode(name: "figures", flow: FlowRow, width: UiSize.grow(), gap: 28.0, align: Vec2(0.0, 1.0)))
+                result_figure(ui, theme, fonts, 0, format(&line, "{won}"), "WON", theme.gain())
+                result_figure(ui, theme, fonts, 1, format(&score, "{drawn}"), "DRAWN", theme.muted)
+                var lost_text: [16]u8
+                result_figure(ui, theme, fonts, 2, format(&lost_text, "{lost}"), "LOST", theme.loss())
+                ui.spacer()
+                var pct: [16]u8
+                result_figure(ui, theme, fonts, 3, decided == 0 ? "–" : format(&pct, "{((won as f64 + drawn as f64 * 0.5) * 100.0 / decided as f64 + 0.5) as int}%"), "SCORE", theme.ink)
+            wdl_bar(ui, theme, won, drawn, lost, 8.0)
+            results_side(ui, theme, fonts, 0, "As White", sides[0], sides[1], sides[2])
+            results_side(ui, theme, fonts, 1, "As Black", sides[3], sides[4], sides[5])
+            with ui.open(UiNode(name: "form", flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+                ui.label(format(&line, "Last {form.len}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(width: UiSize.fixed(70.0)))
+                let square = clamp(floor((kit.width - 36.0 - 80.0) / FormGames as f32) - 4.0, 6.0, 14.0)
+                with ui.open(UiNode(flow: FlowRow, gap: 4.0, align: Vec2(0.0, 0.5)))
+                    for k in 0..form.len
+                        let o = form[k]
+                        let c = o == 1 ? theme.gain() : o == -1 ? theme.loss() : theme.muted
+                        ui.leaf(UiNode(key: k as int, width: UiSize.fixed(square), height: UiSize.fixed(square), box: UiBox(fill: UiFill.solid(c.with_alpha(0.9)), radius: Vec4.splat(3.0))))
+
+    fn shelf(ui: *UiCanvas, look: *BoardLook, pieces: PieceSource, played: *PlayedIndex, rows: [..]int, upset: bool, width: f32, key: int) -> bool
+        let theme = look.theme
+        if rows.len == 0
+            with ui.open(UiNode(key: key, name: "nogames", width: UiSize.grow(), padding: Vec4(18.0, 14.0, 18.0, 14.0), box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(RowCurve), border: 1.0, border_color: theme.line))))
+                ui.paragraph("Your wins in rated games will appear here.", UiTextStyle(face: look.fonts.text, size: 12.5, color: theme.muted))
+            return false
+        let tile = HighlightBoard + 20.0
+        let per = max(floor((width + TileGap) / (tile + TileGap)) as int, 1)
+        var over = false
+        var k = 0
+        with ui.open(UiNode(key: key, name: "highlights", width: UiSize.grow(), gap: TileGap))
+            while k < rows.len
+                with ui.open(UiNode(key: k, flow: FlowRow, gap: TileGap))
+                    for c in 0..per
+                        if k >= rows.len: break
+                        if highlight(ui, look, pieces, played, rows[k], upset, tile): over = true
+                        k += 1
+        return over
+
+    fn highlight(ui: *UiCanvas, look: *BoardLook, pieces: PieceSource, played: *PlayedIndex, i: int, upset: bool, tile: f32) -> bool
+        let theme = look.theme
+        let fonts = look.fonts
+        let g = &played.games[i]
+        let o = ui.open(UiNode(key: i, name: "highlight", width: UiSize.fixed(tile), padding: Vec4.splat(10.0), gap: 6.0, hit: true))
+        let h = ui.interact(o.id)
+        let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 20.0)
+        ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.35 * lit)), radius: Vec4.splat(10.0), border: 1.0, border_color: theme.line.lerp(theme.gain(), 0.4 * lit)))
+        if h.clicked: opened = g.at
+        boards.board(ui, look, pieces, played, g, i, h.hovered, HighlightBoard)
+        var line: [64]u8
+        var when: [24]u8
+        let opponent = played.text(g.person == 0 ? g.black : g.white)
+        ui.label(opponent.len > 0 ? opponent : "?", UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true, padding: Vec4(2.0, 2.0, 2.0, 0.0)))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 6.0, padding: Vec4(2.0, 0.0, 2.0, 0.0), align: Vec2(0.0, 0.5), clip: true))
+            if upset: ui.label(format(&line, "+{g.opponent_elo - g.person_elo}"), UiTextStyle(face: fonts.strong, size: 12.0, color: theme.gain()))
+            else: ui.label(format(&line, "{g.opponent_elo}"), UiTextStyle(face: fonts.strong, size: 12.0, color: theme.ink))
+            ui.label(upset ? "above you" : when_text(g.day, &when), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted), UiNode(clip: true))
+        ui.close()
+        return h.hovered
+
+    fn gather(played: *PlayedIndex)
+        trend.clear()
+        form.clear()
+        for k in 0..6
+            sides[k] = 0
+        for s in 0..RatedSpeeds as int
+            trend_at[s] = trend.len as int
+            peaks[s] = 0
+            for g in played.games
+                if g.person < 0 or g.speed != s or not g.rated or g.person_elo <= 0 or not g.changed: continue
+                if trend.len as int == trend_at[s]: trend.push(g.person_elo as f32)
+                let after = g.person_elo + g.change
+                trend.push(after as f32)
+                peaks[s] = max(peaks[s], after)
+        trend_at[RatedSpeeds as int] = trend.len as int
+        for g in played.games
+            let o = played.outcome(&g)
+            if o == 2: continue
+            sides[g.person * 3 + (o == 1 ? 0 : o == 0 ? 1 : 2)] += 1
+            form.push(o)
+        if form.len as int > FormGames
+            let cut = form.len as int - FormGames
+            for k in 0..FormGames
+                form[k] = form[k + cut]
+            form.resize(FormGames)
+
+    fn release()
+        trend.free()
+        form.free()
+        for i in 0..4
+            paths[i].free_all()
+        boards.release()
+
+fn result_figure(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, key: int, big: str, small: str, color: Color)
+    with ui.open(UiNode(key: key, name: "figure", gap: 2.0))
+        ui.label(big, UiTextStyle(face: fonts.strong, size: 26.0, color: color))
+        ui.label(small, UiTextStyle(face: fonts.strong, size: 10.0, color: theme.muted, tracking: 0.8))
+
+fn wdl_bar(ui: *UiCanvas, theme: *GuiTheme, won: int, drawn: int, lost: int, tall: f32)
+    let parts = [won, drawn, lost]
+    let colors = [theme.gain(), theme.muted, theme.loss()]
+    with ui.open(UiNode(name: "wdlbar", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(tall), gap: 2.0, clip: true, box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(tall * 0.5))))
+        for k in 0..3
+            if parts[k] > 0: ui.leaf(UiNode(key: k as int, width: UiSize.grow(parts[k] as f32), height: UiSize.grow(), box: UiBox(fill: UiFill.solid(colors[k]), radius: Vec4.splat(tall * 0.5))))
+
+fn results_side(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, key: int, name: str, won: int, drawn: int, lost: int)
+    var line: [48]u8
+    with ui.open(UiNode(key: key, name: "siderow", flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+        ui.label(name, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(width: UiSize.fixed(70.0)))
+        wdl_bar(ui, theme, won, drawn, lost, 6.0)
+        ui.label(format(&line, "{won}W {drawn}D {lost}L"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(width: UiSize.fixed(90.0)))

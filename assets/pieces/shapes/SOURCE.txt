@@ -1,0 +1,2 @@
+Shapes pieces, Snail Chess GUI's own, drawn by tools/piece_sets/minimal.py. Dedicated to the public
+domain under CC0 1.0 Universal, https://creativecommons.org/publicdomain/zero/1.0/

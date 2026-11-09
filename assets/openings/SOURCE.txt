@@ -1,0 +1,9 @@
+Chess opening names from Lichess
+https://github.com/lichess-org/chess-openings
+Commit 712a58be746c143f4ab935b68acc50f4bac813eb (2026-10-29T12:21:54Z)
+3865 lines in a.tsv to e.tsv, copied as published. openings.bin is packed from them
+by tools/openings.py.
+
+As a collection of facts, this data set is in the public domain. Insofar as its curation
+qualifies for copyright, the work is released under the CC0 Public Domain Dedication
+(https://creativecommons.org/publicdomain/zero/1.0/).

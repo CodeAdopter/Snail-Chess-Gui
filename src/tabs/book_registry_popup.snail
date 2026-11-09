@@ -1,0 +1,146 @@
+use src/books/book_download
+use src/tabs/registry_popup
+
+struct BookRegistryPopup
+    shown: bool
+    ready: bool
+    registry: BookRegistry
+    job: BookDownload
+    mirror: [..]u8
+    search: UiEditText
+    results: [..]int
+    made_query: [256]u8
+    made_len: int
+    made_version: int = -1
+    chosen: int = -1
+    fetched: int = -1
+
+    fn open(data: *DataFolder)
+        shown = true
+        registry.load(data)
+        if registry.due(): registry.refresh()
+
+    fn update(app: *DesktopApp)
+        if registry.update(): app.redraw()
+        if not job.update(): return
+        app.redraw()
+        if job.step == BookFetchReady
+            ready = true
+            shown = false
+        elif job.step == BookFetchFailed and not shown
+            var line: [500]u8
+            app.ui.toast(format(&line, "{job.name_text()} could not be downloaded. {job.failure_text()}"))
+
+    fn draw(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts)
+        if not shown: return
+        let ui = &app.ui
+        refresh_results()
+        let w = clamp(ui.width - 80.0, 720.0, 1160.0)
+        let h = clamp(ui.height - 220.0, 320.0, 660.0)
+        var line: [200]u8
+        var sheet = sheet_popup(ui, theme, fonts, "bookregistry", ref shown, w, h, RegistryListWidth)
+        with sheet.header("Add a book from the registry", books_status(&registry, &line))
+            if ui.button(registry.fetching ? "Fetching" : "Refresh") and not registry.fetching: registry.refresh()
+        with sheet.rail()
+            ui.text_field("bookregistrysearch", &search, "Search book names, collections and descriptions", UiNode(width: UiSize.grow()))
+            if registry.failure_len > 0
+                let kept = registry.catalog.books.len > 0 ? " Showing the cached catalog." : ""
+                ui.paragraph(format(&line, "{registry.failure_text()}{kept}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.warn), UiNode(width: UiSize.grow()))
+            list(ui, theme, fonts)
+        with sheet.body(Vec4(0.0, 0.0, 0.0, 0.0), 0.0)
+            with ui.scroll_area("bookregistrydetails", gap: 10.0, node: UiNode(key: chosen, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(28.0, 22.0, 28.0, 24.0)))
+                details(ui, theme, fonts)
+        sheet.end()
+        if sheet.closed: shown = false
+
+    fn refresh_results()
+        let query = search.text()
+        if registry.version == made_version and query == str(made_query[0..made_len]): return
+        made_version = registry.version
+        made_len = min(query.len, 256) as int
+        for k in 0..made_len
+            made_query[k] = query[k]
+        registry.search(query, &results)
+        chosen = results.len > 0 ? results[0] : -1
+
+    fn list(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+        let c = &registry.catalog
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        if c.books.len == 0: ui.paragraph(registry.fetching ? "Loading catalog..." : "No catalog loaded. Click Refresh to download it.", note)
+        elif results.len == 0: ui.paragraph("No matching books.", note)
+        with v = ui.virtual_list("bookregistryrows", results.len as int, RegistryRowHeight)
+            for r in v.first..v.last
+                let i = results[r]
+                let b = &c.books[i]
+                with ui.open(UiNode(key: i, width: UiSize.grow(), height: UiSize.fixed(RegistryRowHeight)))
+                    if rail_place(ui, theme, fonts, "registrybook", i, c.text(b.name), b.pgn ? "PGN" : "EPD", i == chosen): chosen = i
+
+    fn details(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+        let c = &registry.catalog
+        if chosen < 0 or chosen >= c.books.len: return
+        let b = &c.books[chosen]
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        var line: [300]u8
+        var size: [40]u8
+        var unpacked: [40]u8
+        ui.label(c.text(b.name), UiTextStyle(face: fonts.serif, size: 26.0, color: theme.ink))
+        if b.description.len > 0: ui.paragraph(c.text(b.description), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+        fact(ui, fonts, theme, "Holds", format(&line, "{b.positions} positions, {b.pgn ? "as PGN lines" : "as EPD"}"))
+        fact(ui, fonts, theme, "Kind", c.text(b.category))
+        fact(ui, fonts, theme, "Depth", plies_text(b, &line))
+        fact(ui, fonts, theme, "Download", format(&line, "{size_text(b.archive_size, &size)}, {size_text(b.content_size, &unpacked)} unpacked"))
+        fact(ui, fonts, theme, "Collection", c.text(b.collection))
+        if b.author.len > 0: fact(ui, fonts, theme, "Author", c.text(b.author))
+        fact(ui, fonts, theme, "Licence", b.license.len > 0 ? c.text(b.license) : "Not stated")
+        if b.source.len > 0: fact(ui, fonts, theme, "Source", c.text(b.source))
+        if b.notes.len > 0: fact(ui, fonts, theme, "Notes", c.text(b.notes))
+        if not b.standard: ui.paragraph("This book uses Chess960. Only standard chess is supported, so this book cannot be downloaded.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn))
+        elif not b.licensed: ui.paragraph("No licence is listed. Check the author's terms before sharing this book.", note)
+        let mine = job.busy() and fetched == chosen
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, padding: Vec4(0.0, 6.0, 0.0, 0.0)))
+            if mine
+                if ui.button(job.step == BookFetchUnpacking ? "Unpacking" : "Cancel") and job.step == BookFetchDownloading: job.cancel()
+            elif ui.button("Download", true): download()
+            if b.source_url.len > 0 and ui.button("Source"): open_link(c.text(b.source_url))
+            if b.license_url.len > 0 and ui.button("Licence"): open_link(c.text(b.license_url))
+        if mine: ui.paragraph(download_status(&job, &line), note)
+        elif job.step == BookFetchFailed and fetched == chosen: ui.paragraph(job.failure_text(), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+        elif job.busy(): ui.paragraph(format(&line, "Downloading {job.name_text()}. Only one book can download at a time."), note)
+        else: ui.paragraph("Downloads are verified against the catalog, then opened for import.", note)
+
+    fn download()
+        refresh_results()
+        if chosen < 0 or not registry.catalog.books[chosen].standard or job.busy(): return
+        fetched = chosen
+        job.start(registry.data, &registry.catalog, chosen, str(mirror[0..mirror.len]))
+
+    fn release()
+        job.release()
+        registry.release()
+        mirror.free()
+        results.free()
+
+fn books_status(registry: *BookRegistry, line: *[200]u8) -> str
+    if registry.fetching
+        let (got, total) = registry.fetch.progress()
+        return format(line, "Fetching the catalog, {got / 1024} KB")
+    let n = registry.catalog.books.len
+    if n == 0: return format(line, "")
+    var age: [40]u8
+    return format(line, "{n} books · Catalog updated {registry.catalog.text(registry.catalog.updated)} · Downloaded {age_text(wall_ns() - registry.fetched_ns, &age)}")
+
+fn download_status(job: *BookDownload, line: *[300]u8) -> str
+    if job.step == BookFetchUnpacking: return format(line, "Extracting and verifying the book...")
+    let (got, total) = job.get.progress()
+    var a: [40]u8
+    var b: [40]u8
+    return format(line, "Downloading, {size_text(got, &a)} of {size_text(job.archive_size, &b)}")
+
+fn plies_text(b: *RegistryBook, line: *[300]u8) -> str
+    if b.max_ply < 0: return format(line, "Not stated")
+    if b.min_ply == b.max_ply: return format(line, "{b.max_ply} plies")
+    return format(line, "{max(b.min_ply, 0)} to {b.max_ply} plies")
+
+fn size_text(n: i64, buf: *[40]u8) -> str
+    if n < 1048576: return format(buf, "{(n + 1023) / 1024} KB")
+    return format(buf, "{n / 1048576}.{n % 1048576 * 10 / 1048576} MB")

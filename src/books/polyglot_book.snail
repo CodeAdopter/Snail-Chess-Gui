@@ -1,0 +1,148 @@
+use src/books/book_read
+use engine/core/sort
+
+const PolyglotEntryBytes = 16
+const PolyglotMostLines = 1000000
+
+struct PolyglotEntry
+    key: u64
+    move: u16
+    weight: u16
+
+struct PolyglotBook
+    entries: [..]PolyglotEntry
+
+    fn read(bytes: []u8) -> str
+        entries.clear()
+        if bytes.len == 0: return "The book file is empty."
+        if bytes.len % PolyglotEntryBytes != 0: return "Invalid Polyglot file: the size must be a multiple of 16 bytes."
+        let n = bytes.len as int / PolyglotEntryBytes
+        for i in 0..n
+            let at = i * PolyglotEntryBytes
+            var key: u64 = 0
+            for k in 0..8
+                key = key << 8 | bytes[at + k] as u64
+            let move = (bytes[at + 8] as u16) << 8 | bytes[at + 9] as u16
+            let weight = (bytes[at + 10] as u16) << 8 | bytes[at + 11] as u16
+            if i > 0 and key < entries[i - 1].key: return "Invalid Polyglot file: entries must be sorted by position key."
+            entries.push(PolyglotEntry(key, move, weight))
+        return ""
+
+    fn first_of(key: u64) -> int
+        var low = 0
+        var high = entries.len as int
+        while low < high
+            let middle = (low + high) / 2
+            if entries[middle].key < key: low = middle + 1
+            else: high = middle
+        return low < entries.len and entries[low].key == key ? low : -1
+
+    fn release()
+        entries.free()
+
+fn polyglot_move(board: *Board, raw: u16) -> (Move, bool)
+    let code = raw as int
+    let to = Square(code & 7, code >> 3 & 7)
+    let from = Square(code >> 6 & 7, code >> 9 & 7)
+    let promoted = code >> 12 & 7
+    var list: MoveList = undefined
+    list.fill(board)
+    for i in 0..list.count
+        let m = list.items[i]
+        if m.from != from: continue
+        if m.is_castle
+            let rook = Square(m.kind == CastleKingside ? 7 : 0, from.rank)
+            if to == rook or to == m.to: return m, true
+            continue
+        if m.to != to: continue
+        let made = m.is_promotion ? m.promotion as int - Knight as int + 1 : 0
+        if made == promoted: return m, true
+    return NoMove, false
+
+struct PolyglotWalk
+    book: *PolyglotBook
+    into: *BookRead
+    plies: int
+    share: int
+    moves: [..]Move
+    starts: [..]int
+    weights: [..]f64
+    path: [64]Move
+    counted: [..]bool
+
+    fn run(most: int)
+        var start: Board
+        start.load_fen(StartFen)
+        counted.resize(book.entries.len)
+        for i in 0..counted.len
+            counted[i] = false
+        plies = clamp(plies, 1, 64)
+        walk(&start, 0, 1.0)
+        if weights.len == 0 and into.errors == 0: into.error("The book contains no moves for the starting position.")
+        let n = weights.len as int
+        var order: [..]u64
+        var scratch: [..]u64
+        defer order.free()
+        defer scratch.free()
+        for i in 0..n
+            let q = (clamp(weights[i], 0.0, 1.0) * 4294967295.0) as u64
+            order.push((4294967295 - q) << 32 | i as u64)
+        scratch.resize(n)
+        if n > 0: sort_u64(&order[0], n, &scratch[0])
+        for k in 0..n
+            let i = (order[k] & 4294967295) as int
+            if into.count >= most
+                into.beyond += 1
+                continue
+            into.add(&start, moves[starts[i]..starts[i] + line_length(i)], "")
+
+    fn line_length(i: int) -> int
+        let end = i + 1 < starts.len ? starts[i + 1] : moves.len as int
+        return end - starts[i]
+
+    fn walk(b: *Board, depth: int, weight: f64)
+        if weights.len >= PolyglotMostLines or atomic_load(&into.cancelled) != 0
+            into.stopped = true
+            return
+        if depth == plies
+            keep(depth, weight)
+            return
+        let first = book.first_of(b.key)
+        var total: u64 = 0
+        var i = first
+        while i >= 0 and i < book.entries.len and book.entries[i].key == b.key
+            total += book.entries[i].weight as u64
+            i += 1
+        var went = false
+        i = first
+        while i >= 0 and i < book.entries.len and book.entries[i].key == b.key
+            let e = book.entries[i]
+            let at = i
+            i += 1
+            if e.weight == 0 or (e.weight as u64) * 100 < (share as u64) * total: continue
+            let (m, legal) = polyglot_move(b, e.move)
+            if not legal
+                if not counted[at]
+                    counted[at] = true
+                    var line: [120]u8
+                    into.error(format(&line, "The book contains an illegal move at half-move {depth + 1}."))
+                continue
+            var next = *b
+            next.play(m)
+            path[depth] = m
+            went = true
+            walk(&next, depth + 1, weight * e.weight as f64 / total as f64)
+        if not went and depth > 0: keep(depth, weight)
+
+    fn keep(depth: int, weight: f64)
+        starts.push(moves.len as int)
+        weights.push(weight)
+        for k in 0..depth
+            moves.push(path[k])
+        atomic_store(&into.done, weights.len as int)
+
+    fn release()
+        moves.free()
+        starts.free()
+        weights.free()
+        counted.free()

@@ -1,0 +1,55 @@
+use engine/ui/ui_widgets
+use src/theme/fonts
+use src/theme/theme
+
+const FilterPopWidth: f32 = 260.0
+
+struct FilterPop
+    ui: *UiCanvas
+    theme: *GuiTheme
+    fonts: *GuiFonts
+    id: u32
+    pop: u32
+    shown: bool
+    inside: bool
+    nested: bool
+
+    fn pick(name: str, title: str, ref chosen: int, words: []str) -> bool
+        if not shown: return false
+        ui.label(title, UiTextStyle(face: fonts.strong, size: 10.5, color: theme.muted, tracking: 0.7), UiNode(name: "filtertitle", padding: Vec4(2.0, 6.0, 0.0, 0.0)))
+        let changed = ui.dropdown(name, ref chosen, words, UiNode(width: UiSize.grow()))
+        if ui.memory(ui.last_widget).open: nested = true
+        return changed
+
+    fn end()
+        if shown
+            ui.close()
+            let r = ui.memory(pop).rect
+            let p = ui.pointer_local()
+            if p.x >= r.x and p.x < r.x + r.z and p.y >= r.y and p.y < r.y + r.w: inside = true
+            let m = ui.memory(id)
+            if ui.pointer_pressed and not inside and not nested or ui.input.pressed(Escape): m.open = false
+        ui.close()
+
+fn filter_pop(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name: str, set: int) -> FilterPop
+    let t = &ui.theme
+    let o = ui.open(UiNode(name: name, flow: FlowRow, padding: Vec4(12.0, 7.0, 10.0, 7.0), gap: 8.0, align: Vec2(0.0, 0.5), hit: true, focusable: true))
+    let h = ui.interact(o.id)
+    let m = ui.memory(o.id)
+    if h.clicked: m.open = not m.open
+    let hover = ui.spring(o.id, 0, h.hovered or m.open ? 1.0 : 0.0)
+    let ring = ui.ring_of(o.id)
+    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(t.surface.lerp(t.raised, hover)), radius: Vec4.splat(t.radius), border: 1.0 + ring, border_color: t.line.lerp(t.focus, ring))
+    ui.label("Filters", t.text())
+    if set > 0
+        var n: [8]u8
+        with ui.open(UiNode(name: "filtercount", height: UiSize.fixed(18.0), padding: Vec4(6.0, 0.0, 6.0, 0.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(9.0))))
+            ui.label(format(&n, "{set}"), UiTextStyle(face: fonts.strong, size: 11.0, color: theme.accent_ink))
+    ui.mark(MarkDown, 14.0, t.muted)
+    var f = FilterPop(ui, theme, fonts, o.id, 0, m.open, h.hovered, false)
+    if m.open
+        let opened = ui.spring(o.id, 1, 1.0, 24.0)
+        let p = ui.open(UiNode(name: "filterpanel", floating: true, anchor: Vec2(1.0, 1.0), pivot: Vec2(1.0, 0.0), offset: Vec2(0.0, 4.0 + 6.0 * (1.0 - opened)), layer: 6, width: UiSize.fixed(FilterPopWidth), padding: Vec4(12.0, 6.0, 12.0, 12.0), gap: 4.0, hit: true, box: UiBox(fill: UiFill.solid(t.raised.with_alpha(opened)), radius: Vec4.splat(t.radius), border: 1.0, border_color: t.line, shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.18 * opened), 0.0, 8.0, 22.0, 0.0, false))))
+        f.pop = p.id
+    else: ui.spring(o.id, 1, 0.0, 24.0)
+    return f

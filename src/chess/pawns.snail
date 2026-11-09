@@ -1,0 +1,36 @@
+use chess/primitives
+
+fn push_step[us: Side]() -> int
+    return us == White ? 8 : -8
+
+fn west_step[us: Side]() -> int
+    return us == White ? 7 : -9
+
+fn east_step[us: Side]() -> int
+    return us == White ? 9 : -7
+
+fn pawn_start[us: Side]() -> Bitboard
+    return us == White ? Rank2 : Rank7
+
+fn promotion_rank[us: Side]() -> Bitboard
+    return us == White ? Rank8 : Rank1
+
+@inline
+fn push[us: Side](b: Bitboard) -> Bitboard
+    return us == White ? b << 8 : b >> 8
+
+@inline
+fn push_twice[us: Side](b: Bitboard) -> Bitboard
+    return us == White ? b << 16 : b >> 16
+
+@inline
+fn capture_west[us: Side](pawns: Bitboard) -> Bitboard
+    return us == White ? (pawns & ~FileA) << 7 : (pawns & ~FileA) >> 9
+
+@inline
+fn capture_east[us: Side](pawns: Bitboard) -> Bitboard
+    return us == White ? (pawns & ~FileH) << 9 : (pawns & ~FileH) >> 7
+
+@inline
+fn enemy_pawn_attacks[us: Side](pawns: Bitboard) -> Bitboard
+    return us == White ? (pawns & ~FileA) >> 9 | (pawns & ~FileH) >> 7 : (pawns & ~FileA) << 7 | (pawns & ~FileH) << 9

@@ -1,0 +1,175 @@
+use src/chess/fen
+use src/chess/moves
+use snaildb/db_os
+
+const DbPvMost = 12
+const DbMateScore = 1000000
+const DbExact = 0
+const DbLower = 1
+const DbUpper = 2
+const DbHasWdl: u8 = 1
+const DbShared: u8 = 2
+
+struct DbEval
+    key: u64
+    engine: u16
+    multipv: u8
+    depth: u8
+    seldepth: u8
+    bound: u8
+    pv_len: u8
+    flags: u8
+    score: i32
+    wdl: u32
+    nodes: u64
+    time_ms: u32
+    stamp: u32
+    pv: [DbPvMost]u16
+
+struct DbPos
+    key: u64
+    occupied: u64
+    nibbles: [16]u8
+
+struct DbSeen
+    key: u64
+    game: u32
+    ply: u16
+    result: u8
+    spare: u8
+
+fn db_eval_better(a: *u8, b: *u8) -> bool
+    let x = a as *DbEval
+    let y = b as *DbEval
+    if x.depth != y.depth: return x.depth > y.depth
+    if x.nodes != y.nodes: return x.nodes > y.nodes
+    if x.stamp != y.stamp: return x.stamp > y.stamp
+    return (x.flags & DbShared) > (y.flags & DbShared)
+
+fn db_wdl(win: int, draw: int, loss: int) -> u32
+    return (win as u32 & 1023) | (draw as u32 & 1023) << 10 | (loss as u32 & 1023) << 20
+
+fn db_move(move: Move) -> u16
+    var promo = 0
+    if move.is_promotion: promo = (move.promotion as int) - (Knight as int) + 1
+    return (move.from as u16) | (move.to as u16) << 6 | (promo as u16) << 12
+
+fn db_find_move(board: *Board, code: u16) -> (Move, bool)
+    var list: MoveList = undefined
+    list.fill(board)
+    for i in 0..list.count
+        let m = list.items[i]
+        if db_move(m) == code: return m, true
+        if m.is_castle and db_castle_on_rook(m) == code: return m, true
+    return NoMove, false
+
+fn db_castle_on_rook(m: Move) -> u16
+    let from = m.from as int
+    let rook_file = m.to as int % 8 > from % 8 ? 7 : 0
+    return from as u16 | ((from / 8 * 8 + rook_file) as u16) << 6
+
+fn db_move_of_uci(t: str) -> (u16, bool)
+    if t.len < 4 or t.len > 5: return 0, false
+    let ff = t[0] - 'a'
+    let fr = t[1] - '1'
+    let tf = t[2] - 'a'
+    let tr = t[3] - '1'
+    if ff > 7 or fr > 7 or tf > 7 or tr > 7: return 0, false
+    var promo = 0
+    if t.len == 5
+        let c = t[4]
+        if c == 'n': promo = 1
+        elif c == 'b': promo = 2
+        elif c == 'r': promo = 3
+        elif c == 'q': promo = 4
+        else: return 0, false
+    return (fr * 8 + ff) as u16 | ((tr * 8 + tf) as u16) << 6 | (promo as u16) << 12, true
+
+fn db_add_uci(out: *[..]u8, code: u16)
+    let from = code & 63
+    let to = code >> 6 & 63
+    out.push(('a' + from % 8) as u8)
+    out.push(('1' + from / 8) as u8)
+    out.push(('a' + to % 8) as u8)
+    out.push(('1' + to / 8) as u8)
+    let promo = code >> 12 & 7
+    if promo > 0: out.push("nbrq"[promo - 1])
+
+fn db_pack(board: *Board) -> DbPos
+    var p = DbPos(key: board.key)
+    var n = 0
+    for sq in 0..64
+        let piece = board.squares[sq]
+        if piece == NoPiece: continue
+        var code = piece - 2
+        let kind = piece >> 1
+        let black = piece & 1 != 0
+        if kind == Pawn and board.en_passant != Square.none
+            let taken = black ? board.en_passant - 8 : board.en_passant + 8
+            if sq == taken: code = 12
+        if kind == Rook
+            if not black and sq == h1 and board.castling & WhiteKingside: code = 13
+            if not black and sq == a1 and board.castling & WhiteQueenside: code = 13
+            if black and sq == h8 and board.castling & BlackKingside: code = 14
+            if black and sq == a8 and board.castling & BlackQueenside: code = 14
+        if kind == King and black and board.side == Black: code = 15
+        p.occupied |= 1 << sq
+        p.nibbles[n >> 1] |= (code << (n & 1) * 4) as u8
+        n += 1
+    return p
+
+fn db_add_fen(out: *[..]u8, p: *DbPos)
+    var squares: [64]u8
+    var n = 0
+    var black_moves = false
+    var ep_file = -1
+    var rights = 0
+    for sq in 0..64
+        if p.occupied & 1 << sq == 0: continue
+        let code = p.nibbles[n >> 1] >> (n & 1) * 4 & 15
+        n += 1
+        var piece = code + 2
+        if code == 12
+            let white_pawn = sq / 8 == 3
+            piece = white_pawn ? 2 : 3
+            ep_file = sq % 8
+        elif code == 13
+            piece = 8
+            if sq == h1: rights |= 1
+            if sq == a1: rights |= 2
+        elif code == 14
+            piece = 9
+            if sq == h8: rights |= 4
+            if sq == a8: rights |= 8
+        elif code == 15
+            piece = 13
+            black_moves = true
+        squares[sq] = piece as u8
+    for r in 0..8
+        let rank = 7 - r
+        var empty = 0
+        for file in 0..8
+            let piece = squares[rank * 8 + file]
+            if piece == 0
+                empty += 1
+                continue
+            if empty > 0
+                out.push(('0' + empty) as u8)
+                empty = 0
+            out.push(piece_letter(piece as Piece))
+        if empty > 0: out.push(('0' + empty) as u8)
+        if rank > 0: out.push('/')
+    out.push(' ')
+    out.push(black_moves ? 'b' : 'w')
+    out.push(' ')
+    if rights == 0: out.push('-')
+    if rights & 1: out.push('K')
+    if rights & 2: out.push('Q')
+    if rights & 4: out.push('k')
+    if rights & 8: out.push('q')
+    out.push(' ')
+    if ep_file < 0: out.push('-')
+    else
+        out.push(('a' + ep_file) as u8)
+        out.push(black_moves ? '3' : '6')
+    db_add(out, " 0 1")

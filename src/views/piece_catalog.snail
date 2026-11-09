@@ -1,0 +1,54 @@
+use src/views/piece_sheet
+
+const CatalogRoom = 2097152
+const CatalogMostRoom = 16777216
+
+struct PieceCatalog
+    layer: UiLayer
+    ready: bool
+    cell: int
+    path: UiPath
+    pictures: [PieceSetCount]Texture
+    pictured: [PieceSetCount]bool
+
+    fn prepare(gpu: *Gpu, outer: *UiRenderer, cell_px: int)
+        let cell = clamp(cell_px, 8, 128)
+        let pitch = cell + SheetGap * 2
+        let sets = PieceSetWords.len as int
+        let w = (pitch * 6 + 63) / 64 * 64
+        let h = (pitch * 2 * sets + 63) / 64 * 64
+        if not ready
+            layer.init(gpu, outer, w, h, room: 256, path_room: CatalogRoom, writing: false)
+            ready = true
+        elif w > layer.texture.width or h > layer.texture.height
+            layer.resize(gpu, max(w, layer.texture.width), max(h, layer.texture.height))
+        let c = layer.begin(cell as u64)
+        if not c: return
+        self.cell = cell
+        for i in 0..sets
+            let art = piece_art(i as PieceSet)
+            let y = (i * pitch * 2 + SheetGap) as f32
+            if art.picture.len > 0
+                if not pictured[i]
+                    pictures[i] = picture_texture(gpu, art.picture)
+                    pictured[i] = true
+                draw_picture(c, &pictures[i], cell, pitch, SheetGap as f32, y)
+            else: draw_art(c, &art, cell, pitch, SheetGap as f32, y, &path)
+        if c.dropped > 0 and c.vertex_room < CatalogMostRoom
+            layer.grow(gpu, c.vertex_room * 2)
+            prepare(gpu, outer, cell_px)
+
+    fn uv(set: PieceSet, piece: Piece) -> Vec4
+        let pitch = cell + SheetGap * 2
+        let tw = layer.texture.width as f32
+        let th = layer.texture.height as f32
+        let u = ((piece.kind as int - 1) * pitch + SheetGap) as f32
+        let v = ((set as int * 2 + piece.side as int) * pitch + SheetGap) as f32
+        return Vec4(u / tw, v / th, (u + cell as f32) / tw, (v + cell as f32) / th)
+
+    fn release(gpu: *Gpu)
+        if ready: layer.release(gpu)
+        for i in 0..PieceSetCount
+            if pictured[i]: gpu.release_texture(&pictures[i])
+            pictured[i] = false
+        path.free_all()

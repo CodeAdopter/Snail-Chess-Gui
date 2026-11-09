@@ -1,0 +1,254 @@
+use src/engines/engine_library
+use src/engines/folded_text
+
+enum BookKind: u8
+    BookPolyglot
+    BookPgn
+    BookEpd
+    BookEngine
+    BookConsensus
+
+const BookKindWords = ["polyglot", "pgn", "epd", "engine", "consensus"]
+
+enum BookState: u8
+    BookReady
+    BookMaking
+    BookPaused
+    BookShort
+
+const BookStateWords = ["ready", "making", "paused", "short"]
+const SideWords = ["white", "black", "either"]
+
+struct BookEntry
+    id: int
+    name: [..]u8
+    kind: BookKind
+    origin: [..]u8
+    positions: int
+    plies: int
+    made: i64
+    engine_id: int
+    engine_name: [..]u8
+    profile_id: int
+    profile_name: [..]u8
+    depth: int = 10
+    band_low: int = -30
+    band_high: int = 30
+    favoured: int = 2
+    plies_low: int = 8
+    plies_high: int = 12
+    margin: int = 30
+    wanted: int = 50
+    tries: int = 200
+    seed: u64
+    state: BookState
+    agree_depth: int
+    seed_book: int
+    event_id: int
+
+    fn name_text() -> str
+        return str(name[0..name.len])
+
+    fn origin_text() -> str
+        return str(origin[0..origin.len])
+
+    fn imported() -> bool
+        return kind == BookPolyglot or kind == BookPgn or kind == BookEpd
+
+    fn engine_name_text() -> str
+        return str(engine_name[0..engine_name.len])
+
+    fn profile_name_text() -> str
+        return str(profile_name[0..profile_name.len])
+
+    fn set_band(low: int, high: int, both: bool)
+        favoured = both ? 2 : low + high >= 0 ? 0 : 1
+        band_low = favoured == 1 ? -high : low
+        band_high = favoured == 1 ? -low : high
+
+    fn write(out: *[..]u8)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.object()
+        doc.set(root, "name", doc.text(name_text()))
+        doc.set(root, "kind", doc.text(BookKindWords[kind as int]))
+        doc.set(root, "origin", doc.text(origin_text()))
+        doc.set(root, "positions", doc.number(positions as f64))
+        doc.set(root, "plies", doc.number(plies as f64))
+        doc.set(root, "made", doc.number(made as f64))
+        if not imported()
+            let g = doc.object()
+            doc.set(g, "engine", doc.number(engine_id as f64))
+            doc.set(g, "engine_name", doc.text(engine_name_text()))
+            doc.set(g, "profile", doc.number(profile_id as f64))
+            doc.set(g, "profile_name", doc.text(profile_name_text()))
+            doc.set(g, "depth", doc.number(depth as f64))
+            doc.set(g, "band_low", doc.number(band_low as f64))
+            doc.set(g, "band_high", doc.number(band_high as f64))
+            doc.set(g, "favoured", doc.text(SideWords[clamp(favoured, 0, 2)]))
+            doc.set(g, "plies_low", doc.number(plies_low as f64))
+            doc.set(g, "plies_high", doc.number(plies_high as f64))
+            doc.set(g, "margin", doc.number(margin as f64))
+            doc.set(g, "wanted", doc.number(wanted as f64))
+            doc.set(g, "tries", doc.number(tries as f64))
+            var hex: [24]u8
+            doc.set(g, "seed", doc.text(format(&hex, "{seed:016X}")))
+            doc.set(g, "state", doc.text(BookStateWords[state as int]))
+            doc.set(g, "agree_depth", doc.number(agree_depth as f64))
+            doc.set(g, "seed_book", doc.number(seed_book as f64))
+            doc.set(g, "event", doc.number(event_id as f64))
+            doc.set(root, "making", g)
+        doc.write(root, out)
+
+    fn read(text: str) -> bool
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(text)
+        if not doc.is(root, JsonObject): return false
+        let words = json_text(&doc, root, "kind")
+        var known = false
+        for i in 0..BookKindWords.len
+            if BookKindWords[i] == words
+                kind = i as BookKind
+                known = true
+        if not known: return false
+        set_text(&name, json_text(&doc, root, "name"))
+        set_text(&origin, json_text(&doc, root, "origin"))
+        positions = doc.num_at(root, "positions", 0.0) as int
+        plies = doc.num_at(root, "plies", 0.0) as int
+        made = doc.num_at(root, "made", 0.0) as i64
+        let g = doc.get(root, "making")
+        if doc.is(g, JsonObject)
+            engine_id = doc.num_at(g, "engine", 0.0) as int
+            set_text(&engine_name, json_text(&doc, g, "engine_name"))
+            profile_id = doc.num_at(g, "profile", 0.0) as int
+            set_text(&profile_name, json_text(&doc, g, "profile_name"))
+            depth = doc.num_at(g, "depth", 10.0) as int
+            band_low = doc.num_at(g, "band_low", -30.0) as int
+            band_high = doc.num_at(g, "band_high", 30.0) as int
+            let side = json_text(&doc, g, "favoured")
+            for i in 0..SideWords.len
+                if SideWords[i] == side: favoured = i as int
+            plies_low = doc.num_at(g, "plies_low", 8.0) as int
+            plies_high = doc.num_at(g, "plies_high", 12.0) as int
+            margin = doc.num_at(g, "margin", 30.0) as int
+            wanted = doc.num_at(g, "wanted", 50.0) as int
+            tries = doc.num_at(g, "tries", 200.0) as int
+            seed = parse_hex(json_text(&doc, g, "seed")) as u64
+            agree_depth = doc.num_at(g, "agree_depth", 0.0) as int
+            seed_book = doc.num_at(g, "seed_book", 0.0) as int
+            event_id = doc.num_at(g, "event", 0.0) as int
+            let st = json_text(&doc, g, "state")
+            for i in 0..BookStateWords.len
+                if BookStateWords[i] == st: state = i as BookState
+        return name.len > 0
+
+    fn release()
+        name.free()
+        origin.free()
+        engine_name.free()
+        profile_name.free()
+
+struct BookLibrary
+    data: *DataFolder
+    books: [..]*BookEntry
+    version: u64
+
+    fn open(folder: *DataFolder)
+        data = folder
+        data.make_folder("books")
+        var names: [..]u8
+        defer names.free()
+        var buf: [600]u8
+        names_in(data.path("books", &buf), &names)
+        var from = 0
+        for i in 0..names.len
+            if names[i] != '\n': continue
+            let (n, ok) = uci_number(str(names[from..i]))
+            from = i as int + 1
+            if not ok or n <= 0: continue
+            var path: [640]u8
+            let bytes = read_file(file(n as int, "book.json", &path).ptr as cstr)
+            defer free_file(bytes)
+            let e = new BookEntry
+            e.id = n as int
+            if bytes.len > 0 and e.read(str(bytes))
+                if e.state == BookMaking: e.state = BookPaused
+                books.push(e)
+            else: e.release()
+        for i in 1..books.len
+            var k = i as int
+            while k > 0 and books[k].id < books[k - 1].id
+                let held = books[k]
+                books[k] = books[k - 1]
+                books[k - 1] = held
+                k -= 1
+        version += 1
+
+    fn file(id: int, name: str, buf: *[640]u8) -> str
+        var inside: [80]u8
+        var at: [600]u8
+        let folder = data.path(format(&inside, "books\\{id}"), &at)
+        return format(buf, "{folder}\\{name}")
+
+    fn save(e: *BookEntry) -> bool
+        var out: [..]u8
+        defer out.free()
+        e.write(&out)
+        var path: [640]u8
+        return save_whole(file(e.id, "book.json", &path), out[0..out.len])
+
+    fn find(id: int) -> *BookEntry
+        for b in books
+            if b.id == id: return b
+        return null
+
+    fn named(name: str) -> *BookEntry
+        for b in books
+            if same_folded(b.name_text(), name): return b
+        return null
+
+    fn add(e: *BookEntry, openings: str) -> bool
+        var most = 0
+        for b in books
+            most = max(most, b.id)
+        e.id = most + 1
+        var inside: [80]u8
+        if not data.make_folder(format(&inside, "books\\{e.id}")): return false
+        var path: [640]u8
+        var out: [..]u8
+        defer out.free()
+        e.write(&out)
+        if not save_whole(file(e.id, "openings.txt", &path), openings as []u8) or not save_whole(file(e.id, "book.json", &path), out[0..out.len])
+            var at: [600]u8
+            remove_tree(data.path(format(&inside, "books\\{e.id}"), &at))
+            return false
+        books.push(e)
+        version += 1
+        return true
+
+    fn remove(id: int) -> bool
+        for i in 0..books.len
+            let b = books[i]
+            if b.id != id: continue
+            var inside: [80]u8
+            var at: [600]u8
+            if not remove_tree(data.path(format(&inside, "books\\{id}"), &at)): return false
+            books.remove(i)
+            b.release()
+            version += 1
+            return true
+        return false
+
+    fn release()
+        for b in books
+            b.release()
+        books.free()
+
+fn book_kind_label(k: BookKind) -> str
+    match k
+        BookPolyglot: return "Polyglot"
+        BookPgn: return "PGN"
+        BookEpd: return "EPD"
+        BookEngine: return "Engine"
+    return "Consensus"

@@ -1,0 +1,65 @@
+use src/database/position_store
+
+const DbGameHead = 8
+
+extend PositionDb
+    fn add_game(g: *DbGameInput) -> u32
+        var bytes: [..]u8
+        defer bytes.free()
+        let plies = min(g.moves.len, 65535)
+        var head: [2]u32
+        head[0] = g.tags.len as u32
+        head[1] = plies as u32
+        bytes.resize(DbGameHead)
+        copy(bytes.ptr, &head[0] as *u8, DbGameHead)
+        db_add(&bytes, str(g.tags[0..g.tags.len]))
+        let moves_at = bytes.len
+        bytes.resize(moves_at + plies * 2)
+        if plies > 0: copy(&bytes[moves_at], g.moves.ptr as *u8, plies * 2)
+        store.guard.write()
+        var meta = DbGame(white: names.add(g.white), black: names.add(g.black), event: names.add(g.event))
+        meta.white_elo = clamp(g.white_elo, 0, 65535) as u16
+        meta.black_elo = clamp(g.black_elo, 0, 65535) as u16
+        meta.date = g.date
+        meta.result = g.result
+        meta.flags = g.flags
+        meta.source = g.source
+        meta.plies = plies as u16
+        let id = games.add(&meta as *u8, bytes.ptr, bytes.len as int)
+        let reached = min(g.keys.len, plies + 1)
+        for ply in 0..reached
+            var s = DbSeen(key: g.keys[ply], game: id, ply: ply as u16, result: g.result)
+            store.put_held(seen, &s as *u8)
+        store.guard.write_done()
+        return id
+
+    fn game_count() -> int
+        return store.entries(games)
+
+    fn game_meta(id: u32, out: *DbGame) -> bool
+        return store.entry(games, id, out as *u8)
+
+    fn read_game(id: u32, meta: *DbGame, tags: *[..]u8, moves: *[..]u16) -> bool
+        var bytes: [..]u8
+        defer bytes.free()
+        if not store.read_entry(games, id, meta as *u8, &bytes): return false
+        if bytes.len < DbGameHead: return false
+        let head = bytes.ptr as *u32
+        let tag_len = head[0] as int
+        let plies = head[1] as int
+        tags.clear()
+        db_add(tags, str(bytes[DbGameHead..DbGameHead + tag_len]))
+        moves.resize(plies)
+        if plies > 0: copy(moves.ptr as *u8, &bytes[DbGameHead + tag_len], plies * 2)
+        return true
+
+fn db_tag(tags: str, name: str) -> str
+    var at = 0
+    while at < tags.len
+        var end = at
+        while end < tags.len and tags[end] != '\n': end += 1
+        let line = tags[at..end]
+        if line.len > name.len and line[name.len] == '\t' and line[0..name.len] == name
+            return line[name.len + 1..line.len]
+        at = end + 1
+    return ""

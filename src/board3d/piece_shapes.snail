@@ -1,0 +1,301 @@
+use engine/mesh/sweeps
+
+struct PieceOutline
+    points: [512]Vec2
+    count: int
+    size: f32
+    lift: f32
+
+    fn start()
+        count = 0
+        size = 1.0
+        lift = 0.0
+
+    fn at(r: f32, y: f32)
+        let p = Vec2(r, y) * size + Vec2(0.0, lift)
+        if count > 0 and (points[count - 1] - p).length < 0.00001: return
+        points[count] = p
+        count += 1
+
+    fn last() -> Vec2
+        return (points[count - 1] - Vec2(0.0, lift)) * (1.0 / size)
+
+    fn ring(half: f32, steps: int)
+        let p = last()
+        arc(Vec2(p.x, p.y + half), half, -90.0, 90.0, steps)
+
+    fn neck(r: f32, rise: f32, soft: f32)
+        let p = last()
+        arc(Vec2(r + soft, p.y + soft), soft, 270.0, 180.0, 6)
+        arc(Vec2(r + soft, p.y + rise - soft), soft, 180.0, 90.0, 6)
+
+    fn corner()
+        points[count] = points[count - 1]
+        count += 1
+
+    fn arc(c: Vec2, radius: f32, start: f32, stop: f32, steps: int, sharp: bool = false)
+        for i in 0..steps + 1
+            let a = (start + (stop - start) * i as f32 / steps as f32) * Pi / 180.0
+            at(c.x + radius * cos(a), c.y + radius * sin(a))
+            if i == 0 and sharp: corner()
+
+    fn ellipse(c: Vec2, a: f32, b: f32, start: f32, stop: f32, steps: int)
+        for i in 0..steps + 1
+            let t = (start + (stop - start) * i as f32 / steps as f32) * Pi / 180.0
+            at(c.x + a * cos(t), c.y + b * sin(t))
+
+    fn cove_to(r: f32, y: f32, steps: int)
+        let p = last()
+        let dx = p.x - r
+        let dy = y - p.y
+        let radius = (dx * dx + dy * dy) / (2.0 * dx)
+        let start = atan2(p.y - y, p.x - r - radius) * 180.0 / Pi
+        let turned = start < 0.0 ? start + 360.0 : start
+        arc(Vec2(r + radius, y), radius, turned, 180.0, steps)
+
+    fn flare_to(r: f32, y: f32, steps: int)
+        let p = last()
+        let dx = r - p.x
+        let dy = y - p.y
+        let radius = (dx * dx + dy * dy) / (2.0 * dx)
+        let stop = atan2(y - p.y, r - p.x - radius) * 180.0 / Pi
+        arc(Vec2(p.x + radius, p.y), radius, 180.0, stop, steps)
+
+    fn collar(k: f32, tall: f32)
+        let p = last()
+        let flare = 0.02
+        arc(Vec2(p.x + flare, p.y), flare, 180.0, 90.0, 6)
+        let held = lift
+        size = k
+        lift = held + p.y + flare
+        foot_shape(self, tall)
+        size = 1.0
+        lift = held
+
+    fn add_to(m: *Mesh, segments: int)
+        add_lathe(m, points[0..count], segments)
+
+    fn add_part(m: *Mesh, start: f32, stop: f32, segments: int)
+        add_lathe_part(m, points[0..count], start * Pi / 180.0, stop * Pi / 180.0, segments)
+
+    fn outline() -> []Vec2
+        return points[0..count]
+
+const RookFoot: f32 = 1.235
+const KnightFoot: f32 = 1.235
+const BishopFoot: f32 = 1.19
+const QueenFoot: f32 = 1.38
+const KingFoot: f32 = 1.45
+
+const TallFoot: f32 = 1.3
+
+const QueenStem: f32 = 0.757
+
+fn piece_foot(o: *PieceOutline, size: f32, tall: f32 = 1.0)
+    o.size = size
+    o.at(0.0, 0.0)
+    foot_shape(o, tall)
+    o.size = 1.0
+
+fn foot_shape(o: *PieceOutline, tall: f32)
+    let disc = 0.068
+    o.at(0.228, 0.0)
+    o.arc(Vec2(0.228, 0.015), 0.015, -90.0, 0.0, 6)
+    o.at(0.243, disc - 0.012)
+    o.arc(Vec2(0.231, disc - 0.012), 0.012, 0.0, 90.0, 6)
+    let mark = o.count
+    let bulb = Vec2(0.181, disc + 0.026)
+    let swell = 0.045
+    o.arc(bulb, swell, asin((disc - bulb.y) / swell) * 180.0 / Pi, 60.0, 18, true)
+    let shoulder = bulb + Vec2(0.5, 0.866) * swell
+    let sweep = 0.07
+    let centre = shoulder + Vec2(0.5, 0.866) * sweep
+    o.arc(centre, sweep, 240.0, 180.0, 16)
+    o.corner()
+    let rim = centre.x - sweep
+    o.at(rim - 0.006, centre.y + 0.006)
+    o.corner()
+    o.at(0.138, centre.y + 0.0085)
+    o.corner()
+    let base = o.points[mark - 1].y
+    for i in mark..o.count
+        o.points[i].y = base + (o.points[i].y - base) * tall
+
+fn add_pawn(m: *Mesh, segments: int)
+    var o: PieceOutline
+    pawn_outline(&o)
+    o.add_to(m, segments)
+
+fn pawn_outline(o: *PieceOutline)
+    o.start()
+    piece_foot(o, 1.0)
+    let ball = 0.135
+    let below = acos(0.09 / ball)
+    let rise = 0.815 - (0.5227 + ball * sin(below) + ball)
+    o.cove_to(0.085, 0.42 + rise, 20)
+    o.lift = rise
+    o.arc(Vec2(0.12, 0.42), 0.035, 180.0, 90.0, 8)
+    o.at(0.148, 0.455)
+    o.ring(0.022, 12)
+    o.arc(Vec2(0.1, 0.509), 0.01, 270.0, 180.0, 6)
+    o.arc(Vec2(0.0, 0.5227 + ball * sin(below)), ball, -below * 180.0 / Pi, 90.0, 28, true)
+
+fn add_rook(m: *Mesh, segments: int)
+    var o: PieceOutline
+    rook_outline(&o)
+    o.add_to(m, segments)
+    rook_merlon(&o)
+    let gap = 16.0
+    for k in 0..6
+        let start = k as f32 * 60.0 + gap * 0.5
+        o.add_part(m, start, start + 60.0 - gap, segments / 6)
+
+const RookRim: f32 = 0.88
+const RookTop: f32 = 0.98
+const RookWall: f32 = 0.2
+const RookInner: f32 = 0.145
+
+const RookLift: f32 = -0.083
+
+fn rook_outline(o: *PieceOutline)
+    o.start()
+    piece_foot(o, RookFoot)
+    o.cove_to(0.135, 0.72 + RookLift, 24)
+    o.lift = RookLift
+    o.arc(Vec2(0.155, 0.72), 0.02, 180.0, 90.0, 6)
+    o.at(0.175, 0.74)
+    o.arc(Vec2(0.175, 0.752), 0.012, -90.0, 90.0, 8)
+    o.at(0.165, 0.764)
+    o.corner()
+    o.arc(Vec2(0.19, 0.764), 0.025, 180.0, 90.0, 8)
+    o.arc(Vec2(0.19, 0.799), 0.01, -90.0, 0.0, 6)
+    o.at(RookWall, RookRim)
+    o.corner()
+    o.at(RookInner, RookRim)
+    o.corner()
+    o.at(RookInner, RookRim - 0.03)
+    o.corner()
+    o.at(0.0, RookRim - 0.03)
+
+fn rook_merlon(o: *PieceOutline)
+    o.start()
+    o.lift = RookLift
+    let soft = 0.012
+    o.at(RookInner, RookRim)
+    o.at(RookWall, RookRim)
+    o.corner()
+    o.arc(Vec2(RookWall - soft, RookTop - soft), soft, 0.0, 90.0, 6)
+    o.arc(Vec2(RookInner + soft * 0.5, RookTop - soft * 0.5), soft * 0.5, 90.0, 180.0, 4)
+    o.at(RookInner, RookRim)
+
+const KnightSeat: f32 = 0.25
+
+fn knight_outline(o: *PieceOutline)
+    o.start()
+    piece_foot(o, KnightFoot)
+    let top = o.last()
+    o.arc(Vec2(top.x + 0.012, top.y), 0.012, 180.0, 90.0, 6)
+    o.at(0.235, top.y + 0.012)
+    o.arc(Vec2(0.235, top.y + 0.022), 0.01, -90.0, 90.0, 8)
+    o.corner()
+    o.at(0.0, top.y + 0.032)
+
+const BishopLift: f32 = -0.031
+
+fn bishop_outline(o: *PieceOutline)
+    o.start()
+    piece_foot(o, BishopFoot)
+    o.cove_to(0.095, 0.588, 24)
+    o.collar(0.62, 0.6)
+    let p = o.last()
+    o.arc(Vec2(0.1, p.y), 0.1 - p.x, 180.0, 90.0, 6)
+    o.corner()
+    o.at(0.1, 0.729)
+    o.corner()
+    o.at(0.0, 0.729)
+
+fn bishop_mitre(o: *PieceOutline)
+    o.start()
+    o.lift = BishopLift
+    let wide = 0.144
+    o.at(0.0, 0.73)
+    o.at(0.095, 0.73)
+    o.ellipse(Vec2(0.0, 0.87), wide, 0.167, -acos(0.095 / wide) * 180.0 / Pi, 0.0, 16)
+    o.arc(Vec2(-0.097, 0.87), 0.241, 0.0, 58.2, 18)
+    o.at(0.03, 1.082)
+    o.arc(Vec2(0.0, 1.122), 0.05, -53.13, 90.0, 20)
+
+fn queen_outline(o: *PieceOutline)
+    o.start()
+    piece_foot(o, QueenFoot, TallFoot)
+    o.cove_to(0.118, QueenStem, 24)
+    o.collar(0.82, 1.0)
+    let p = o.last()
+    o.arc(Vec2(QueenNeck.x, p.y), QueenNeck.x - p.x, 180.0, 90.0, 6)
+    o.ring(0.006, 6)
+    o.corner()
+    o.at(0.0, o.last().y)
+
+const QueenNeck = Vec2(0.125, 0.84)
+const QueenLip = Vec2(0.19, 1.07)
+const QueenFloor: f32 = 0.965
+
+fn queen_crown(o: *PieceOutline, lift: f32)
+    o.start()
+    o.lift = lift
+    o.at(0.0, QueenNeck.y - 0.04)
+    o.at(QueenNeck.x, QueenNeck.y - 0.04)
+    o.at(QueenNeck.x, QueenNeck.y)
+    o.flare_to(QueenLip.x, QueenLip.y, 48)
+    let dx = QueenLip.x - QueenNeck.x
+    let dy = QueenLip.y - QueenNeck.y
+    let wide = (dx * dx + dy * dy) / (2.0 * dx)
+    let centre = Vec2(QueenNeck.x + wide, QueenNeck.y)
+    let top = atan2(dy, QueenLip.x - centre.x) * 180.0 / Pi
+    let curl = 0.04
+    let wall = 0.02
+    let tip = top - 2.0
+    let bend = QueenLip + (centre - QueenLip).normalized * curl
+    o.arc(bend, curl, top, tip, 10)
+    let way = Vec2(cos(tip * Pi / 180.0), sin(tip * Pi / 180.0))
+    o.arc(bend + way * (curl + wall * 0.5), wall * 0.5, tip - 180.0, tip, 16)
+    o.arc(bend, curl + wall, tip, top, 10)
+    let floor = 180.0 - asin((QueenFloor - centre.y) / (wide + wall)) * 180.0 / Pi
+    o.arc(centre, wide + wall, top, floor, 30)
+    let foot = centre.x + (wide + wall) * cos(floor * Pi / 180.0)
+    let sink = 0.12
+    let dome = sqrt(foot * foot + sink * sink)
+    let neck = 0.03
+    let rise = acos(neck / dome)
+    o.arc(Vec2(0.0, QueenFloor - sink), dome, atan2(sink, foot) * 180.0 / Pi, rise * 180.0 / Pi, 30)
+    let ball = 0.05
+    let below = acos(neck / ball)
+    let middle = QueenFloor - sink + dome * sin(rise) + ball * sin(below)
+    o.arc(Vec2(0.0, middle), ball, -below * 180.0 / Pi, 90.0, 30)
+
+fn king_outline(o: *PieceOutline)
+    o.start()
+    piece_foot(o, KingFoot, TallFoot)
+    o.cove_to(0.13, QueenStem, 26)
+    o.collar(0.96, 1.0)
+    let p = o.last()
+    o.arc(Vec2(0.153, p.y), 0.153 - p.x, 180.0, 90.0, 6)
+    o.ring(0.015, 10)
+    let top = o.last()
+    o.arc(Vec2(0.153, top.y + 0.008), 0.008, 270.0, 180.0, 4)
+    o.lift = o.last().y - 0.941
+    o.flare_to(0.228, 1.255, 22)
+    o.corner()
+    o.arc(Vec2(0.222, 1.262), 0.012, -60.0, 90.0, 8, true)
+    o.at(0.19, 1.274)
+    o.corner()
+    o.at(0.175, 1.268)
+    o.corner()
+    o.arc(Vec2(0.0, 1.132), 0.2216, 37.85, 79.6, 14)
+    o.corner()
+    o.arc(Vec2(0.04, 1.36), 0.01, -90.0, 90.0, 6)
+    o.at(0.03, 1.37)
+    o.corner()
+    o.at(0.03, 1.38)
+    o.corner()
+    o.at(0.0, 1.38)

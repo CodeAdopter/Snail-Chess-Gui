@@ -1,0 +1,3 @@
+main = "main.snail"
+output = "../build/scdb.exe"
+libs = ["../../src"]

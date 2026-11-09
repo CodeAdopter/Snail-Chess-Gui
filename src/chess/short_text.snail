@@ -1,0 +1,22 @@
+struct ShortText
+    bytes: [128]u8
+    len: int
+
+    fn add(c: u8)
+        if len < 128
+            bytes[len] = c
+            len += 1
+
+    fn add_str(s: str)
+        for i in 0..s.len
+            add(s[i])
+
+    fn add_int(n: int)
+        var digits: [24]u8
+        add_str(format(&digits, "{n}"))
+
+    fn clear()
+        len = 0
+
+    fn text() -> str
+        return bytes[0..len] as str

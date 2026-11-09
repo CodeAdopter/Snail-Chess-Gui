@@ -1,0 +1,17 @@
+const FontCount = 4
+const FontNames = ["Inter", "Gluten", "Pixelify Sans", "Chewy"]
+const FontWords = ["inter", "gluten", "pixelify-sans", "chewy"]
+
+const FontHasStrong = [true, true, true, false]
+
+fn font_bytes(i: int, strong: bool) -> []u8
+    if i == 1
+        if strong: return embed("../../assets/fonts/gluten/strong.ttf")
+        return embed("../../assets/fonts/gluten/regular.ttf")
+    if i == 2
+        if strong: return embed("../../assets/fonts/pixelify-sans/strong.ttf")
+        return embed("../../assets/fonts/pixelify-sans/regular.ttf")
+    if i == 3
+        return embed("../../assets/fonts/chewy/regular.ttf")
+    if strong: return embed("../../assets/fonts/inter/strong.ttf")
+    return embed("../../assets/fonts/inter/regular.ttf")

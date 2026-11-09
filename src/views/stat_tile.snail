@@ -1,0 +1,17 @@
+use engine/ui/ui_layout
+use src/theme/theme
+use src/theme/fonts
+
+fn stat_tile(ui: *UiCanvas, fonts: *GuiFonts, theme: *GuiTheme, name: str, value: str, detail: str, value_color: Color)
+    with ui.open(UiNode(width: UiSize.grow(), padding: Vec4(10.0, 7.0, 10.0, 8.0), gap: 1.0, clip: true, box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(6.0))))
+        ui.label(name, UiTextStyle(face: fonts.text, size: 11.0, color: theme.muted))
+        ui.label(value, UiTextStyle(face: fonts.strong, size: 18.0, color: value_color))
+        ui.label(detail, UiTextStyle(face: fonts.text, size: 11.0, color: theme.muted))
+
+fn group_digits(n: i64, buf: *[48]u8) -> str
+    let v = abs(n)
+    let sign = n < 0 ? "-" : ""
+    if v < 1000: return format(buf, "{sign}{v}")
+    if v < 1000000: return format(buf, "{sign}{v / 1000},{v % 1000:03}")
+    if v < 1000000000: return format(buf, "{sign}{v / 1000000},{v / 1000 % 1000:03},{v % 1000:03}")
+    return format(buf, "{sign}{v / 1000000000},{v / 1000000 % 1000:03},{v / 1000 % 1000:03},{v % 1000:03}")

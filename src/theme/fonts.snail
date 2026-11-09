@@ -1,0 +1,62 @@
+use engine/ui/ui_text
+use src/theme/font_catalog
+
+struct GuiFonts
+    text: int
+    strong: int
+    serif: int
+    mono: int
+    font: int
+    fallback: int
+    regular: [FontCount]int
+    bold: [FontCount]int
+    figures: [FontCount]int
+
+    fn choose(ui: *UiCanvas, i: int)
+        font = clamp(i, 0, FontCount - 1)
+        text = preview(ui, font)
+        if bold[font] < 0
+            bold[font] = FontHasStrong[font] ? ui.open_font(font_bytes(font, true), fallback) : -1
+            if bold[font] < 0: bold[font] = text
+            if bold[font] != text: ui.set_bold(text, bold[font])
+        if figures[font] < 0
+            figures[font] = ui.open_font(font_bytes(font, false), fallback)
+            if figures[font] < 0: figures[font] = text
+            else
+                ui.even_figures(figures[font])
+                if bold[font] != text: ui.set_bold(figures[font], bold[font])
+        strong = bold[font]
+        serif = strong
+        mono = figures[font]
+
+    fn preview(ui: *UiCanvas, i: int) -> int
+        if regular[i] < 0
+            regular[i] = ui.open_font(font_bytes(i, false), fallback)
+            if regular[i] < 0: regular[i] = max(fallback, 0)
+        return regular[i]
+
+fn load_fonts(ui: *UiCanvas) -> GuiFonts
+    let windir = SDL_getenv("WINDIR")
+    let root = windir ? str(windir) : "C:/Windows"
+    var f: GuiFonts
+    f.fallback = load_system_font(ui, root, "segoeui.ttf")
+    f.font = -1
+    for i in 0..FontCount
+        f.regular[i] = -1
+        f.bold[i] = -1
+        f.figures[i] = -1
+    let first = max(f.fallback, 0)
+    f.text = first
+    f.strong = first
+    f.serif = first
+    f.mono = first
+    return f
+
+fn load_system_font(ui: *UiCanvas, root: str, file: str) -> int
+    var path: [320]u8
+    return ui.load_font(format(&path, "{root}/Fonts/{file}"))
+
+fn font_named(word: str) -> int
+    for i in 0..FontWords.len
+        if FontWords[i] == word: return i as int
+    return 0

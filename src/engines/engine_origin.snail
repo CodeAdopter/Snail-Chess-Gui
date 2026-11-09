@@ -1,0 +1,68 @@
+use engine/core/json
+use src/uci/uci_engine
+
+struct EngineOrigin
+    pool: [..]u8
+    registry_id: PoolSpan
+    repository: PoolSpan
+    tag: PoolSpan
+    asset: PoolSpan
+    sha256: PoolSpan
+    documentation: PoolSpan
+    codeberg: bool
+    needs_setup: bool
+
+    fn text(s: PoolSpan) -> str
+        return str(pool[s.at..s.at + s.len])
+
+    fn keep(s: str) -> PoolSpan
+        let at = pool.len as int
+        for k in 0..s.len
+            pool.push(s[k])
+        return PoolSpan(at, s.len as int)
+
+    fn known() -> bool
+        return registry_id.len > 0
+
+    fn write(doc: *JsonDoc) -> int
+        let v = doc.object()
+        doc.set(v, "registry_id", doc.text(text(registry_id)))
+        doc.set(v, "repository", doc.text(text(repository)))
+        doc.set(v, "forge", doc.text(codeberg ? "codeberg" : "github"))
+        doc.set(v, "tag", doc.text(text(tag)))
+        doc.set(v, "asset", doc.text(text(asset)))
+        doc.set(v, "sha256", doc.text(text(sha256)))
+        if documentation.len > 0: doc.set(v, "documentation", doc.text(text(documentation)))
+        if needs_setup: doc.set(v, "needs_setup", doc.boolean(true))
+        return v
+
+    fn read(doc: *JsonDoc, v: int)
+        clear()
+        if not doc.is(v, JsonObject): return
+        registry_id = keep(origin_text(doc, v, "registry_id"))
+        repository = keep(origin_text(doc, v, "repository"))
+        codeberg = origin_text(doc, v, "forge") == "codeberg"
+        tag = keep(origin_text(doc, v, "tag"))
+        asset = keep(origin_text(doc, v, "asset"))
+        sha256 = keep(origin_text(doc, v, "sha256"))
+        documentation = keep(origin_text(doc, v, "documentation"))
+        let setup = doc.get(v, "needs_setup")
+        needs_setup = doc.is(setup, JsonBool) and doc.flag(setup)
+
+    fn clear()
+        pool.clear()
+        registry_id = PoolSpan(0, 0)
+        repository = PoolSpan(0, 0)
+        tag = PoolSpan(0, 0)
+        asset = PoolSpan(0, 0)
+        sha256 = PoolSpan(0, 0)
+        documentation = PoolSpan(0, 0)
+        codeberg = false
+        needs_setup = false
+
+    fn release()
+        pool.free()
+
+fn origin_text(doc: *JsonDoc, obj: int, key: str) -> str
+    let v = doc.get(obj, key)
+    return doc.is(v, JsonString) ? doc.str_of(v) : ""

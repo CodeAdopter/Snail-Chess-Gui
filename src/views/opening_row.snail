@@ -1,0 +1,25 @@
+use engine/ui/ui_widgets
+use src/game/openings
+use src/theme/theme
+use src/theme/fonts
+
+const OpeningRowHeight: f32 = 30.0
+
+fn draw_opening_row(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, x: f32, y: f32, w: f32, h: f32)
+    if w < 1.0 or h < 1.0: return
+    let (eco, name, node) = opening_at(game, game.at)
+    let quiet = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    with ui.open(UiNode(name: "opening", floating: true, offset: Vec2(x + 14.0, y), width: UiSize.fixed(max(w - 28.0, 1.0)), height: UiSize.fixed(h), flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5), clip: true))
+        if node == NoNode
+            ui.label(is_standard_start(&game.nodes[0].board) ? "Starting position" : "Custom position", quiet)
+        else
+            ui.label(eco, UiTextStyle(face: fonts.mono, size: 11.5, color: theme.muted), UiNode(padding: Vec4(6.0, 2.0, 6.0, 2.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(4.0))))
+            let cut = family_end(name)
+            ui.label(name[0..cut], UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink), UiNode(clip: true))
+            if cut + 2 <= name.len: ui.label(name[cut + 2..name.len], quiet, UiNode(clip: true))
+            ui.tooltip(name)
+
+fn family_end(name: str) -> int
+    for i in 0..name.len
+        if name[i] == ':': return i as int
+    return name.len as int

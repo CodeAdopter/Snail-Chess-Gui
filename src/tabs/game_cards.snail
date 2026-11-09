@@ -1,0 +1,235 @@
+use src/store/played_games
+use src/tournament/event_runner
+use src/views/board_view
+use src/views/gallery
+use src/views/line_icons
+use src/views/list_rows
+use src/views/opening_row
+
+const GameCardGap: f32 = 10.0
+const GameCardPad: f32 = 12.0
+const CardWideFrom: f32 = 600.0
+const CardBoardWide: f32 = 136.0
+const CardBoardNarrow: f32 = 100.0
+const CardPlaySeconds: f32 = 7.0
+const CardPlyLeast: f32 = 0.12
+const CardPlyMost: f32 = 0.4
+const StripBars = 40
+const StripWide: f32 = 150.0
+const StripTall: f32 = 26.0
+const OpeningPlies = 8
+const PlateLeast: f32 = 150.0
+const PlateMost: f32 = 260.0
+const SpeedIcons = [IconBullet, IconBolt, IconClock, IconHourglass, IconInfinity]
+
+fn card_board(width: f32) -> f32
+    return width >= CardWideFrom ? CardBoardWide : CardBoardNarrow
+
+struct GameCards
+    icons: LineIcons
+    hover: int = -1
+    hover_since: f32
+    opened: int = -1
+    text: [..]u8
+
+    fn draw(ui: *UiCanvas, look: *BoardLook, played: *PlayedIndex, games: []int, width: f32, key: int)
+        let wide = width >= CardWideFrom
+        let size = card_board(width)
+        let item = size + GameCardPad * 2.0 + GameCardGap
+        let pieces = PieceSource(look.sheet, null, look.set)
+        var over = false
+        with v = ui.virtual_list("historycards", games.len as int, item, UiNode(key: key, width: UiSize.grow(), height: UiSize.grow(1.0, 0.0, games.len as f32 * item)))
+            for k in v.first..v.last
+                with ui.open(UiNode(key: games[k], name: "carditem", width: UiSize.grow(), height: UiSize.fixed(item), padding: Vec4(0.0, 0.0, 0.0, GameCardGap)))
+                    if card(ui, look, pieces, played, games[k], wide, size): over = true
+        if not over: hover = -1
+
+    fn card(ui: *UiCanvas, look: *BoardLook, pieces: PieceSource, played: *PlayedIndex, i: int, wide: bool, size: f32) -> bool
+        let theme = look.theme
+        let fonts = look.fonts
+        let g = &played.games[i]
+        let o = ui.open(UiNode(name: "gamecard", flow: FlowRow, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4.splat(GameCardPad), gap: wide ? 18.0 : 14.0, hit: true))
+        let h = ui.interact(o.id)
+        let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 20.0)
+        let out = played.outcome(g)
+        let tint = out == 1 ? theme.gain() : out == -1 ? theme.loss() : theme.muted
+        ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.3 * lit)), radius: Vec4.splat(RowCurve), border: 1.0, border_color: theme.line.lerp(tint, 0.4 * lit)))
+        if h.clicked: opened = g.at
+        ui.leaf(UiNode(name: "cardedge", floating: true, offset: Vec2(0.0, GameCardPad + 4.0), width: UiSize.fixed(3.0), height: UiSize.fixed(size - 8.0), box: UiBox(fill: UiFill.solid(tint.with_alpha(0.9)), radius: Vec4(0.0, 1.5, 1.5, 0.0))))
+        board(ui, look, pieces, played, g, i, h.hovered, size)
+        with ui.open(UiNode(name: "cardinfo", width: UiSize.grow(), height: UiSize.grow(), gap: wide ? 10.0 : 7.0, clip: true))
+            meta(ui, look, g, played)
+            if wide: players_wide(ui, look, played, g, tint)
+            else: players_narrow(ui, look, played, g, tint)
+            ending_line(ui, look, played, g, out, tint)
+            if wide
+                ui.spacer()
+                with ui.open(UiNode(name: "cardfoot", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5)))
+                    if g.scored or g.reviewed: score_strip(ui, theme, played.scores_of(g), g.person)
+                    opening(ui, look, played, g)
+                    if ui.button("Analyze"): opened = g.at
+            else: opening(ui, look, played, g)
+        ui.close()
+        return h.hovered
+
+    fn board(ui: *UiCanvas, look: *BoardLook, pieces: PieceSource, played: *PlayedIndex, g: *PlayedGame, i: int, hovered: bool, size: f32)
+        let moves = played.moves_of(g)
+        let count = moves.len as int
+        var ply = count
+        if hovered and count > 0
+            if hover != i
+                hover = i
+                hover_since = ui.time
+            let step = clamp(CardPlaySeconds / count as f32, CardPlyLeast, CardPlyMost)
+            let elapsed = ui.time - hover_since
+            ply = min(floor(elapsed / step) as int, count)
+            if ply < count: ui.wake_in(step * (ply + 1) as f32 - elapsed)
+        var b = played.start_of(g)
+        for m in moves[0..ply]
+            b.play(m)
+        with ui.open(UiNode(name: "cardboard", width: UiSize.fixed(size), height: UiSize.fixed(size)))
+            board_nodes(ui, look.colors, look.surfaces, pieces, &b, ply > 0 and look.highlights ? moves[ply - 1] : NoMove, size, 0, g.person == 1)
+            if hovered and count > 0
+                ui.leaf(UiNode(name: "cardplayed", floating: true, offset: Vec2(0.0, size - 3.0), width: UiSize.fixed(max(size * ply as f32 / count as f32, 1.0)), height: UiSize.fixed(3.0), box: UiBox(fill: UiFill.solid(look.theme.accent))))
+
+    fn meta(ui: *UiCanvas, look: *BoardLook, g: *PlayedGame, played: *PlayedIndex)
+        let theme = look.theme
+        let fonts = look.fonts
+        var line: [64]u8
+        var clock: [24]u8
+        var when: [24]u8
+        let speed = clamp(g.speed, 0, SpeedNames.len as int - 1)
+        with ui.open(UiNode(name: "cardmeta", flow: FlowRow, width: UiSize.grow(), gap: 7.0, align: Vec2(0.0, 0.5)))
+            icons.show(ui, SpeedIcons[speed], 16.0, theme.muted)
+            let said = g.speed == SpeedInfinite ? format(&line, "{SpeedNames[speed]}") : format(&line, "{SpeedNames[speed]} {clock_of_pgn(played.text(g.clock), &clock)}")
+            ui.label(said, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink))
+            card_chip(ui, theme, fonts, g.rated ? "RATED" : "CASUAL", g.rated ? theme.accent : theme.muted)
+            ui.spacer()
+            ui.label(when_text(g.day, &when), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+
+    fn players_wide(ui: *UiCanvas, look: *BoardLook, played: *PlayedIndex, g: *PlayedGame, tint: Color)
+        with ui.open(UiNode(name: "cardplayers", flow: FlowRow, width: UiSize.grow(), gap: 14.0, align: Vec2(0.0, 0.5)))
+            plate(ui, look, played, g, 0)
+            score_badge(ui, look, g.result, tint)
+            ui.leaf(UiNode(width: UiSize.fixed(4.0)))
+            plate(ui, look, played, g, 1)
+
+    fn players_narrow(ui: *UiCanvas, look: *BoardLook, played: *PlayedIndex, g: *PlayedGame, tint: Color)
+        with ui.open(UiNode(name: "cardplayers", flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
+            with ui.open(UiNode(width: UiSize.grow(), gap: 3.0, clip: true))
+                for side in 0..2
+                    with ui.open(UiNode(key: side as int, flow: FlowRow, gap: 7.0, align: Vec2(0.0, 0.5)))
+                        player_line(ui, look, played, g, side as int, 13.5)
+                        rating_note(ui, look, g, side as int)
+            score_badge(ui, look, g.result, tint)
+
+    fn plate(ui: *UiCanvas, look: *BoardLook, played: *PlayedIndex, g: *PlayedGame, side: int)
+        with ui.open(UiNode(key: side, name: "cardplate", width: UiSize.fit(PlateLeast, PlateMost), gap: 3.0, clip: true))
+            with ui.open(UiNode(flow: FlowRow, gap: 7.0, align: Vec2(0.0, 0.5)))
+                player_line(ui, look, played, g, side, 14.5)
+            with ui.open(UiNode(flow: FlowRow, gap: 6.0, padding: Vec4(16.0, 0.0, 0.0, 0.0), align: Vec2(0.0, 0.5)))
+                rating_note(ui, look, g, side)
+
+    fn player_line(ui: *UiCanvas, look: *BoardLook, played: *PlayedIndex, g: *PlayedGame, side: int, size: f32)
+        let theme = look.theme
+        let name = played.text(side == 0 ? g.white : g.black)
+        ui.leaf(UiNode(width: UiSize.fixed(9.0), height: UiSize.fixed(9.0), box: UiBox(fill: UiFill.solid(side == 0 ? Color.hex(0xF2EFE8) : Color.hex(0x222222)), radius: Vec4.splat(4.5), border: 1.0, border_color: theme.muted.with_alpha(0.7))))
+        ui.label(name.len > 0 ? name : "?", UiTextStyle(face: side == g.person ? look.fonts.strong : look.fonts.text, size: size, color: name.len > 0 ? theme.ink : theme.muted))
+
+    fn rating_note(ui: *UiCanvas, look: *BoardLook, g: *PlayedGame, side: int)
+        let theme = look.theme
+        let fonts = look.fonts
+        var n: [16]u8
+        var c: [16]u8
+        let elo = side == 0 ? g.white_elo : g.black_elo
+        if elo > 0: ui.label(format(&n, "{elo}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+        if side == g.person and g.changed
+            let color = g.change > 0 ? theme.gain() : g.change < 0 ? theme.loss() : theme.muted
+            ui.label(format(&c, "{g.change > 0 ? "+" : g.change < 0 ? "−" : "±"}{abs(g.change)}"), UiTextStyle(face: fonts.strong, size: 12.0, color: color))
+
+    fn ending_line(ui: *UiCanvas, look: *BoardLook, played: *PlayedIndex, g: *PlayedGame, out: int, tint: Color)
+        let theme = look.theme
+        let fonts = look.fonts
+        var line: [80]u8
+        let word = out == 1 ? "Won" : out == -1 ? "Lost" : out == 0 ? "Drawn" : g.result == WhiteWins ? "White won" : g.result == BlackWins ? "Black won" : g.ending == EndedAbandoned ? "Abandoned" : "Unfinished"
+        let how = g.result == Unfinished ? "" : ending_words(g.ending)
+        let moves = (g.plies + 1) / 2
+        with ui.open(UiNode(name: "cardending", flow: FlowRow, width: UiSize.grow(), gap: 5.0, align: Vec2(0.0, 0.5), clip: true))
+            ui.label(word, UiTextStyle(face: fonts.strong, size: 12.5, color: tint))
+            ui.label(format(&line, "{how}{how.len > 0 ? "  ·  " : "·  "}{moves} {moves == 1 ? "move" : "moves"}"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+
+    fn opening(ui: *UiCanvas, look: *BoardLook, played: *PlayedIndex, g: *PlayedGame)
+        let theme = look.theme
+        let fonts = look.fonts
+        let quiet = UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted)
+        let start = played.start_of(g)
+        let (eco, name, _) = opening_of(&start, played.moves_of(g))
+        with ui.open(UiNode(name: "cardopening", flow: FlowRow, width: UiSize.grow(), gap: 7.0, align: Vec2(0.0, 0.5), clip: true))
+            if name.len == 0: ui.label(opening_line(played, g), quiet, UiNode(clip: true))
+            else
+                ui.label(eco, UiTextStyle(face: fonts.strong, size: 10.5, color: theme.muted, tracking: 0.4), UiNode(padding: Vec4(6.0, 2.0, 6.0, 3.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(4.0))))
+                let cut = family_end(name)
+                ui.label(name[0..cut], UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink), UiNode(clip: true))
+                if cut + 2 <= name.len: ui.label(name[cut + 2..name.len], quiet, UiNode(clip: true))
+                ui.tooltip(name)
+
+    fn opening_line(played: *PlayedIndex, g: *PlayedGame) -> str
+        let moves = played.moves_of(g)
+        text.clear()
+        let start = played.start_of(g)
+        write_opening_san(&start, moves[0..min(moves.len as int, OpeningPlies)], &text)
+        if moves.len as int > OpeningPlies: push_text(&text, " …")
+        return str(text[0..text.len])
+
+    fn release()
+        icons.release()
+        text.free()
+
+fn ending_words(e: GameEnding) -> str
+    match e
+        EndedMate: return "by checkmate"
+        EndedStalemate: return "by stalemate"
+        EndedDeadPosition: return "by insufficient material"
+        EndedFiftyMoves: return "by the 50-move rule"
+        EndedRepetition: return "by repetition"
+        EndedResigned: return "by resignation"
+        EndedAgreed: return "by agreement"
+        EndedTime: return "on time"
+        EndedAbandoned: return "by abandonment"
+        EndedIllegal: return "by illegal move"
+        EndedAdjudicated: return "by adjudication"
+    return ""
+
+fn card_chip(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, word: str, color: Color)
+    with ui.open(UiNode(name: "cardchip", padding: Vec4(7.0, 2.0, 7.0, 3.0), box: UiBox(fill: UiFill.solid(color.with_alpha(theme.dark ? 0.16 : 0.11)), radius: Vec4.splat(9.0))))
+        ui.label(word, UiTextStyle(face: fonts.strong, size: 9.5, color: color, tracking: 0.7))
+
+fn score_badge(ui: *UiCanvas, look: *BoardLook, result: GameResult, tint: Color)
+    let theme = look.theme
+    let said = result == WhiteWins ? "1–0" : result == BlackWins ? "0–1" : result == Drawn ? "½–½" : "–"
+    with ui.open(UiNode(name: "cardscore", padding: Vec4(11.0, 5.0, 11.0, 6.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(tint.with_alpha(theme.dark ? 0.16 : 0.11)), radius: Vec4.splat(8.0), border: 1.0, border_color: tint.with_alpha(0.35))))
+        ui.label(said, UiTextStyle(face: look.fonts.strong, size: 14.0, color: tint))
+
+fn score_strip(ui: *UiCanvas, theme: *GuiTheme, scores: []i16, person: int)
+    let n = scores.len as int
+    let bars = min(n, StripBars)
+    let half = StripTall * 0.5 - 2.0
+    var held = 0
+    with ui.open(UiNode(name: "cardstrip", flow: FlowRow, width: UiSize.fixed(StripWide), height: UiSize.fixed(StripTall), padding: Vec4(4.0, 2.0, 4.0, 2.0), gap: 1.0, box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(5.0))))
+        for b in 0..bars
+            for k in b * n / bars..(b + 1) * n / bars
+                if scores[k] != NoPlayedScore: held = scores[k] as int
+            let s = (person == 1 ? -held : held) as f32
+            let tall = max(half * abs(s) / (abs(s) + 120.0), 1.0)
+            let color = s > 0.0 ? theme.gain() : s < 0.0 ? theme.loss() : theme.muted
+            with ui.open(UiNode(key: b as int, width: UiSize.grow(), height: UiSize.grow()))
+                ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.fixed(s < 0.0 ? half : half - tall)))
+                ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.fixed(tall), box: UiBox(fill: UiFill.solid(color.with_alpha(0.85)), radius: Vec4.splat(1.0))))
+
+fn when_text(day: int, buf: *[24]u8) -> str
+    if day <= 0: return format(buf, "")
+    let ago = days_of(day_of_seconds(unix_seconds())) - days_of(day)
+    if ago == 0: return format(buf, "Today")
+    if ago == 1: return format(buf, "Yesterday")
+    if ago > 1 and ago < 7: return format(buf, "{ago} days ago")
+    return day_short(day, buf)

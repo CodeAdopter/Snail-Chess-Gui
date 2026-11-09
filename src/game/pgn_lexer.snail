@@ -1,0 +1,162 @@
+enum PgnToken: u8
+    PgnEnd
+    PgnTag
+    PgnComment
+    PgnOpen
+    PgnClose
+    PgnNag
+    PgnNumber
+    PgnResult
+    PgnSymbol
+    PgnJunk
+
+struct PgnLexer
+    text: str
+    at: int
+    token: str
+    tag_name: str
+    nag: u8
+    line_start: bool = true
+
+    fn next() -> PgnToken
+        skip_space()
+        if at >= text.len: return PgnEnd
+        let start = at
+        let c = text[at]
+        if c == '['
+            if read_tag(): return PgnTag
+            at = start + 1
+            token = text[start..at]
+            return PgnJunk
+        if c == '{'
+            let close = find(at + 1, '}')
+            token = text[at + 1..close]
+            at = min(close + 1, text.len as int)
+            return PgnComment
+        if c == ';'
+            let close = find(at + 1, '\n')
+            token = text[at + 1..close]
+            at = close
+            return PgnComment
+        if c == '('
+            at += 1
+            token = text[start..at]
+            return PgnOpen
+        if c == ')'
+            at += 1
+            token = text[start..at]
+            return PgnClose
+        if c == '$'
+            at += 1
+            var n = 0
+            while at < text.len and pgn_digit(text[at])
+                n = n * 10 + (text[at] - '0') as int
+                at += 1
+            token = text[start..at]
+            nag = clamp(n, 0, 255) as u8
+            return at > start + 1 ? PgnNag : PgnJunk
+        if c == '!' or c == '?'
+            while at < text.len and (text[at] == '!' or text[at] == '?')
+                at += 1
+            token = text[start..at]
+            nag = glyph_nag(token)
+            return nag > 0 ? PgnNag : PgnJunk
+        if c == '*'
+            at += 1
+            token = text[start..at]
+            return PgnResult
+        if pgn_digit(c)
+            while at < text.len and pgn_digit(text[at])
+                at += 1
+            if at < text.len and text[at] == '.'
+                while at < text.len and text[at] == '.'
+                    at += 1
+                token = text[start..at]
+                return PgnNumber
+        while at < text.len and pgn_symbol(text[at])
+            at += 1
+        if at == start
+            at += 1
+            token = text[start..at]
+            return PgnJunk
+        token = text[start..at]
+        if token == "1-0" or token == "0-1" or token == "1/2-1/2": return PgnResult
+        if pgn_number_text(token): return PgnNumber
+        return PgnSymbol
+
+    fn read_tag() -> bool
+        var i = at + 1
+        while i < text.len and pgn_space(text[i])
+            i += 1
+        let name_start = i
+        while i < text.len and (pgn_symbol(text[i]) or text[i] == '_')
+            i += 1
+        if i == name_start: return false
+        tag_name = text[name_start..i]
+        while i < text.len and pgn_space(text[i])
+            i += 1
+        if i >= text.len or text[i] != '"': return false
+        i += 1
+        let value_start = i
+        while i < text.len and text[i] != '"'
+            if text[i] == '\\': i += 1
+            i += 1
+        if i >= text.len: return false
+        token = text[value_start..i]
+        i += 1
+        while i < text.len and pgn_space(text[i])
+            i += 1
+        if i >= text.len or text[i] != ']': return false
+        at = i + 1
+        return true
+
+    fn skip_space()
+        while at < text.len
+            let c = text[at]
+            if c == '\n'
+                line_start = true
+                at += 1
+            elif line_start and c == '%'
+                at = find(at, '\n')
+            elif pgn_space(c)
+                at += 1
+            else
+                line_start = false
+                return
+
+    fn find(i: int, c: u8) -> int
+        var k = i
+        while k < text.len and text[k] != c
+            k += 1
+        return k
+
+fn pgn_digit(c: u8) -> bool
+    return c >= '0' and c <= '9'
+
+fn pgn_space(c: u8) -> bool
+    return c == ' ' or c == '\t' or c == '\r' or c == '\n'
+
+fn pgn_symbol(c: u8) -> bool
+    return c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z' or pgn_digit(c) or c == '-' or c == '+' or c == '#' or c == '=' or c == '/' or c == ':'
+
+fn pgn_number_text(s: str) -> bool
+    for i in 0..s.len
+        if not pgn_digit(s[i]): return false
+    return s.len > 0
+
+fn glyph_nag(s: str) -> u8
+    if s == "!": return 1
+    if s == "?": return 2
+    if s == "!!": return 3
+    if s == "??": return 4
+    if s == "!?": return 5
+    if s == "?!": return 6
+    return 0
+
+fn unescape_tag(value: str, out: *[..]u8)
+    out.clear()
+    var i = 0
+    while i < value.len
+        if value[i] == '\\' and i + 1 < value.len: i += 1
+        out.push(value[i])
+        i += 1

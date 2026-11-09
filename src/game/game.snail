@@ -1,0 +1,324 @@
+use src/chess/notation
+use src/uci/uci_text
+
+const NoNode = -1
+const MaxNags = 4
+const EvalMateCp = 100000
+
+enum GameResult: u8
+    Unfinished
+    WhiteWins
+    BlackWins
+    Drawn
+
+struct GameSpan
+    at: int
+    len: int
+
+struct GameTag
+    name: GameSpan
+    value: GameSpan
+
+struct GameNode
+    move: Move
+    parent: int
+    first: int
+    next: int
+    board: Board
+    san: [12]u8
+    san_len: int
+    nags: [MaxNags]u8
+    nag_count: int
+    lead: GameSpan
+    comment: GameSpan
+    gone: bool
+    eval_cp: i32
+    eval_mate: i32
+    eval_depth: i32
+    eval_best: Move
+    second_cp: i32
+    second_mate: i32
+    second_depth: i32
+    second_best: Move
+
+    fn san_text() -> str
+        return str(san[0..san_len])
+
+fn white_score(b: *Board, kind: ScoreKind, score: int) -> (int, int)
+    let sign = b.side == White ? 1 : -1
+    let cp = kind == MateIn ? (score > 0 ? EvalMateCp : -EvalMateCp) : clamp(score, -EvalMateCp, EvalMateCp)
+    return cp * sign, (kind == MateIn ? score : 0) * sign
+
+struct Game
+    nodes: [..]GameNode
+    text: [..]u8
+    tags: [..]GameTag
+    at: int
+    result: GameResult
+    version: u64
+
+    fn reset(start: *Board)
+        nodes.clear()
+        text.clear()
+        tags.clear()
+        let root = nodes.add()
+        root.parent = NoNode
+        root.first = NoNode
+        root.next = NoNode
+        root.board = *start
+        at = 0
+        result = Unfinished
+        version += 1
+
+    fn copy_from(other: *Game)
+        nodes.clear()
+        for n in other.nodes
+            nodes.push(n)
+        text.clear()
+        for c in other.text
+            text.push(c)
+        tags.clear()
+        for t in other.tags
+            tags.push(t)
+        at = other.at
+        result = other.result
+        version += 1
+
+    fn reset_to_start()
+        var b: Board
+        b.load_fen(StartFen)
+        reset(&b)
+
+    fn board() -> *Board
+        return &nodes[at].board
+
+    fn start_board() -> *Board
+        return &nodes[0].board
+
+    fn last_move() -> Move
+        return nodes[at].move
+
+    fn starts_from_standard() -> bool
+        var b: Board
+        b.load_fen(StartFen)
+        return nodes[0].board.key == b.key and nodes[0].board.fullmove == 1
+
+    fn add_move(parent: int, move: Move) -> int
+        var last = NoNode
+        var c = nodes[parent].first
+        while c != NoNode
+            if nodes[c].move == move: return c
+            last = c
+            c = nodes[c].next
+        let i = nodes.len as int
+        var n: GameNode
+        n.move = move
+        n.parent = parent
+        n.first = NoNode
+        n.next = NoNode
+        n.board = nodes[parent].board
+        var san: ShortText
+        write_san(&n.board, move, &san)
+        n.san_len = min(san.len, 12)
+        for k in 0..n.san_len
+            n.san[k] = san.bytes[k]
+        n.board.play(move)
+        nodes.push(n)
+        if last == NoNode: nodes[parent].first = i
+        else: nodes[last].next = i
+        version += 1
+        return i
+
+    fn play(move: Move) -> int
+        at = add_move(at, move)
+        version += 1
+        return at
+
+    fn keep_score(node: int, kind: ScoreKind, score: int, depth: int, best: Move = NoMove)
+        if kind == NoScore or node < 0 or node >= nodes.len as int: return
+        let n = &nodes[node]
+        if depth < n.eval_depth: return
+        if best != NoMove and n.eval_best != NoMove and n.eval_best != best and (n.second_best == best or n.second_depth == 0)
+            n.second_cp = n.eval_cp
+            n.second_mate = n.eval_mate
+            n.second_depth = n.eval_depth
+            n.second_best = n.eval_best
+        let (cp, mate) = white_score(&n.board, kind, score)
+        n.eval_cp = cp as i32
+        n.eval_mate = mate as i32
+        n.eval_depth = max(depth, 1) as i32
+        n.eval_best = best
+
+    fn keep_second(node: int, kind: ScoreKind, score: int, depth: int, move: Move)
+        if kind == NoScore or node < 0 or node >= nodes.len as int: return
+        let n = &nodes[node]
+        if depth < n.second_depth: return
+        let (cp, mate) = white_score(&n.board, kind, score)
+        n.second_cp = cp as i32
+        n.second_mate = mate as i32
+        n.second_depth = max(depth, 1) as i32
+        n.second_best = move
+
+    fn go(i: int)
+        if i < 0 or i >= nodes.len or nodes[i].gone or i == at: return
+        at = i
+        version += 1
+
+    fn back()
+        if nodes[at].parent != NoNode: go(nodes[at].parent)
+
+    fn forward()
+        if nodes[at].first != NoNode: go(nodes[at].first)
+
+    fn to_start()
+        go(0)
+
+    fn to_end()
+        var i = at
+        while nodes[i].first != NoNode
+            i = nodes[i].first
+        go(i)
+
+    fn move_number(i: int) -> (int, Side)
+        let before = &nodes[nodes[i].parent].board
+        return before.fullmove, before.side
+
+    fn on_main_line(i: int) -> bool
+        var n = i
+        while nodes[n].parent != NoNode
+            if nodes[nodes[n].parent].first != n: return false
+            n = nodes[n].parent
+        return true
+
+    fn add_text(s: str) -> GameSpan
+        let span = GameSpan(text.len as int, s.len as int)
+        for k in 0..s.len
+            text.push(s[k])
+        return span
+
+    fn text_of(span: GameSpan) -> str
+        return str(text[span.at..span.at + span.len])
+
+    fn set_comment(i: int, s: str)
+        nodes[i].comment = add_text(s)
+        version += 1
+
+    fn append_comment(i: int, s: str)
+        nodes[i].comment = joined(nodes[i].comment, s)
+        version += 1
+
+    fn joined(old: GameSpan, s: str) -> GameSpan
+        let at = text.len as int
+        for k in 0..old.len
+            text.push(text[old.at + k])
+        var space = old.len > 0
+        for k in 0..s.len
+            let c = s[k]
+            if c <= 32
+                space = text.len > at
+                continue
+            if space: text.push(' ')
+            space = false
+            text.push(c)
+        return GameSpan(at, text.len as int - at)
+
+    fn set_lead(i: int, s: str)
+        nodes[i].lead = add_text(s)
+        version += 1
+
+    fn add_nag(i: int, nag: u8)
+        let n = &nodes[i]
+        for k in 0..n.nag_count
+            if n.nags[k] == nag: return
+        if n.nag_count >= MaxNags: return
+        n.nags[n.nag_count] = nag
+        n.nag_count += 1
+        version += 1
+
+    fn clear_nags(i: int)
+        nodes[i].nag_count = 0
+        version += 1
+
+    fn tag(name: str) -> str
+        for t in tags
+            if text_of(t.name) == name: return text_of(t.value)
+        return ""
+
+    fn set_tag(name: str, value: str)
+        for i in 0..tags.len
+            if text_of(tags[i].name) == name
+                tags[i].value = add_text(value)
+                version += 1
+                return
+        let n = add_text(name)
+        let v = add_text(value)
+        tags.push(GameTag(n, v))
+        version += 1
+
+    fn promote(i: int)
+        var n = i
+        while nodes[n].parent != NoNode and nodes[nodes[n].parent].first == n
+            n = nodes[n].parent
+        let p = nodes[n].parent
+        if p == NoNode: return
+        var before = NoNode
+        var c = nodes[p].first
+        while nodes[c].next != n
+            before = c
+            c = nodes[c].next
+        nodes[c].next = nodes[n].next
+        nodes[n].next = c
+        if before == NoNode: nodes[p].first = n
+        else: nodes[before].next = n
+        version += 1
+
+    fn delete_from(i: int)
+        let p = nodes[i].parent
+        if p == NoNode: return
+        if nodes[p].first == i: nodes[p].first = nodes[i].next
+        else
+            var c = nodes[p].first
+            while nodes[c].next != i
+                c = nodes[c].next
+            nodes[c].next = nodes[i].next
+        var shown_gone = false
+        var n = at
+        while n != NoNode
+            if n == i: shown_gone = true
+            n = nodes[n].parent
+        mark_gone(i)
+        if shown_gone: at = p
+        version += 1
+
+    fn mark_gone(i: int)
+        nodes[i].gone = true
+        var c = nodes[i].first
+        while c != NoNode
+            mark_gone(c)
+            c = nodes[c].next
+
+    fn repeats(i: int) -> int
+        let b = &nodes[i].board
+        var count = 1
+        var n = nodes[i].parent
+        var steps = 1
+        while n != NoNode and steps <= b.clock
+            let o = &nodes[n].board
+            if o.key == b.key and o.side == b.side: count += 1
+            n = nodes[n].parent
+            steps += 1
+        return count
+
+fn result_text(r: GameResult) -> str
+    match r
+        WhiteWins: return "1-0"
+        BlackWins: return "0-1"
+        Drawn: return "1/2-1/2"
+    return "*"
+
+fn result_of_text(s: str) -> (GameResult, bool)
+    if s == "1-0": return WhiteWins, true
+    if s == "0-1": return BlackWins, true
+    if s == "1/2-1/2": return Drawn, true
+    if s == "*": return Unfinished, true
+    return Unfinished, false

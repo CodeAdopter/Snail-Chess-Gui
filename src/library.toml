@@ -1,0 +1,2 @@
+libs = ["C:/Snail/Snail Engine/engine", "C:/Snail Db/snaildb"]
+include = ["fastchess/c"]

@@ -1,0 +1,269 @@
+use engine/mesh/sweeps
+use engine/math/random
+use src/board3d/board_shapes
+
+const ParkGround: f32 = -0.7595
+
+const LawnPart = 0
+const BladePart = 1
+const ConcretePart = 2
+const BarkPart = 3
+const LeafPart = 4
+const CanopyPart = 5
+const LitterPart = 6
+const CastIronPart = 7
+const SlatPart = 8
+const WoodsPart = 9
+const SkyPart = 10
+const ParkParts = 11
+
+fn sun_way() -> Vec3
+    return Vec3(-0.6, 0.5, 0.62).normalized
+
+fn oak_at() -> Vec3
+    return Vec3(-7.9, ParkGround, 7.6)
+
+struct ParkBuild
+    parts: [ParkParts]Mesh
+    part: Mesh
+    rng: Mulberry32
+
+    fn init()
+        for k in 0..ParkParts: parts[k].init(65536, 262144)
+        part.init(4096, 16384)
+        rng = Mulberry32(0x0C70BE5)
+
+    fn free_all()
+        for k in 0..ParkParts: parts[k].free_all()
+        part.free_all()
+
+    fn random(lo: f32, hi: f32) -> f32
+        return lo + (hi - lo) * rng.next() as f32
+
+    fn build()
+        part.clear()
+        add_plane(&part, 400.0, 400.0, 1, 1)
+        parts[LawnPart].append(&part, Mat4.translation(Vec3(0.0, ParkGround, 0.0)))
+        part.clear()
+        add_sphere(&part, 380.0, 48, 24)
+        parts[SkyPart].append(&part, Mat4.identity())
+        for r in 0..2
+            part.clear()
+            part.set_color(Color(1.0, 1.0, 1.0, r as f32 * 0.5))
+            add_cylinder(&part, r == 0 ? 70.0 : 115.0, r == 0 ? 20.0 : 30.0, 160, false)
+            parts[WoodsPart].append(&part, Mat4.translation(Vec3(0.0, ParkGround + (r == 0 ? 10.0 : 15.0), 0.0)))
+        table()
+        bench(Vec3(2.6, ParkGround, -8.7))
+        lamp_post(Vec3(-3.4, ParkGround, -8.2))
+        tree(oak_at(), 9.0, 4.6, 0, CanopyPart)
+        let spots = [Vec3(-9.0, 0.0, -14.0), Vec3(-1.5, 0.0, -19.0), Vec3(7.5, 0.0, -15.0), Vec3(15.0, 0.0, -9.0), Vec3(-16.0, 0.0, -6.0), Vec3(18.0, 0.0, 3.0), Vec3(-17.0, 0.0, 8.0), Vec3(11.0, 0.0, 13.0), Vec3(-2.0, 0.0, 17.0), Vec3(24.0, 0.0, -20.0), Vec3(-25.0, 0.0, -22.0), Vec3(4.0, 0.0, -30.0)]
+        for i in 0..spots.len as int
+            let at = Vec3(spots[i].x, ParkGround, spots[i].z)
+            tree(at, random(8.0, 13.0), random(3.2, 5.0), 1 + i % 4, LeafPart)
+        grass()
+        litter()
+
+    fn scale_all()
+        let s = Mat4.trs(Vec3(0.0, 0.0, 0.0), Quat.identity(), Vec3.splat(Metre))
+        for k in 0..ParkParts: parts[k].transform(s)
+
+    fn block(k: int, low: Vec3, high: Vec3, grain: Vec3, seed: f32)
+        part.clear()
+        part.set_color(Color(grain.x, grain.y, grain.z, seed - floor(seed)))
+        add_box(&part, high - low)
+        parts[k].append(&part, Mat4.translation((low + high) * 0.5))
+
+    fn turned(k: int, profile: []Vec2, at: Vec3)
+        part.clear()
+        part.set_color(Color(1.0, 1.0, 1.0, 1.0))
+        add_lathe(&part, profile, 40)
+        parts[k].append(&part, Mat4.translation(at))
+
+    fn table()
+        let top = -BoardDepth / Metre
+        block(ConcretePart, Vec3(-0.5, top - 0.07, -0.42), Vec3(0.5, top, 0.42), Vec3(1.0, 0.0, 0.0), 0.0)
+        let h = top - 0.07 - ParkGround
+        let column = [Vec2(0.0, 0.0), Vec2(0.3, 0.0), Vec2(0.3, 0.07), Vec2(0.24, 0.1), Vec2(0.14, 0.16), Vec2(0.12, 0.3), Vec2(0.11, h - 0.12), Vec2(0.15, h - 0.06), Vec2(0.22, h - 0.02), Vec2(0.22, h), Vec2(0.0, h)]
+        turned(ConcretePart, column[0..column.len], Vec3(0.0, ParkGround, 0.0))
+        let stool = [Vec2(0.0, 0.0), Vec2(0.21, 0.0), Vec2(0.21, 0.05), Vec2(0.15, 0.1), Vec2(0.12, 0.25), Vec2(0.15, 0.38), Vec2(0.2, 0.42), Vec2(0.2, 0.46), Vec2(0.0, 0.46)]
+        for side in 0..2
+            turned(ConcretePart, stool[0..stool.len], Vec3(0.0, ParkGround, side == 0 ? 0.78 : -0.78))
+
+    fn bench(at: Vec3)
+        let x = Vec3(1.0, 0.0, 0.0)
+        for e in 0..2
+            let ex: f32 = e == 0 ? -0.78 : 0.78
+            block(CastIronPart, at + Vec3(ex - 0.03, 0.0, 0.12), at + Vec3(ex + 0.03, 0.42, 0.18), x, 0.0)
+            block(CastIronPart, at + Vec3(ex - 0.03, 0.0, -0.22), at + Vec3(ex + 0.03, 0.82, -0.16), x, 0.0)
+            block(CastIronPart, at + Vec3(ex - 0.03, 0.38, -0.2), at + Vec3(ex + 0.03, 0.42, 0.2), x, 0.0)
+            block(CastIronPart, at + Vec3(ex - 0.035, 0.6, -0.2), at + Vec3(ex + 0.035, 0.63, 0.24), x, 0.0)
+        for s in 0..5
+            let z = -0.18 + s as f32 * 0.085
+            block(SlatPart, at + Vec3(-0.88, 0.42, z), at + Vec3(0.88, 0.445, z + 0.07), x, 0.1 + s as f32 * 0.17)
+        for s in 0..3
+            let y = 0.52 + s as f32 * 0.1
+            block(SlatPart, at + Vec3(-0.88, y, -0.2), at + Vec3(0.88, y + 0.075, -0.175), x, 0.6 + s as f32 * 0.13)
+
+    fn lamp_post(at: Vec3)
+        let post = [Vec2(0.0, 0.0), Vec2(0.16, 0.0), Vec2(0.16, 0.12), Vec2(0.1, 0.2), Vec2(0.07, 0.5), Vec2(0.09, 0.6), Vec2(0.05, 0.75), Vec2(0.045, 3.1), Vec2(0.07, 3.15), Vec2(0.07, 3.2), Vec2(0.0, 3.2)]
+        turned(CastIronPart, post[0..post.len], at)
+        let lantern = [Vec2(0.0, 0.0), Vec2(0.09, 0.0), Vec2(0.16, 0.38), Vec2(0.2, 0.42), Vec2(0.05, 0.6), Vec2(0.03, 0.7), Vec2(0.0, 0.72)]
+        turned(CastIronPart, lantern[0..lantern.len], at + Vec3(0.0, 3.2, 0.0))
+
+    fn tree(at: Vec3, tall: f32, wide: f32, kind: int, leaves: int)
+        let trunk = tall * 0.024
+        let fork = at + Vec3(random(-0.2, 0.2), tall * random(0.3, 0.4), random(-0.2, 0.2))
+        limb(at, fork, trunk, trunk * 0.8)
+        let limbs = 3 + (random(0.0, 1.0) * 2.0) as int
+        for i in 0..limbs
+            let a = i as f32 * Tau / limbs as f32 + random(-0.4, 0.4)
+            let way = Vec3(cos(a) * random(0.5, 0.8), random(0.7, 1.0), sin(a) * random(0.5, 0.8)).normalized
+            branch(fork, way, tall * random(0.3, 0.38), trunk * 0.65, 3, wide, at.y + tall * 0.62, kind, leaves)
+
+    fn branch(from: Vec3, way: Vec3, long: f32, thick: f32, depth: int, wide: f32, crown: f32, kind: int, leaves: int)
+        let bend = Vec3(random(-0.25, 0.25), random(-0.05, 0.2), random(-0.25, 0.25))
+        let to = from + (way + bend).normalized * long
+        limb(from, to, thick, thick * 0.7)
+        if depth <= 1: clump(to, wide * random(0.22, 0.32), kind, leaves)
+        if depth == 0: return
+        let count = 2 + (random(0.0, 1.0) * 1.6) as int
+        for i in 0..count
+            let side = Vec3(random(-1.0, 1.0), random(-0.2, 0.5), random(-1.0, 1.0))
+            let out = Vec3(to.x - from.x, 0.0, to.z - from.z).normalized * 0.4
+            var next = (way * 0.8 + side * 0.6 + out).normalized
+            if to.y > crown: next = (next + Vec3(0.0, -0.3, 0.0)).normalized
+            branch(to, next, long * random(0.62, 0.78), thick * 0.68, depth - 1, wide, crown, kind, leaves)
+
+    fn limb(a: Vec3, b: Vec3, thick: f32, thin: f32)
+        let d = b - a
+        let long = d.length
+        if long < 0.001: return
+        part.clear()
+        add_frustum(&part, thick, thin, long, 10, false)
+        parts[BarkPart].append(&part, Mat4.trs((a + b) * 0.5, Quat.between(Vec3.up(), d * (1.0 / long)), Vec3.splat(1.0)))
+        part.clear()
+        add_sphere(&part, thin, 10, 6)
+        parts[BarkPart].append(&part, Mat4.translation(b))
+
+    fn clump(at: Vec3, wide: f32, kind: int, k: int)
+        if k == CanopyPart
+            for i in 0..110
+                let dir = Vec3(random(-1.0, 1.0), random(-0.7, 1.0), random(-1.0, 1.0)).normalized
+                let out = pow(random(0.0, 1.0), 0.4)
+                let along = Vec3(random(-1.0, 1.0), random(-1.0, 1.0), random(-1.0, 1.0)).normalized
+                var across = along.cross(Vec3(random(-1.0, 1.0), random(-1.0, 1.0), random(-1.0, 1.0))).normalized
+                if across.length < 0.5: across = Vec3(1.0, 0.0, 0.0)
+                let size = random(0.1, 0.15)
+                add_leaf(&parts[k], at + dir * (wide * out), along, across, size, size * 0.62, leaf_colour(kind).with_alpha(out))
+            return
+        for i in 0..24
+            let dir = Vec3(random(-1.0, 1.0), random(-0.6, 1.0), random(-1.0, 1.0)).normalized
+            let out = pow(random(0.0, 1.0), 0.5)
+            let p = at + dir * (wide * 0.8 * out)
+            let u = Vec3(random(-1.0, 1.0), random(-1.0, 1.0), random(-1.0, 1.0)).normalized
+            var v = u.cross(Vec3(random(-1.0, 1.0), random(-1.0, 1.0), random(-1.0, 1.0))).normalized
+            if v.length < 0.5: v = Vec3(0.0, 1.0, 0.0)
+            let face = (dir + Vec3(0.0, 0.3, 0.0)).normalized
+            add_card(&parts[k], p, u, v, random(0.6, 0.95), face, leaf_colour(kind).with_alpha(0.3 + 0.7 * out), floor(random(0.0, 64.0)))
+
+    fn leaf_colour(kind: int) -> Color
+        let r = random(0.0, 1.0)
+        var hex: u32 = 0x5A7A2A
+        if kind == 0: hex = r < 0.6 ? 0x56722A : (r < 0.85 ? 0x8A9A34 : 0xC09A30)
+        if kind == 1: hex = r < 0.45 ? 0xB8381E : (r < 0.8 ? 0xD8702A : 0xE0A030)
+        if kind == 2: hex = r < 0.6 ? 0xE0B832 : (r < 0.85 ? 0xC8C040 : 0x8A9A30)
+        if kind == 3: hex = r < 0.5 ? 0xA8582A : (r < 0.8 ? 0xC07A30 : 0x7A4A22)
+        if kind == 4: hex = r < 0.5 ? 0x4E6A26 : (r < 0.8 ? 0x6A8030 : 0xA89030)
+        let c = Color.hex(hex)
+        let v = random(0.82, 1.12)
+        return Color(min(c.r * v, 1.0), min(c.g * v, 1.0), min(c.b * v, 1.0), 1.0)
+
+    fn grass()
+        let k = BladePart
+        let tones = [0x3A5418, 0x4E6A22, 0x5E7428, 0x7A7A30, 0x9A8A50]
+        for i in 0..110000
+            let r = 0.3 + pow(random(0.0, 1.0), 1.8) * 6.2
+            let a = random(0.0, Tau)
+            let x = cos(a) * r
+            let z = sin(a) * r
+            if abs(z - park_path_at(x)) < 0.85: continue
+            let worn = park_worn(x, z)
+            if random(0.0, 1.0) < worn * 0.92: continue
+            let tuft = random(0.0, 1.0) < 0.05
+            let tall = tuft ? random(0.06, 0.1) : random(0.025, 0.05) * (1.0 - worn * 0.5)
+            let pick = random(0.0, 1.0)
+            var tone = tones[pick < 0.25 ? 0 : (pick < 0.65 ? 1 : (pick < 0.85 ? 2 : (pick < 0.95 ? 3 : 4)))]
+            if worn > 0.3: tone = tones[3 + (random(0.0, 1.0) * 2.0) as int]
+            let c = Color.hex(tone as u32)
+            let v = random(0.8, 1.15)
+            add_blade(&parts[k], Vec3(x, ParkGround, z), tall, random(0.0025, 0.004), random(0.0, Tau), random(0.1, 0.6), Color(min(c.r * v, 1.0), min(c.g * v, 1.0), min(c.b * v, 1.0), 1.0))
+
+    fn litter()
+        let oak = oak_at()
+        for i in 0..1600
+            let near = random(0.0, 1.0) < 0.6
+            let c = near ? Vec3(oak.x, 0.0, oak.z) : Vec3(0.0, 0.0, 0.0)
+            let r = (near ? 6.0 : 7.0) * sqrt(random(0.0, 1.0))
+            let a = random(0.0, Tau)
+            let p = Vec3(c.x + cos(a) * r, ParkGround + 0.004 + random(0.0, 0.006), c.z + sin(a) * r)
+            if abs(p.x) < 0.45 and abs(p.z) < 0.45: continue
+            let turn = random(0.0, Tau)
+            let size = random(0.07, 0.13)
+            add_card(&parts[LitterPart], p, Vec3(cos(turn), random(-0.08, 0.12), sin(turn)).normalized, Vec3(-sin(turn), random(-0.08, 0.08), cos(turn)).normalized, size, Vec3(0.0, 1.0, 0.0), fallen_colour(), floor(random(0.0, 64.0)))
+
+    fn fallen_colour() -> Color
+        let r = random(0.0, 1.0)
+        let c = Color.hex(r < 0.35 ? 0xA8582A : (r < 0.6 ? 0xC89030 : (r < 0.85 ? 0x8A4A22 : 0x6A6A2A)))
+        let v = random(0.7, 1.05)
+        return Color(c.r * v, c.g * v, c.b * v, 1.0)
+
+fn park_worn(x: f32, z: f32) -> f32
+    let ring = 1.0 - smoothstep(0.75, 1.25, Vec2(x, z / 1.35).length)
+    var walk: f32 = 0.0
+    if z < -0.5 and z > park_path_at(x): walk = 1.0 - smoothstep(0.16, 0.42, abs(x - 0.25 * sin(z * 0.9)))
+    return max(ring, walk)
+
+fn park_path_at(x: f32) -> f32
+    return -6.6 + 1.6 * sin(x * 0.11 + 0.6) + 0.5 * sin(x * 0.29)
+
+fn add_leaf(m: *Mesh, p: Vec3, along: Vec3, across: Vec3, long: f32, wide: f32, tint: Color)
+    m.set_color(tint)
+    let n = across.cross(along).normalized
+    let base = p - along * (long * 0.5)
+    let middle = m.vertex(base + along * (long * 0.5), n, Vec2(0.0, 0.5))
+    let rim = [Vec2(0.0, 0.0), Vec2(0.7, 0.25), Vec2(0.6, 0.7), Vec2(0.0, 1.0), Vec2(-0.6, 0.7), Vec2(-0.7, 0.25)]
+    let first = m.vertex_count as u32
+    for i in 0..6
+        let q = rim[i]
+        m.vertex(base + across * (q.x * wide * 0.5) + along * (q.y * long), n, q)
+    for i in 0..6
+        m.triangle(middle, first + i as u32, first + ((i + 1) % 6) as u32)
+
+fn add_card(m: *Mesh, p: Vec3, u: Vec3, v: Vec3, size: f32, face: Vec3, tint: Color, shift: f32)
+    m.set_color(tint)
+    let h = size * 0.5
+    let o = Vec2(shift, floor(shift * 0.37))
+    let a = m.vertex(p - u * h - v * h, face, o + Vec2(0.001, 0.001))
+    let b = m.vertex(p + u * h - v * h, face, o + Vec2(0.999, 0.001))
+    let c = m.vertex(p + u * h + v * h, face, o + Vec2(0.999, 0.999))
+    let d = m.vertex(p - u * h + v * h, face, o + Vec2(0.001, 0.999))
+    m.quad(a, b, c, d)
+
+fn add_blade(m: *Mesh, root: Vec3, tall: f32, wide: f32, turn: f32, lean: f32, tint: Color)
+    let bend = Vec3(cos(turn), 0.0, sin(turn))
+    let side = Vec3(-sin(turn), 0.0, cos(turn))
+    let n = side.cross(Vec3(0.0, 1.0, 0.0) + bend * lean).normalized
+    let first = m.vertex_count as u32
+    for r in 0..3
+        let t: f32 = r == 0 ? 0.0 : (r == 1 ? 0.4 : 0.75)
+        let at = root + Vec3(0.0, tall * t, 0.0) + bend * (lean * tall * t * t)
+        let w = wide * (1.0 - t * 0.85)
+        m.set_color(tint.with_alpha(t))
+        m.vertex(at - side * (w * 0.5), n, Vec2(0.0, t))
+        m.vertex(at + side * (w * 0.5), n, Vec2(1.0, t))
+    m.set_color(tint.with_alpha(1.0))
+    m.vertex(root + Vec3(0.0, tall, 0.0) + bend * (lean * tall), n, Vec2(0.5, 1.0))
+    for r in 0..2
+        let a = first + r as u32 * 2
+        m.quad(a, a + 1, a + 3, a + 2)
+    m.triangle(first + 4, first + 5, first + 6)

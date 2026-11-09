@@ -1,0 +1,113 @@
+use src/lichess/lichess_events
+
+enum LichessLine: u8
+    LichessBadLine
+    LichessFullLine
+    LichessStateLine
+    LichessChatLine
+    LichessGoneLine
+    LichessOtherLine
+
+struct LichessSide
+    id: ShortText
+    name: ShortText
+    title: ShortText
+    rating: int
+    ai_level: int
+
+struct LichessGame
+    id: ShortText
+    white: LichessSide
+    black: LichessSide
+    initial_ms: i64 = -1
+    increment_ms: i64
+    speed: ShortText
+    rated: bool
+    start_fen: ShortText
+    full: bool
+    moves: [..]u8
+    plies: int
+    wtime_ms: i64
+    btime_ms: i64
+    status: ShortText
+    winner: ShortText
+    white_draw: bool
+    black_draw: bool
+    white_takeback: bool
+    black_takeback: bool
+    opponent_gone: bool
+    claim_in_s: int = -1
+    chat_who: ShortText
+    chat_text: ShortText
+    chat_spectator: bool
+
+    fn take(line: str) -> LichessLine
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(line)
+        let kind = doc.get(root, "type")
+        if not doc.is(kind, JsonString): return LichessBadLine
+        let k = doc.str_of(kind)
+        if k == "gameFull"
+            lichess_keep(&doc, root, "id", &id)
+            read_side(&doc, doc.get(root, "white"), &white)
+            read_side(&doc, doc.get(root, "black"), &black)
+            let clock = doc.get(root, "clock")
+            initial_ms = doc.is(doc.get(clock, "initial"), JsonNumber) ? doc.num_at(clock, "initial", 0.0) as i64 : -1
+            increment_ms = doc.num_at(clock, "increment", 0.0) as i64
+            lichess_keep(&doc, root, "speed", &speed)
+            rated = lichess_flag(&doc, root, "rated")
+            lichess_keep(&doc, root, "initialFen", &start_fen)
+            if start_fen.text() == "startpos": start_fen.clear()
+            full = true
+            read_state(&doc, doc.get(root, "state"))
+            return LichessFullLine
+        if k == "gameState"
+            read_state(&doc, root)
+            return LichessStateLine
+        if k == "chatLine"
+            lichess_keep(&doc, root, "username", &chat_who)
+            lichess_keep(&doc, root, "text", &chat_text)
+            let room = doc.get(root, "room")
+            chat_spectator = doc.is(room, JsonString) and doc.str_of(room) == "spectator"
+            return LichessChatLine
+        if k == "opponentGone"
+            opponent_gone = lichess_flag(&doc, root, "gone")
+            claim_in_s = doc.is(doc.get(root, "claimWinInSeconds"), JsonNumber) ? doc.num_at(root, "claimWinInSeconds", 0.0) as int : -1
+            return LichessGoneLine
+        return LichessOtherLine
+
+    fn read_side(doc: *JsonDoc, side: int, into: *LichessSide)
+        lichess_keep(doc, side, "id", &into.id)
+        lichess_keep(doc, side, "name", &into.name)
+        lichess_keep(doc, side, "title", &into.title)
+        into.rating = doc.num_at(side, "rating", 0.0) as int
+        into.ai_level = doc.num_at(side, "aiLevel", 0.0) as int
+
+    fn read_state(doc: *JsonDoc, s: int)
+        moves.clear()
+        plies = 0
+        let m = doc.get(s, "moves")
+        if doc.is(m, JsonString)
+            let t = doc.str_of(m)
+            for k in 0..t.len
+                moves.push(t[k])
+                if t[k] != ' ' and (k + 1 == t.len or t[k + 1] == ' '): plies += 1
+        wtime_ms = doc.num_at(s, "wtime", 0.0) as i64
+        btime_ms = doc.num_at(s, "btime", 0.0) as i64
+        lichess_keep(doc, s, "status", &status)
+        lichess_keep(doc, s, "winner", &winner)
+        white_draw = lichess_flag(doc, s, "wdraw")
+        black_draw = lichess_flag(doc, s, "bdraw")
+        white_takeback = lichess_flag(doc, s, "wtakeback")
+        black_takeback = lichess_flag(doc, s, "btakeback")
+
+    fn moves_text() -> str
+        return str(moves[0..moves.len])
+
+    fn over() -> bool
+        let s = status.text()
+        return full and s.len > 0 and s != "created" and s != "started"
+
+    fn release()
+        moves.free()

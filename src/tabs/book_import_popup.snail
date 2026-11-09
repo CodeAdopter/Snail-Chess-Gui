@@ -1,0 +1,225 @@
+use engine/desktop/desktop_app
+use engine/ui/ui_edit
+use engine/desktop/file_dialog
+use src/books/book_import
+use src/books/book_library
+use src/views/fact_row
+
+enum ImportStep: u8
+    ImportClosed
+    ImportPicking
+    ImportChoosing
+    ImportWaiting
+    ImportReport
+    ImportConfirming
+
+const ImportFormatNames = ["Polyglot", "PGN", "EPD"]
+
+struct BookImportPopup
+    step: ImportStep
+    dialog: FileDialog
+    file: [600]u8
+    file_len: int
+    settings: ImportSettings
+    format: int
+    whole: int
+    job: BookImport
+    name: UiEditText
+    most: UiEditText
+    added_id: int
+    suggested: [..]u8
+    origin: [..]u8
+    downloaded: bool
+    auto: bool
+
+    fn file_text() -> str
+        return str(file[0..file_len])
+
+    fn pick(app: *DesktopApp)
+        if step != ImportClosed: return
+        step = ImportPicking
+        dialog.pick_file(app.window.handle, "Books", "bin;pgn;epd", null)
+
+    fn take(app: *DesktopApp, path: str)
+        file_len = keep_text(path, file[0..600])
+        downloaded = false
+        suggested.clear()
+        origin.clear()
+        settings = ImportSettings()
+        format = import_format_of(path) as int
+        whole = 1
+        var t: [16]u8
+        most.set(format(&t, "{settings.most}"))
+        step = ImportChoosing
+        app.redraw()
+
+    fn take_download(app: *DesktopApp, path: str, book_name: str, from: str, plies: int)
+        take(app, path)
+        set_text(&suggested, book_name)
+        set_text(&origin, from)
+        if plies > 0: settings.plies = min(plies, 80)
+        downloaded = true
+
+    fn update(app: *DesktopApp)
+        if step == ImportPicking
+            if dialog.cancelled(): step = ImportClosed
+            var buf: [600]u8
+            let path = dialog.take(buf[0..600])
+            if path.len > 0: take(app, path)
+        elif step == ImportWaiting
+            if job.update()
+                step = ImportReport
+                name.set(suggested.len > 0 ? str(suggested[0..suggested.len]) : file_stem(file_name_of(file_text())))
+                app.redraw()
+            else: app.wake_in(0.25)
+
+    fn read()
+        settings.format = format as ImportFormat
+        settings.whole = whole == 1
+        let (n, ok) = uci_number(most.text())
+        if ok: settings.most = clamp(n, 1, 1000000) as int
+        job.start(file_text(), settings)
+        step = ImportWaiting
+
+    fn close()
+        job.forget()
+        step = ImportClosed
+        if downloaded: SDL_RemovePath(file_text().ptr as cstr)
+        downloaded = false
+
+    fn draw(app: *DesktopApp, books: *BookLibrary, theme: *GuiTheme, fonts: *GuiFonts)
+        if step == ImportClosed or step == ImportPicking: return
+        let ui = &app.ui
+        var showing = true
+        with ui.modal("bookimport", ref showing, 520.0)
+            match step
+                ImportChoosing: choose(ui, theme, fonts)
+                ImportWaiting: waiting(ui, theme, fonts)
+                ImportReport: report(app, books, theme, fonts)
+                ImportConfirming: confirm(app, books, theme, fonts)
+        if not showing: close()
+
+    fn choose(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        var line: [700]u8
+        if downloaded
+            ui.label(format(&line, "Import {str(suggested[0..suggested.len])}"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(format(&line, "{file_name_of(file_text())} · Downloaded from the registry and verified against the catalog."), note)
+        else
+            ui.label(format(&line, "Import {file_name_of(file_text())}"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(file_text(), note)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 16.0, align: Vec2(0.0, 0.5)))
+            for i in 0..ImportFormatNames.len
+                ui.radio(ImportFormatNames[i], ref format, i as int, UiNode(key: i as int))
+        let s = &settings
+        match format as ImportFormat
+            ImportPolyglot
+                ui.stepper("Depth (plies)", ref s.plies, 1, 40, UiNode(width: UiSize.fixed(220.0)))
+                ui.stepper("Min. weight (%)", ref s.share, 0, 100, UiNode(width: UiSize.fixed(220.0)))
+                with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                    ui.label("Maximum lines", note, UiNode(width: UiSize.fixed(110.0)))
+                    ui.text_field("bookmost", &most, "1000", UiNode(width: UiSize.fixed(110.0)))
+                ui.paragraph("Include moves with at least this percentage of the total weight at each position. Follow them to the selected depth and keep the highest-weight lines.", note)
+            ImportPgn
+                ui.radio("Import up to the selected depth", ref whole, 1)
+                ui.radio("Require the selected depth; skip shorter games", ref whole, 0)
+                ui.stepper("Depth (plies)", ref s.plies, 1, 80, UiNode(width: UiSize.fixed(220.0)))
+            ImportEpd
+                ui.paragraph("Import each line as a position and preserve its EPD operations.", note)
+        buttons(ui, "Read file", true)
+
+    fn waiting(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+        var line: [700]u8
+        ui.label(format(&line, "Reading {file_name_of(file_text())}"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+        let done = atomic_load(&job.found.done)
+        let unit = format as ImportFormat == ImportPgn ? "games" : "lines"
+        ui.paragraph(format(&line, "Read {done} {unit}."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+        buttons(ui, "", false)
+
+    fn report(app: *DesktopApp, books: *BookLibrary, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = &app.ui
+        let f = &job.found
+        let title = UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink)
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        var line: [700]u8
+        if job.problem_len > 0
+            ui.label(format(&line, "{file_name_of(file_text())} could not be read as a book"), title)
+            ui.paragraph(job.problem_text(), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                if ui.button("Back"): step = ImportChoosing
+                ui.spacer()
+                if ui.button("Close", true): close()
+            return
+        ui.label(f.count == 0 ? "No positions found" : format(&line, "{f.count} positions found"), title)
+        fact(ui, fonts, theme, "Duplicates", format(&line, "{f.duplicates} duplicate positions skipped"))
+        fact(ui, fonts, theme, "Errors", f.errors == 0 ? "None" : format(&line, "{f.errors} entries skipped{f.errors > MostErrorNotes ? " (first five errors shown)" : ""}"))
+        if f.errors > 0
+            with ui.scroll_area("importerrors", node: UiNode(width: UiSize.grow(), height: UiSize.fit(0.0, 120.0), padding: Vec4.splat(8.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(5.0))))
+                ui.paragraph(f.notes_text(), UiTextStyle(face: fonts.mono, size: 11.5, color: theme.ink))
+        if f.short > 0: fact(ui, fonts, theme, "Short games", format(&line, "{f.short} games skipped: fewer than {settings.plies} half-moves"))
+        if f.beyond > 0: fact(ui, fonts, theme, "Line limit", format(&line, "{f.beyond} lower-weight lines skipped; kept the top {settings.most}"))
+        if f.stopped: ui.paragraph("Import stopped after exploring one million lines. The book contains the highest-weight lines found.", note)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.label("Name", note, UiNode(width: UiSize.fixed(96.0)))
+            ui.text_field("bookname", &name, "Name", UiNode(width: UiSize.grow()))
+        let wanted = trim(name.text())
+        let taken = books.named(wanted)
+        if taken: ui.paragraph(format(&line, "A book named {taken.name_text()} already exists. You will be asked to confirm replacement."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            if ui.button("Back"): step = ImportChoosing
+            ui.spacer()
+            if ui.button("Cancel"): close()
+            if ui.button(taken ? "Replace" : "Save", true) and f.count > 0 and wanted.len > 0
+                if taken: step = ImportConfirming
+                else: save(app, books, null)
+
+    fn confirm(app: *DesktopApp, books: *BookLibrary, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = &app.ui
+        let taken = books.named(trim(name.text()))
+        if not taken
+            step = ImportReport
+            return
+        var line: [700]u8
+        ui.label(format(&line, "Replace {taken.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+        ui.paragraph(format(&line, "Replace the existing {taken.positions} openings with {job.found.count} imported openings. Tournaments using this book keep their own copies."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.spacer()
+            if ui.button("Cancel"): step = ImportReport
+            if ui.button("Replace", true): save(app, books, taken)
+
+    fn save(app: *DesktopApp, books: *BookLibrary, replaced: *BookEntry)
+        if replaced and not books.remove(replaced.id)
+            app.ui.toast("Could not remove the existing book.")
+            return
+        let f = &job.found
+        let e = new BookEntry
+        set_text(&e.name, trim(name.text()))
+        e.kind = format == 0 ? BookPolyglot : format == 1 ? BookPgn : BookEpd
+        set_text(&e.origin, origin.len > 0 ? str(origin[0..origin.len]) : file_name_of(file_text()))
+        e.positions = f.count
+        e.plies = e.kind == BookEpd ? 0 : settings.plies
+        var t: SDL_Time
+        if SDL_GetCurrentTime(&t): e.made = t / 1000000000
+        if not books.add(e, str(f.openings[0..f.openings.len]))
+            app.ui.toast("Could not save the book to the data folder.")
+            return
+        added_id = e.id
+        close()
+
+    fn buttons(ui: *UiCanvas, go: str, can: bool)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.spacer()
+            if ui.button("Cancel"): close()
+            if go.len > 0 and ui.button(go, true) and can: read()
+
+    fn release()
+        job.release()
+        if downloaded: SDL_RemovePath(file_text().ptr as cstr)
+        suggested.free()
+        origin.free()
+
+fn file_stem(name: str) -> str
+    var at = name.len as int
+    while at > 0 and name[at - 1] != '.'
+        at -= 1
+    return at > 1 ? name[0..at - 1] : name

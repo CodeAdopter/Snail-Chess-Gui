@@ -1,0 +1,292 @@
+use engine/desktop/desktop_menu
+use engine/ui/ui_widgets
+use src/views/review_card
+
+const MoveRowHeight: f32 = 26.0
+const MoveNumberWidth: f32 = 40.0
+const MovesPad: f32 = 8.0
+const AsideIndent: f32 = 14.0
+
+struct FlowWord
+    node: int
+    at: int
+    len: int
+    width: f32
+    quiet: bool
+    bracket: bool
+
+struct MovesPanel
+    words: [..]FlowWord
+    text: [..]u8
+    shown: int = -1
+    follow: bool
+    glide: bool
+    current_id: u32
+    area_id: u32
+    menu_node: int
+    menu_at: Vec2
+    fixed: bool
+    said: [..]u8
+    report: *GameReport
+    clicked: bool
+
+    fn draw(app: *DesktopApp, look: *DesktopLook, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, x: f32, y: f32, w: f32, h: f32, review: *GameReport = null)
+        let ui = &app.ui
+        report = review
+        clicked = false
+        if w < 1.0 or h < 1.0: return
+        if game.at != shown
+            glide = not fixed and shown >= 0 and shown < game.nodes.len and (game.nodes[game.at].parent == shown or game.nodes[shown].parent == game.at)
+            shown = game.at
+            follow = true
+        current_id = 0
+        text.clear()
+        with area = ui.scroll_area("moves", fade: 10.0, node: UiNode(floating: true, offset: Vec2(x + 1.0, y + 1.0), width: UiSize.fixed(w - 2.0), height: UiSize.fixed(h - 2.0), padding: Vec4(0.0, 4.0, 0.0, 6.0)))
+            area_id = area.id
+            let root = &game.nodes[0]
+            if root.comment.len > 0: aside_comment(app, theme, fonts, game, 0, w)
+            if root.first == NoNode
+                ui.label(fixed ? "Moves appear here as they are played." : "Moves appear here. Drag a piece, or paste a FEN or PGN.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(padding: Vec4(MovesPad + 4.0, 8.0, MovesPad, 8.0), width: UiSize.grow()))
+            main_line(app, theme, fonts, game, w)
+            result_line(ui, theme, fonts, game)
+        if follow and current_id != 0: keep_in_view(ui)
+        draw_menu(app, look, game)
+
+    fn main_line(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, w: f32)
+        let ui = &app.ui
+        var n = game.nodes[0].first
+        while n != NoNode
+            let (number, side) = game.move_number(n)
+            var next = game.nodes[n].first
+            var after = n
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(MoveRowHeight)))
+                number_cell(ui, theme, fonts, number)
+                if side == Black: dots_cell(ui, theme, fonts)
+                move_cell(app, theme, fonts, game, n)
+                if side == White
+                    if has_aside(game, n) or next == NoNode: ui.leaf(UiNode(width: UiSize.grow()))
+                    else
+                        move_cell(app, theme, fonts, game, next)
+                        after = next
+                        next = game.nodes[next].first
+            if has_aside(game, after): aside(app, theme, fonts, game, after, w)
+            n = next
+
+    fn number_cell(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, number: int)
+        var digits: [12]u8
+        ui.label(format(&digits, "{number}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(width: UiSize.fixed(MoveNumberWidth), height: UiSize.grow(), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.sunken))))
+
+    fn dots_cell(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+        ui.label("…", UiTextStyle(face: fonts.text, size: 13.0, color: theme.muted), UiNode(width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(10.0, 0.0, 6.0, 0.0), align: Vec2(0.0, 0.5)))
+
+    fn move_cell(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, n: int)
+        let ui = &app.ui
+        let at = text.len as int
+        add_move_text(game, n, false, false)
+        let label = str(text[at..text.len])
+        let current = n == game.at
+        let o = ui.open(UiNode(key: n, name: "move", flow: FlowRow, gap: 3.0, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(10.0, 0.0, 6.0, 0.0), align: Vec2(0.0, 0.5), hit: true, clip: true))
+        move_look(app, theme, o.id, o.index, n, current, game)
+        ui.label(label, UiTextStyle(face: current ? fonts.strong : fonts.text, size: 13.0, color: current ? theme.accent : theme.ink))
+        if report
+            let m = report.mark(n)
+            if mark_sign(m).len > 0: ui.label(mark_sign(m), UiTextStyle(face: fonts.strong, size: 12.5, color: mark_color(theme, m)))
+            let node = &game.nodes[n]
+            if node.eval_depth > 0
+                var eval: [24]u8
+                ui.spacer()
+                ui.label(node_eval_text(node, &eval), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+        ui.close()
+
+    fn move_look(app: *DesktopApp, theme: *GuiTheme, id: u32, index: int, n: int, current: bool, game: *Game)
+        let ui = &app.ui
+        let h = ui.interact(id, false)
+        if current: current_id = id
+        let lit = ui.spring(id, 0, h.hovered ? 1.0 : 0.0, 22.0)
+        var fill = theme.accent.with_alpha(0.08 * lit)
+        if current: fill = theme.accent_soft
+        ui.elements[index].node.box = UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(4.0))
+        if h.hovered: app.cursor = SDL_SYSTEM_CURSOR_POINTER
+        if h.clicked
+            game.go(n)
+            clicked = true
+        if h.hovered and not fixed and app.pointer.mouse.pressed(MouseRight)
+            menu_node = n
+            menu_at = Vec2(app.pointer.mouse.x, app.pointer.mouse.y)
+            ui.memory(area_id).open = true
+
+    fn has_aside(game: *Game, n: int) -> bool
+        return game.nodes[n].next != NoNode or spoken(game, game.nodes[n].comment).len > 0
+
+    fn spoken(game: *Game, span: GameSpan) -> str
+        return without_commands(game.text_of(span), &said)
+
+    fn aside(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, n: int, w: f32)
+        let ui = &app.ui
+        if spoken(game, game.nodes[n].comment).len > 0: aside_comment(app, theme, fonts, game, n, w)
+        var v = game.nodes[n].next
+        while v != NoNode
+            words.clear()
+            add_line(game, v, true)
+            flow(app, theme, fonts, game, w - AsideIndent - MovesPad * 2.0)
+            v = game.nodes[v].next
+
+    fn aside_comment(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, n: int, w: f32)
+        let ui = &app.ui
+        ui.paragraph(spoken(game, game.nodes[n].comment), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.grow(), padding: Vec4(MovesPad + AsideIndent, 4.0, MovesPad, 4.0)))
+
+    fn add_line(game: *Game, first: int, numbered: bool)
+        var n = first
+        var number = numbered
+        while n != NoNode
+            let node = &game.nodes[n]
+            if spoken(game, node.lead).len > 0
+                add_comment_words(said_text())
+                number = true
+            let at = text.len as int
+            add_move_text(game, n, number, true)
+            words.push(FlowWord(n, at, text.len as int - at, 0.0, false))
+            number = false
+            if spoken(game, node.comment).len > 0
+                add_comment_words(said_text())
+                number = true
+            if game.nodes[node.parent].first == n
+                var v = node.next
+                while v != NoNode
+                    add_word("(", true)
+                    words[words.len - 1].bracket = true
+                    add_line(game, v, true)
+                    add_word(")", true)
+                    words[words.len - 1].bracket = true
+                    number = true
+                    v = game.nodes[v].next
+            n = node.first
+
+    fn add_move_text(game: *Game, n: int, numbered: bool, flowing: bool)
+        let (number, side) = game.move_number(n)
+        var digits: [16]u8
+        if side == White and (numbered or flowing): add_text(format(&digits, "{number}. "))
+        elif numbered: add_text(format(&digits, "{number}... "))
+        let node = &game.nodes[n]
+        add_text(node.san_text())
+        for k in 0..node.nag_count
+            add_text(nag_mark(node.nags[k], &digits))
+
+    fn said_text() -> str
+        return str(said[0..said.len])
+
+    fn add_comment_words(s: str)
+        var at = 0
+        while at < s.len
+            if s[at] == ' '
+                at += 1
+                continue
+            var end = at
+            while end < s.len and s[end] != ' '
+                end += 1
+            add_word(s[at..end], true)
+            at = end
+
+    fn add_word(s: str, quiet: bool)
+        let at = text.len as int
+        add_text(s)
+        words.push(FlowWord(NoNode, at, s.len as int, 0.0, quiet))
+
+    fn add_text(s: str)
+        for i in 0..s.len
+            text.push(s[i])
+
+    fn flow(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, game: *Game, width: f32)
+        let ui = &app.ui
+        let move_style = UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink)
+        let quiet_style = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        for i in 0..words.len
+            let wd = &words[i]
+            wd.width = ui.measure(str(text[wd.at..wd.at + wd.len]), wd.quiet ? quiet_style : move_style).x + (wd.bracket ? 2.0 : 6.0)
+        var i = 0
+        while i < words.len
+            var end = i
+            var used: f32 = 0.0
+            while end < words.len and (end == i or used + words[end].width <= width)
+                used += words[end].width
+                end += 1
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), padding: Vec4(MovesPad + AsideIndent, 1.0, MovesPad, 1.0)))
+                for k in i..end
+                    let wd = words[k]
+                    let s = str(text[wd.at..wd.at + wd.len])
+                    let left = k > i and words[k - 1].bracket and words[k - 1].len == 1 and text[words[k - 1].at] == '(' ? 0.0 : 3.0
+                    let right = k + 1 < end and words[k + 1].bracket and text[words[k + 1].at] == ')' ? 0.0 : 3.0
+                    if wd.node == NoNode
+                        ui.label(s, quiet_style, UiNode(padding: wd.bracket ? Vec4(0.5, 2.0, 0.5, 2.0) : Vec4(left, 2.0, right, 2.0)))
+                        continue
+                    let current = wd.node == game.at
+                    let o = ui.open(UiNode(key: wd.node, name: "word", padding: Vec4(left, 2.0, right, 2.0), hit: true))
+                    move_look(app, theme, o.id, o.index, wd.node, current, game)
+                    ui.label(s, UiTextStyle(face: current ? fonts.strong : fonts.text, color: current ? theme.accent : theme.ink, ..move_style))
+                    ui.close()
+            i = end
+
+    fn result_line(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, game: *Game)
+        if game.result == Unfinished: return
+        ui.label(result_text(game.result), UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow(), padding: Vec4(0.0, 8.0, 0.0, 8.0), align: Vec2(0.5, 0.5)))
+
+    fn keep_in_view(ui: *UiCanvas)
+        let f = ui.last_rect(current_id)
+        if f.w <= 0.0: return
+        follow = false
+        let m = ui.memory(area_id)
+        let top = m.rect.y + 4.0
+        let rel = f.y - (top - m.scroll.y)
+        if rel < m.target.y + 8.0: m.target.y = max(rel - 8.0, 0.0)
+        elif rel + f.w > m.target.y + m.view.y - 8.0: m.target.y = min(rel + f.w - m.view.y + 8.0, max(m.content.y - m.view.y, 0.0))
+        if not glide: m.scroll = m.target
+
+    fn draw_menu(app: *DesktopApp, look: *DesktopLook, game: *Game)
+        let ui = &app.ui
+        if menu_node <= 0 or menu_node >= game.nodes.len or game.nodes[menu_node].gone
+            ui.memory(area_id).open = false
+            return
+        with ui.menu_under(area_id, menu_at.x, menu_at.y, look, "movemenu")
+            if not game.on_main_line(menu_node)
+                if ui.menu_item("Promote variation"): game.promote(menu_node)
+            if ui.menu_item("Delete from here"): game.delete_from(menu_node)
+            ui.menu_divider(look)
+            for (nag, label) in [(1, "Good move  !"), (2, "Mistake  ?"), (3, "Brilliant move  !!"), (4, "Blunder  ??"), (5, "Interesting move  !?"), (6, "Dubious move  ?!")]
+                if ui.menu_item(label)
+                    game.clear_nags(menu_node)
+                    game.add_nag(menu_node, nag as u8)
+            if game.nodes[menu_node].nag_count > 0
+                if ui.menu_item("Clear marks"): game.clear_nags(menu_node)
+
+fn without_commands(s: str, out: *[..]u8) -> str
+    out.clear()
+    var i = 0
+    while i < s.len
+        if s[i] == '[' and i + 1 < s.len and s[i + 1] == '%'
+            while i < s.len and s[i] != ']'
+                i += 1
+            i += 1
+            continue
+        if s[i] != ' ' or out.len > 0 and out[out.len - 1] != ' ': out.push(s[i])
+        i += 1
+    while out.len > 0 and out[out.len - 1] == ' '
+        out.pop()
+    return str(out[0..out.len])
+
+fn nag_mark(nag: u8, buf: *[16]u8) -> str
+    match nag
+        1: return "!"
+        2: return "?"
+        3: return "!!"
+        4: return "??"
+        5: return "!?"
+        6: return "?!"
+        10: return " ="
+        13: return " ∞"
+        14: return " +="
+        15: return " =+"
+        16: return " ±"
+        17: return " ∓"
+        18: return " +−"
+        19: return " −+"
+    return format(buf, " ${nag}")

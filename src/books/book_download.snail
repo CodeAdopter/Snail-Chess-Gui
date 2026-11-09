@@ -1,0 +1,185 @@
+use engine/desktop/file_tree
+use src/books/book_registry
+
+const BookDownloads = "downloads"
+
+enum BookFetchStep: u8
+    BookFetchIdle
+    BookFetchDownloading
+    BookFetchUnpacking
+    BookFetchReady
+    BookFetchFailed
+    BookFetchCancelled
+
+const UnpackRunning = 1
+const UnpackDone = 2
+const UnpackFailed = 3
+
+struct BookDownload
+    step: BookFetchStep
+    get: HttpGet
+    zip: ZipArchive
+    work: int
+    thread: u64
+    name: [..]u8
+    file_name: [..]u8
+    archive_sha: [..]u8
+    content_sha: [..]u8
+    archive_size: i64
+    content_size: i64
+    plies: int
+    folder: [600]u8
+    folder_len: int
+    failure: [400]u8
+    failure_len: int
+    data: *DataFolder
+
+    fn start(folder: *DataFolder, c: *BookCatalog, i: int, mirror: str) -> bool
+        if busy(): return false
+        data = folder
+        let b = &c.books[i]
+        hold_text(&name, c.text(b.name))
+        hold_text(&file_name, c.text(b.file_name))
+        hold_text(&archive_sha, c.text(b.archive_sha))
+        hold_text(&content_sha, c.text(b.content_sha))
+        archive_size = b.archive_size
+        content_size = b.content_size
+        plies = b.max_ply
+        failure_len = 0
+        clean()
+        var buf: [600]u8
+        folder_len = keep_text(data.path(BookDownloads, &buf), self.folder[0..600])
+        if not data.make_folder(BookDownloads)
+            fail("Could not create the download folder.")
+            return false
+        let url = c.text(b.url)
+        var address: [2100]u8
+        var file: [700]u8
+        get.most = archive_size + 1048576
+        get.hashing = true
+        if not get.start(mirror.len > 0 ? format(&address, "{mirror}{url[BooksHome.len..url.len]}") : url, RegistryAgent, "", zip_path(&file))
+            fail("Could not start the download.")
+            return false
+        step = BookFetchDownloading
+        return true
+
+    fn busy() -> bool
+        return step == BookFetchDownloading or step == BookFetchUnpacking
+
+    fn update() -> bool
+        if step == BookFetchDownloading
+            if not get.finished(): return false
+            return downloaded()
+        if step != BookFetchUnpacking: return false
+        let w = atomic_load(&work)
+        if w == UnpackRunning: return false
+        join(thread)
+        thread = 0
+        if w == UnpackFailed
+            clean()
+            step = BookFetchFailed
+            return true
+        step = BookFetchReady
+        return true
+
+    fn downloaded() -> bool
+        if get.state == HttpCancelled
+            clean()
+            step = BookFetchCancelled
+            return true
+        if not get.done(): return fail(get.error_text())
+        var line: [400]u8
+        if get.received != archive_size: return fail(format(&line, "Download size mismatch: received {get.received} bytes; expected {archive_size}."))
+        var hex: [64]u8
+        if sha256_hex(&get.digest, &hex) != str(archive_sha[0..archive_sha.len]): return fail("The downloaded archive failed SHA-256 verification and was discarded.")
+        atomic_store(&work, UnpackRunning)
+        step = BookFetchUnpacking
+        thread = spawn(book_unpack_work, self)
+        return true
+
+    fn unpack() -> bool
+        var path: [700]u8
+        if not zip.open(zip_path(&path)): return note(zip.error_text())
+        let want = str(file_name[0..file_name.len])
+        var at = -1
+        var files = 0
+        for i in 0..zip.entries.len as int
+            if zip.is_folder(i): continue
+            files += 1
+            if zip.name(i) == want: at = i
+        if files != 1 or at < 0: return note("The archive must contain only the expected book file.")
+        if zip.entries[at].size != content_size: return note("The book file size does not match the catalog.")
+        let out = alloc[u8](max(content_size, 1))
+        defer free(out)
+        let bytes = out[0..content_size]
+        if not zip.unpack(at, bytes): return note(zip.error_text())
+        var s: Sha256
+        s.begin()
+        s.add(bytes)
+        var d: [32]u8
+        s.finish(&d)
+        var hex: [64]u8
+        if sha256_hex(&d, &hex) != str(content_sha[0..content_sha.len]): return note("The book file failed SHA-256 verification and was discarded.")
+        if not write_file(book_path(&path).ptr as cstr, bytes): return note("Could not save the book file. Check available disk space.")
+        return true
+
+    fn zip_path(buf: *[700]u8) -> str
+        return format(buf, "{str(self.folder[0..folder_len])}\\download.zip")
+
+    fn book_path(buf: *[700]u8) -> str
+        return format(buf, "{str(self.folder[0..folder_len])}\\{str(file_name[0..file_name.len])}")
+
+    fn name_text() -> str
+        return str(name[0..name.len])
+
+    fn cancel()
+        if step == BookFetchDownloading: get.cancel()
+
+    fn stop()
+        if step == BookFetchDownloading
+            get.cancel()
+            while not get.finished()
+                sleep_ms(2)
+        if thread != 0
+            join(thread)
+            thread = 0
+        if busy()
+            clean()
+            step = BookFetchCancelled
+
+    fn clean()
+        if not data: return
+        var buf: [600]u8
+        remove_tree(data.path(BookDownloads, &buf))
+
+    fn fail(why: str) -> bool
+        note(why)
+        clean()
+        step = BookFetchFailed
+        return true
+
+    fn note(why: str) -> bool
+        failure_len = min(why.len, 400) as int
+        for k in 0..failure_len
+            failure[k] = why[k]
+        return false
+
+    fn failure_text() -> str
+        return str(failure[0..failure_len])
+
+    fn release()
+        stop()
+        get.release()
+        zip.release()
+        name.free()
+        file_name.free()
+        archive_sha.free()
+        content_sha.free()
+
+fn book_unpack_work(j: *BookDownload)
+    let ok = j.unpack()
+    j.zip.release()
+    var path: [700]u8
+    SDL_RemovePath(j.zip_path(&path).ptr as cstr)
+    atomic_store(&j.work, ok ? UnpackDone : UnpackFailed)
+    http_wake()

@@ -1,0 +1,46 @@
+use src/uci/uci_engine
+use src/game/game
+use src/engines/engine_profile
+
+fn write_position(game: *Game, node: int, out: *[..]u8)
+    out.clear()
+    var fen: ShortText
+    game.start_board().write_fen(&fen)
+    push_text(out, "position fen ")
+    push_text(out, fen.text())
+    var path: [..]int
+    defer path.free()
+    var n = node
+    while n > 0
+        path.push(n)
+        n = game.nodes[n].parent
+    if path.len > 0: push_text(out, " moves")
+    var k = path.len as int - 1
+    while k >= 0
+        var uci: ShortText
+        write_uci(game.nodes[path[k]].move, &uci)
+        push_text(out, " ")
+        push_text(out, uci.text())
+        k -= 1
+
+fn tell_values(e: *UciEngine, wanted: *EngineProfile, sent: *EngineProfile, skip: []str) -> bool
+    var told_any = false
+    for o in e.options
+        let name = e.pool_text(o.name)
+        if o.kind == ButtonOption: continue
+        var skipped = false
+        for s in skip
+            if name == s: skipped = true
+        if skipped: continue
+        var want = e.pool_text(o.default)
+        if wanted
+            let (v, given) = wanted.value_of(name)
+            if given: want = v
+        var told = e.pool_text(o.default)
+        let (t, was_told) = sent.value_of(name)
+        if was_told: told = t
+        if want != told
+            e.set_option(name, want)
+            sent.put(name, want)
+            told_any = true
+    return told_any

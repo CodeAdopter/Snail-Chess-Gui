@@ -1,0 +1,44 @@
+use engine/ui/ui_layout
+use src/theme/theme
+use src/theme/fonts
+use src/chess/primitives
+
+const EngineCardHeight: f32 = 56.0
+const CardClockWidth: f32 = 96.0
+const CardEvalWidth: f32 = 62.0
+const EngineCardCurve: f32 = 4.0
+
+struct CardText
+    side: Side
+    to_move: bool
+    name: str
+    version: str
+    search: str
+    pv: str
+    eval: str
+    clock: str
+    gauge: f32
+    running: bool
+
+fn draw_engine_card(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name_id: str, x: f32, y: f32, w: f32, c: *CardText)
+    if w < 1.0: return
+    let disc = c.side == White ? Color(0.95, 0.95, 0.93, 1.0) : Color(0.08, 0.08, 0.09, 1.0)
+    let small = UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted)
+    let edge = c.to_move ? theme.accent : theme.line
+    with ui.open(UiNode(name: name_id, floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(EngineCardHeight), flow: FlowRow, gap: 12.0, align: Vec2(0.0, 0.5), padding: Vec4(14.0, 0.0, 6.0, 0.0), clip: true, box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(EngineCardCurve), border: 1.0, border_color: edge))))
+        ui.leaf(UiNode(width: UiSize.fixed(10.0), height: UiSize.fixed(10.0), box: UiBox(fill: UiFill.solid(disc), radius: Vec4.splat(5.0), border: 1.0, border_color: theme.muted)))
+        let eval_w = c.eval.len > 0 ? CardEvalWidth + 12.0 : 0.0
+        let middle = max(w - 14.0 - 6.0 - 10.0 - 12.0 - eval_w - (c.clock.len > 0 ? CardClockWidth + 12.0 : 0.0), 1.0)
+        with ui.open(UiNode(width: UiSize.fixed(middle), gap: 4.0, clip: true))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 1.0)))
+                ui.label(c.name, UiTextStyle(face: fonts.strong, size: 13.5, color: theme.ink))
+                if c.version.len > 0: ui.label(c.version, small)
+            if c.search.len > 0: ui.label(c.search, small, UiNode(width: UiSize.fixed(middle), clip: true))
+        if c.eval.len > 0: ui.label(c.eval, UiTextStyle(face: fonts.mono, size: 16.0, color: theme.ink), UiNode(width: UiSize.fixed(CardEvalWidth), align: Vec2(1.0, 0.5)))
+        if c.clock.len > 0
+            let fill = c.running ? theme.accent : theme.sunken
+            with ui.open(UiNode(width: UiSize.fixed(CardClockWidth), height: UiSize.fixed(EngineCardHeight - 12.0), align: Vec2(0.5, 0.5), clip: true, box: UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(EngineCardCurve - 1.0))))
+                ui.label(c.clock, UiTextStyle(face: fonts.mono, size: 15.0, color: c.running ? theme.accent_ink : theme.ink))
+                let track = CardClockWidth - 16.0
+                ui.leaf(UiNode(floating: true, anchor: Vec2(0.0, 1.0), pivot: Vec2(0.0, 1.0), offset: Vec2(8.0, -5.0), width: UiSize.fixed(track), height: UiSize.fixed(3.0), box: UiBox(fill: UiFill.solid(theme.line), radius: Vec4.splat(1.5))))
+                ui.leaf(UiNode(floating: true, anchor: Vec2(0.0, 1.0), pivot: Vec2(0.0, 1.0), offset: Vec2(8.0, -5.0), width: UiSize.fixed(max(track * clamp(c.gauge, 0.0, 1.0), 0.0)), height: UiSize.fixed(3.0), box: UiBox(fill: UiFill.solid(c.running ? theme.accent_ink : theme.muted), radius: Vec4.splat(1.5))))

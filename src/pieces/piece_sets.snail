@@ -1,0 +1,45 @@
+use src/pieces/classic_art
+use src/pieces/studio_art
+use src/pieces/folded_art
+use src/pieces/facet_art
+use src/pieces/vitrail_art
+use src/pieces/tribal_art
+use src/pieces/blunder_art
+use src/pieces/letters_art
+use src/pieces/shapes_art
+use src/pieces/checker_art
+use src/pieces/tokens_art
+use src/pieces/blindfold_art
+
+enum PieceSet: u8
+    Classic
+    Studio
+    Folded
+    Facet
+    Vitrail
+    Tribal
+    Blunder
+    Letters
+    Shapes
+    Checker
+    Tokens
+    Blindfold
+
+const PieceSetCount = 12
+
+const PieceSetWords = ["classic", "studio", "folded", "facet", "vitrail", "tribal", "blunder", "letters", "shapes", "checker", "tokens", "blindfold"]
+
+fn piece_art(set: PieceSet) -> PieceArt
+    match set
+        Studio: return StudioArt
+        Folded: return FoldedArt
+        Facet: return FacetArt
+        Vitrail: return VitrailArt
+        Tribal: return TribalArt
+        Blunder: return BlunderArt
+        Letters: return LettersArt
+        Shapes: return ShapesArt
+        Checker: return CheckerArt
+        Tokens: return TokensArt
+        Blindfold: return BlindfoldArt
+    return ClassicArt

@@ -1,0 +1,85 @@
+use src/effects/effect_kinds
+
+var effect_tick_ns: i64 = 16666667
+const EffectTickLeadNs: i64 = 2000000
+const EffectSpots = 48
+
+struct EffectSpot
+    key: u64
+    began_ns: i64
+    frame: i64
+
+struct EffectMoment
+    seconds: f32
+    shows: bool
+
+struct EffectClock
+    epoch_ns: i64
+    tick_ns: i64
+    now_ns: i64
+    frame: i64
+    still: bool
+    length_scale: f32 = 1.0
+    spots: [EffectSpots]EffectSpot
+    wake_ns: i64
+
+    fn begin(now: i64, still: bool)
+        if epoch_ns == 0: epoch_ns = now
+        frame += 1
+        now_ns = now
+        tick_ns = epoch_ns + (now - epoch_ns + EffectTickLeadNs) / effect_tick_ns * effect_tick_ns
+        self.still = still
+        wake_ns = 0
+
+    fn moment(key: u64, length: f32, lasting: bool, still_at: f32) -> EffectMoment
+        let s = spot(key)
+        if s.frame != frame and s.frame != frame - 1: s.began_ns = tick_ns
+        s.frame = frame
+        let run = length as f64 * length_scale as f64
+        let seconds = (tick_ns - s.began_ns) as f64 / 1.0e9
+        if still
+            if lasting: return EffectMoment(length, true)
+            if seconds >= run: return EffectMoment(0.0, false)
+            let ticks = ((run * 1.0e9) as i64 + effect_tick_ns - 1) / effect_tick_ns
+            want(s.began_ns + ticks * effect_tick_ns)
+            return EffectMoment(still_at, true)
+        if seconds >= run: return EffectMoment(lasting ? length : 0.0, lasting)
+        want(tick_ns + effect_tick_ns)
+        return EffectMoment((seconds / length_scale as f64) as f32, true)
+
+    fn flow() -> f32
+        if still: return 0.0
+        want(tick_ns + effect_tick_ns)
+        return ((tick_ns - epoch_ns) % 3600000000000 / 1000000) as f32 / 1000.0
+
+    fn flow_every(step_ns: i64) -> f32
+        if still: return 0.0
+        let at = (tick_ns - epoch_ns) / step_ns * step_ns
+        want(epoch_ns + at + step_ns)
+        return (at % 3600000000000 / 1000000) as f32 / 1000.0
+
+    fn spot(key: u64) -> *EffectSpot
+        var oldest = 0
+        for i in 0..EffectSpots
+            if spots[i].key == key: return &spots[i]
+            if spots[i].frame < spots[oldest].frame: oldest = i as int
+        let s = &spots[oldest]
+        s.key = key
+        s.began_ns = tick_ns
+        s.frame = 0
+        return s
+
+    fn want(at: i64)
+        if wake_ns == 0 or at < wake_ns: wake_ns = at
+
+    fn wake_s() -> f64
+        if wake_ns == 0: return -1.0
+        return max(wake_ns - now_ns, 0) as f64 / 1.0e9
+
+fn effect_key(kind: GuiEffect, a: u64, b: u64) -> u64
+    var h = (kind as u64 + 1) * 0x9E3779B97F4A7C15
+    h = (h ^ a) * 0xBF58476D1CE4E5B9
+    h ^= h >> 31
+    h = (h ^ b) * 0x94D049BB133111EB
+    h ^= h >> 29
+    return h | 1

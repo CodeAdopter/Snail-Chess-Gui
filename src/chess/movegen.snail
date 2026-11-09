@@ -1,0 +1,192 @@
+use chess/sink
+use chess/threats
+use chess/castling
+
+@inline
+fn generate[us: Side, mode: GenMode](board: *Board, ref sink: MoveSink)
+    let ours = board.occupancy(us)
+    let theirs = board.occupancy(us.other)
+    let occupied = ours | theirs
+    let king = board.king_square(us)
+    let threats = find_threats(board, king, ours, occupied)
+
+    if not threats.checkers.many
+        let answers = threats.check_answers(king)
+        let quiet_targets = ~occupied & answers
+        let capture_targets = theirs & answers
+
+        add_pawn_moves(board, ref sink, threats, quiet_targets, capture_targets, ~occupied)
+        if board.en_passant != Square.none: add_en_passant(board, ref sink, king, threats.checkers, occupied)
+        if mode.stops_at_first and sink.found_any: return
+
+        add_piece_moves(board, ref sink, threats, quiet_targets, capture_targets, occupied)
+        if mode.stops_at_first and sink.found_any: return
+
+    add_king_moves(board, ref sink, king, theirs, occupied, threats.checkers)
+
+@inline
+fn add_pawn_moves[us: Side, mode: GenMode](board: *Board, ref sink: MoveSink, threats: Threats, quiet_targets: Bitboard, capture_targets: Bitboard, empty: Bitboard)
+    let pawns = board.pieces(us, Pawn)
+    let straight = threats.straight_pins
+    let diagonal = threats.diagonal_pins
+    let promotion = promotion_rank()
+
+    let capturers = pawns & ~straight
+    let pinned_capturers = capturers & diagonal
+    let west = capture_west(capturers) & capture_targets & ~(capture_west(pinned_capturers) & ~diagonal)
+    let east = capture_east(capturers) & capture_targets & ~(capture_east(pinned_capturers) & ~diagonal)
+
+    sink.add_promotions(west & promotion, west_step(), capture: true)
+    sink.add_promotions(east & promotion, east_step(), capture: true)
+    sink.add_pawn_moves(west & ~promotion, west_step(), Capture)
+    sink.add_pawn_moves(east & ~promotion, east_step(), Capture)
+
+    let pushers = pawns & ~diagonal
+    let pinned_pushers = pushers & straight
+    let single = push(pushers) & quiet_targets & ~(push(pinned_pushers) & ~straight)
+    let twice = push_twice(pushers & pawn_start()) & quiet_targets & push(empty) & ~(push_twice(pinned_pushers) & ~straight)
+
+    sink.add_promotions(single & promotion, push_step(), capture: false)
+    sink.add_pawn_moves(single & ~promotion, push_step(), Quiet)
+    sink.add_pawn_moves(twice, 2 * push_step(), DoublePush)
+
+@inline
+fn add_en_passant[us: Side, mode: GenMode](board: *Board, ref sink: MoveSink, king: Square, checkers: Bitboard, occupied: Bitboard)
+    const them = us.other
+    let target = board.en_passant
+    let target_bit = target.bit
+    let victim_bit = (target - push_step()).bit
+
+    let leaper_checkers = checkers & (board.pieces(them, Knight) | board.pieces(them, Pawn))
+    if leaper_checkers & ~victim_bit: return
+
+    let pawns = board.pieces(us, Pawn)
+    if capture_west(pawns) & target_bit: add_en_passant_if_safe(board, ref sink, king, target - west_step(), target, victim_bit, occupied)
+    if capture_east(pawns) & target_bit: add_en_passant_if_safe(board, ref sink, king, target - east_step(), target, victim_bit, occupied)
+
+@inline
+fn add_en_passant_if_safe[us: Side, mode: GenMode](board: *Board, ref sink: MoveSink, king: Square, from: Square, target: Square, victim_bit: Bitboard, occupied: Bitboard)
+    const them = us.other
+    let after = occupied ^ from.bit ^ victim_bit ^ target.bit
+    if rook_attacks(king, after) & board.rooks_queens(them): return
+    if bishop_attacks(king, after) & board.bishops_queens(them): return
+    sink.add_move(from, target, EnPassant)
+
+@inline
+fn add_piece_moves[us: Side, mode: GenMode](board: *Board, ref sink: MoveSink, threats: Threats, quiet_targets: Bitboard, capture_targets: Bitboard, occupied: Bitboard)
+    let straight = threats.straight_pins
+    let diagonal = threats.diagonal_pins
+    let pinned = straight | diagonal
+
+    for from in board.pieces(us, Knight) & ~pinned
+        add_targets(ref sink, from, knight_attacks(from), quiet_targets, capture_targets)
+
+    let bishops = board.pieces(us, Bishop) & ~straight
+    for from in bishops & ~diagonal
+        add_targets(ref sink, from, bishop_attacks(from, occupied), quiet_targets, capture_targets)
+    for from in bishops & diagonal
+        add_targets(ref sink, from, bishop_attacks(from, occupied) & diagonal, quiet_targets, capture_targets)
+
+    let rooks = board.pieces(us, Rook) & ~diagonal
+    for from in rooks & ~straight
+        add_targets(ref sink, from, rook_attacks(from, occupied), quiet_targets, capture_targets)
+    for from in rooks & straight
+        add_targets(ref sink, from, rook_attacks(from, occupied) & straight, quiet_targets, capture_targets)
+
+    let queens = board.pieces(us, Queen)
+    for from in queens & ~pinned
+        add_targets(ref sink, from, queen_attacks(from, occupied), quiet_targets, capture_targets)
+    for from in queens & pinned
+        let reach = from in straight ? rook_attacks(from, occupied) & straight : bishop_attacks(from, occupied) & diagonal
+        add_targets(ref sink, from, reach, quiet_targets, capture_targets)
+
+@inline
+fn add_targets[mode: GenMode](ref sink: MoveSink, from: Square, reach: Bitboard, quiet_targets: Bitboard, capture_targets: Bitboard)
+    sink.add_piece_moves(from, reach & capture_targets, Capture)
+    sink.add_piece_moves(from, reach & quiet_targets, Quiet)
+
+@inline
+fn add_king_moves[us: Side, mode: GenMode](board: *Board, ref sink: MoveSink, king: Square, theirs: Bitboard, occupied: Bitboard, checkers: Bitboard)
+    let reach = king_attacks(king)
+    let captures = reach & theirs
+    var quiets = reach & ~occupied
+
+    let quiets_wanted = not (mode.quiet_existence_enough and sink.counted != 0)
+    if not quiets_wanted: quiets = 0
+
+    let passages = checkers == 0 and quiets_wanted ? open_castling_passages(board, occupied) : 0
+    let watched = captures | quiets | passages
+    if not watched: return
+
+    let attacked = enemy_attacks(board, king, occupied, watched)
+    sink.add_piece_moves(king, captures & ~attacked, Capture)
+    sink.add_piece_moves(king, quiets & ~attacked, Quiet)
+    if passages: add_castling(ref sink, passages & ~attacked)
+
+@inline
+fn enemy_attacks[us: Side](board: *Board, king: Square, occupied: Bitboard, watched: Bitboard) -> Bitboard
+    const them = us.other
+    var attacked = enemy_pawn_attacks(board.pieces(them, Pawn)) | knight_spread(board.pieces(them, Knight)) | king_attacks(board.king_square(them))
+
+    var unknown = watched & ~attacked
+    if not unknown: return attacked
+
+    let without_king = occupied ^ king.bit
+    for from in board.bishops_queens(them)
+        if not bishop_reach(from) & unknown: continue
+        attacked |= bishop_attacks(from, without_king)
+        unknown &= ~attacked
+    for from in board.rooks_queens(them)
+        if not rook_reach(from) & unknown: continue
+        attacked |= rook_attacks(from, without_king)
+        unknown &= ~attacked
+    return attacked
+
+@inline
+fn open_castling_passages[us: Side](board: *Board, occupied: Bitboard) -> Bitboard
+    let rights = board.castling
+    if not rights: return 0
+    const shift = back_rank()
+    var passages: Bitboard = 0
+    if rights & kingside_right(us) and not occupied & KingsideGap << shift: passages |= KingsidePassage << shift
+    if rights & queenside_right(us) and not occupied & QueensideGap << shift: passages |= QueensidePassage << shift
+    return passages
+
+@inline
+fn add_castling[us: Side, mode: GenMode](ref sink: MoveSink, safe_passages: Bitboard)
+    const offset = back_rank()
+    const kingside = KingsidePassage << offset
+    if safe_passages & kingside == kingside: sink.add_move(e1 + offset, g1 + offset, CastleKingside)
+    const queenside = QueensidePassage << offset
+    if safe_passages & queenside == queenside: sink.add_move(e1 + offset, c1 + offset, CastleQueenside)
+
+@noinline
+@nosave
+fn legal[us: Side](board: *Board, buffer: *Move) -> int
+    var sink = MoveSink(buffer)
+    generate[us, WriteAll](board, ref sink)
+    return sink.written
+
+@noinline
+@nosave
+fn tactical[us: Side](board: *Board, buffer: *Move) -> (int, bool)
+    var sink = MoveSink(buffer)
+    generate[us, WriteTactical](board, ref sink)
+    return sink.written, sink.counted != 0
+
+@noinline
+@nosave
+fn count_legal[us: Side](board: *Board) -> int
+    var sink = MoveSink(null)
+    generate[us, CountAll](board, ref sink)
+    return sink.counted
+
+@noinline
+@nosave
+fn has_legal_move[us: Side](board: *Board) -> bool
+    var sink = MoveSink(null)
+    generate[us, FindAny](board, ref sink)
+    return sink.found_any
+
+fn legal_moves(board: *Board, buffer: *Move) -> int
+    return legal[board.side](board, buffer)

@@ -1,0 +1,135 @@
+use src/board3d/room_look
+
+struct RoomScene
+    built: bool
+    building: int
+    builder: u64
+    uploaded: int
+    staged: bool
+    build: RoomBuild
+    shapes: [RoomParts]GpuMesh
+    made: [RoomParts]bool
+    parts: [RoomParts]int
+    unit_shapes: [4]GpuMesh
+    units: [4]int
+    look: RoomLook
+
+    fn parts_ready() -> bool
+        if built: return true
+        if building == 0
+            building = 1
+            builder = spawn(room_builder, self)
+        return atomic_load(&building) >= 2
+
+    fn build_parts()
+        build.init()
+        build.build()
+        build.scale_all()
+
+    fn carve(gpu: *Gpu, ns: i64 = 0) -> bool
+        if built: return true
+        if building == 0: build_parts()
+        if building == 1 or building == 2: join(builder)
+        building = 3
+        let began = now_ns()
+        while uploaded < RoomParts
+            if ns > 0 and now_ns() - began > ns: return false
+            let k = uploaded
+            made[k] = build.parts[k].vertex_count > 0
+            if made[k]: shapes[k] = gpu.upload_mesh(&build.parts[k])
+            uploaded += 1
+        built = true
+        building = 0
+        uploaded = 0
+        build.free_parts()
+        var m: Mesh
+        m.init(1024, 4096)
+        for k in 0..4
+            m.clear()
+            if k == 0: add_box(&m, Vec3(1.0, 1.0, 1.0))
+            if k == 1: add_cylinder(&m, 1.0, 1.0, 24, true)
+            if k == 2: add_glow_quad(&m, 0.0)
+            if k == 3: add_glow_quad(&m, -0.5)
+            unit_shapes[k] = gpu.upload_mesh(&m)
+        m.free_all()
+        return true
+
+    fn stage(r: *Renderer)
+        if staged: return
+        staged = true
+        let casting = [0, 4, 0, 4, 0, 4, 6, 0, 6, 6, 4, 0, 4, 0, 4, 0, 0, 0]
+        for k in 0..RoomParts
+            if not made[k]: continue
+            parts[k] = r.add_mesh(&shapes[k])
+            r.casts[parts[k]] = casting[k] as u8
+        for k in 0..4: units[k] = r.add_mesh(&unit_shapes[k])
+        r.casts[units[0]] = 4
+        look.init(r)
+
+    fn unstage()
+        staged = false
+
+    fn lens_on(r: *Renderer, on: bool)
+        if staged: look.lens.show(r, on)
+
+    fn draw(r: *Renderer, camera: *Camera, at: Vec3, t: f32, height: f32, shadow: int, lift: f32, near_only: bool = false, unseen: int = -1)
+        look.lights(r, shadow)
+        look.update(r, camera, at, t, height)
+        let white = Color.hex(0xFFFFFF)
+        let up = Vec3(0.0, 1.0, 0.0)
+        let raise = Mat4.translation(Vec3(0.0, lift, 0.0))
+        if near_only
+            r.draw_with(look.materials[TablePart], parts[TablePart], raise, white)
+            return
+        for k in 0..RoomParts
+            if not made[k] or k == ChairPart or k == ChairFeetPart: continue
+            r.draw_with(k == TablePart and unseen >= 0 ? unseen : look.materials[k], parts[k], raise, white)
+        for c in 0..2
+            let (at, yaw) = chair_place(c)
+            let place = Mat4.trs(at * Metre + Vec3(0.0, lift, 0.0), Quat.axis_angle(up, yaw), Vec3.splat(1.0))
+            r.draw_with(look.materials[ChairPart], parts[ChairPart], place, white)
+            r.draw_with(look.materials[ChairFeetPart], parts[ChairFeetPart], place, white.with_alpha(0.3 + c as f32 * 0.4))
+        for i in 0..build.book_count: r.draw_with(look.book, units[0], raise * build.books[i], build.book_tints[i])
+        for i in 0..build.log_count: r.draw_with(look.log, units[1], raise * build.logs[i], white.with_alpha(0.1 + i as f32 * 0.3))
+        for i in 0..build.flame_count
+            let f = &build.flames[i]
+            let at = f.at + Vec3(0.0, lift, 0.0)
+            let turn = atan2(camera.position.x - at.x, camera.position.z - at.z)
+            r.draw_with(look.flame, units[2], Mat4.trs(at, Quat.axis_angle(up, turn), Vec3(f.size.x, f.size.y, 1.0)), white.with_alpha(f.seed))
+        let glow = 0.85 + 0.15 * look.flicker
+        for i in 0..build.halo_count
+            let h = &build.halos[i]
+            let c = build.halo_tints[i]
+            r.draw_with(look.halo, units[3], Mat4.trs(h.at + Vec3(0.0, lift, 0.0), camera.rotation, Vec3(h.size.x, h.size.y, 1.0)), Color(c.r * glow, c.g * glow, c.b * glow, 1.0))
+
+    fn release(gpu: *Gpu)
+        if building == 1 or building == 2: join(builder)
+        if building == 3
+            for k in 0..uploaded
+                if made[k]: gpu.release_mesh(&shapes[k])
+                made[k] = false
+            uploaded = 0
+        if building != 0
+            building = 0
+            build.free_parts()
+        if not built: return
+        for k in 0..RoomParts
+            if made[k]: gpu.release_mesh(&shapes[k])
+            made[k] = false
+        for k in 0..4: gpu.release_mesh(&unit_shapes[k])
+        free(build.books)
+        free(build.book_tints)
+        built = false
+        staged = false
+
+fn add_glow_quad(m: *Mesh, low: f32)
+    let n = Vec3(0.0, 0.0, 1.0)
+    let a = m.vertex(Vec3(-0.5, low, 0.0), n, Vec2(0.0, 0.0))
+    let b = m.vertex(Vec3(0.5, low, 0.0), n, Vec2(1.0, 0.0))
+    let c = m.vertex(Vec3(0.5, low + 1.0, 0.0), n, Vec2(1.0, 1.0))
+    let d = m.vertex(Vec3(-0.5, low + 1.0, 0.0), n, Vec2(0.0, 1.0))
+    m.quad(a, b, c, d)
+
+fn room_builder(r: *RoomScene)
+    r.build_parts()
+    atomic_store(&r.building, 2)

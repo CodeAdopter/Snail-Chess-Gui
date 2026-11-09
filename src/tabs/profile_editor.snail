@@ -1,0 +1,251 @@
+use engine/desktop/desktop_app
+use engine/desktop/file_dialog
+use engine/ui/ui_edit
+use src/engines/engine_library
+use src/engines/folded_text
+use src/theme/theme
+use src/theme/fonts
+
+const LogSlideRatio: i64 = 256
+const DefaultButtonWidth: f32 = 76.0
+
+struct ProfileEditor
+    profile_id: int
+    loaded_engine: int
+    loaded_profile: int = -1
+    loaded_version: int = -1
+    edits: [..]UiEditText
+    name_edit: UiEditText
+    names: [..]str
+    ids: [..]int
+    choice: int
+    combo: [..]str
+    dialog: FileDialog
+    dialog_engine: int
+    dialog_profile: int
+    dialog_option: [..]u8
+    deleting: bool
+    press_engine: int
+    press_name: [80]u8
+    press_len: int
+
+    fn sync(lib: *EngineLibrary, e: *EngineEntry)
+        if e.id != loaded_engine: profile_id = 0
+        if profile_id != 0 and not e.profile(profile_id): profile_id = 0
+        if e.id == loaded_engine and profile_id == loaded_profile and lib.version == loaded_version: return
+        loaded_engine = e.id
+        loaded_profile = profile_id
+        loaded_version = lib.version
+        let p = e.profile(profile_id)
+        edits.resize(e.options.len)
+        for i in 0..e.options.len
+            edits[i].set(e.value_for(p, i as int))
+        if p: name_edit.set(p.name_text())
+
+    fn bar(app: *DesktopApp, lib: *EngineLibrary, e: *EngineEntry, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = &app.ui
+        sync(lib, e)
+        names.clear()
+        ids.clear()
+        names.push("Default")
+        ids.push(0)
+        for p in e.profiles
+            names.push(p.name_text())
+            ids.push(p.id)
+        choice = 0
+        for i in 0..ids.len
+            if ids[i] == profile_id: choice = i as int
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5), padding: Vec4(18.0, 14.0, 18.0, 14.0)))
+            ui.label("Profile", UiTextStyle(face: fonts.text, size: 13.5, color: theme.ink))
+            if ui.dropdown("profile", ref choice, names[0..names.len], UiNode(width: UiSize.fit(150.0, 260.0))): profile_id = ids[choice]
+            let p = e.profile(profile_id)
+            if p and ui.text_field("profilename", &name_edit, "Name", UiNode(width: UiSize.fixed(200.0))) and name_edit.len > 0
+                p.set_name(name_edit.text())
+                lib.changed()
+            ui.spacer()
+            if ui.button("New profile"): new_profile(lib, e)
+            if p and ui.button("Duplicate"): duplicate(lib, e)
+            if p and ui.button("Delete"): deleting = true
+
+    fn new_profile(lib: *EngineLibrary, e: *EngineEntry)
+        let p = e.add_profile()
+        profile_id = p.id
+        lib.changed()
+
+    fn duplicate(lib: *EngineLibrary, e: *EngineEntry)
+        let from = profile_id
+        let copy = e.add_profile()
+        let source = e.profile(from)
+        if not source: return
+        copy.copy_values(source)
+        var name: [80]u8
+        copy.set_name(format(&name, "{source.name_text()} copy"))
+        profile_id = copy.id
+        lib.changed()
+
+    fn rows(app: *DesktopApp, lib: *EngineLibrary, e: *EngineEntry, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = &app.ui
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let p = e.profile(profile_id)
+        ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.fixed(1.0), box: UiBox(fill: UiFill.solid(theme.line.with_alpha(0.7)))))
+        with ui.open(UiNode(name: "options", width: UiSize.grow(), padding: Vec4(10.0, 10.0, 10.0, 12.0), gap: 2.0))
+            if e.options.len == 0: ui.paragraph("This engine has no configurable options.", note, UiNode(width: UiSize.grow(), padding: Vec4(8.0, 4.0, 8.0, 4.0)))
+            elif not p: ui.paragraph("Default uses the engine's built-in settings and cannot be edited. Create a profile to customise its options.", note, UiNode(width: UiSize.grow(), padding: Vec4(8.0, 4.0, 8.0, 8.0)))
+            for i in 0..e.options.len
+                if p: edit_row(app, lib, e, p, i as int, theme, fonts)
+                else: read_row(ui, fonts, theme, e, i as int)
+
+    fn edit_row(app: *DesktopApp, lib: *EngineLibrary, e: *EngineEntry, p: *EngineProfile, i: int, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = &app.ui
+        let o = e.options[i]
+        let name = e.text(o.name)
+        let default = e.text(o.default)
+        let value = e.value_for(p, i)
+        let given = p.find(name) >= 0
+        let muted = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        with ui.open(UiNode(key: i, name: "edit", flow: FlowRow, width: UiSize.grow(), padding: Vec4(8.0, 4.0, 8.0, 4.0), gap: 12.0, align: Vec2(0.0, 0.5)))
+            ui.label(name, UiTextStyle(face: given ? fonts.strong : fonts.text, size: 12.5, color: given ? theme.accent : theme.ink), UiNode(width: UiSize.fixed(190.0), clip: true))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fit(34.0), gap: 10.0, align: Vec2(0.0, 0.5)))
+                match o.kind
+                    SpinOption: spin(ui, lib, e, p, i, value)
+                    CheckOption
+                        var on = value == "true"
+                        if ui.toggle("", ref on, UiNode(name: "check", width: UiSize.fixed(42.0))): set(lib, p, name, on ? "true" : "false", default)
+                    ComboOption
+                        split_vars(e.text(o.vars), &combo)
+                        var chosen = -1
+                        for k in 0..combo.len
+                            if combo[k] == value: chosen = k as int
+                        if ui.dropdown("combo", ref chosen, combo[0..combo.len], UiNode(width: UiSize.fit(150.0, 280.0))) and chosen >= 0: set(lib, p, name, combo[chosen], default)
+                    StringOption
+                        if ui.text_field("text", &edits[i], default, UiNode(width: UiSize.grow())): set(lib, p, name, edits[i].text(), default)
+                        let kind = path_kind(name)
+                        if kind > 0 and ui.button(kind == 1 ? "Choose file" : "Choose folder") and not dialog.is_open()
+                            dialog_engine = e.id
+                            dialog_profile = p.id
+                            set_text(&dialog_option, name)
+                            if kind == 1: dialog.pick_file(app.window.handle, "Files", "", null)
+                            else: dialog.pick_folder(app.window.handle, null)
+                    ButtonOption
+                        if ui.button("Press")
+                            press_engine = e.id
+                            press_len = min(name.len, 80) as int
+                            for k in 0..press_len
+                                press_name[k] = name[k]
+                        ui.label("Send this command to active analyses using this engine", muted)
+                    else: ui.label(value, muted)
+            if not given: ui.leaf(UiNode(width: UiSize.fixed(DefaultButtonWidth)))
+            elif ui.button("Default", false, UiNode(width: UiSize.fixed(DefaultButtonWidth)))
+                set(lib, p, name, default, default)
+                edits[i].set(default)
+
+    fn spin(ui: *UiCanvas, lib: *EngineLibrary, e: *EngineEntry, p: *EngineProfile, i: int, value: str)
+        let o = e.options[i]
+        let name = e.text(o.name)
+        let default = e.text(o.default)
+        let (n, ok) = uci_number(value)
+        let log = o.least >= 0 and o.most >= LogSlideRatio * max(o.least, 1)
+        var t = slide_of(ok ? n : o.least, o.least, o.most, log)
+        var text: [24]u8
+        with ui.open(UiNode(width: UiSize.grow(), align: Vec2(0.0, 0.5)))
+            if ui.slider_track("slide", ref t, 0.0, 1.0)
+                let s = format(&text, "{slid_to(t, o.least, o.most, log)}")
+                set(lib, p, name, s, default)
+                edits[i].set(s)
+        if ui.text_field("number", &edits[i], default, UiNode(width: UiSize.fixed(110.0)))
+            let (typed, good) = uci_number(edits[i].text())
+            if good: set(lib, p, name, format(&text, "{clamp(typed, o.least, o.most)}"), default)
+
+    fn set(lib: *EngineLibrary, p: *EngineProfile, name: str, value: str, default: str)
+        p.set(name, value, default)
+        lib.changed()
+
+    fn update(app: *DesktopApp, lib: *EngineLibrary)
+        dialog.cancelled()
+        var buf: [1024]u8
+        let path = dialog.take(buf[0..1024])
+        if path.len == 0: return
+        let e = lib.find(dialog_engine)
+        if not e: return
+        let p = e.profile(dialog_profile)
+        let i = e.option_index(str(dialog_option[0..dialog_option.len]))
+        if not p or i < 0: return
+        set(lib, p, e.text(e.options[i].name), path, e.text(e.options[i].default))
+        if loaded_engine == e.id and loaded_profile == p.id and i < edits.len: edits[i].set(path)
+        app.redraw()
+
+    fn pressed_name() -> str
+        return str(press_name[0..press_len])
+
+    fn draw_popups(app: *DesktopApp, lib: *EngineLibrary, e: *EngineEntry, theme: *GuiTheme, fonts: *GuiFonts)
+        if not deleting: return
+        let p = e ? e.profile(profile_id) : null
+        if not p
+            deleting = false
+            return
+        let ui = &app.ui
+        var line: [160]u8
+        with ui.modal("deleteprofile", ref deleting, 400.0)
+            ui.label(format(&line, "Delete the profile {p.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph("Analyses using this profile will switch to Default.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                ui.spacer()
+                if ui.button("Cancel"): deleting = false
+                if ui.button("Delete", true)
+                    e.remove_profile(profile_id)
+                    profile_id = 0
+                    lib.changed()
+                    deleting = false
+
+    fn release()
+        edits.free()
+        names.free()
+        ids.free()
+        combo.free()
+        dialog_option.free()
+
+fn read_row(ui: *UiCanvas, fonts: *GuiFonts, theme: *GuiTheme, e: *EngineEntry, i: int)
+    let o = &e.options[i]
+    let body = UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink)
+    let muted = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    var range: [80]u8
+    var shown = ""
+    if o.kind == SpinOption: shown = format(&range, "{o.least} to {o.most}")
+    elif o.kind == ComboOption: shown = e.text(o.vars)
+    with ui.open(UiNode(key: i, name: "opt", flow: FlowRow, width: UiSize.grow(), padding: Vec4(8.0, 7.0, 8.0, 7.0), gap: 12.0, box: UiBox(fill: UiFill.solid(i % 2 == 0 ? theme.sunken : theme.surface), radius: Vec4.splat(5.0))))
+        ui.label(e.text(o.name), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink), UiNode(width: UiSize.fixed(190.0), clip: true))
+        ui.label(option_kind_word(o.kind), muted, UiNode(width: UiSize.fixed(64.0)))
+        ui.label(e.text(o.default), body, UiNode(width: UiSize.fixed(170.0), clip: true))
+        ui.paragraph(shown, muted)
+
+fn slide_of(v: i64, least: i64, most: i64, log: bool) -> f32
+    if most <= least: return 0.0
+    let x = clamp(v, least, most)
+    if log: return (log_one_plus((x - least) as f64) / log_one_plus((most - least) as f64)) as f32
+    return ((x - least) as f64 / (most - least) as f64) as f32
+
+fn slid_to(t: f32, least: i64, most: i64, log: bool) -> i64
+    if most <= least: return least
+    let span = (most - least) as f64
+    let off = log ? exp(t as f64 * log_one_plus(span)) - 1.0 : t as f64 * span
+    return clamp(least + round(off) as i64, least, most)
+
+fn log_one_plus(x: f64) -> f64
+    return log(1.0 + x)
+
+fn split_vars(vars: str, into: *[..]str)
+    into.clear()
+    var from = 0
+    var k = 0
+    while k + 5 <= vars.len
+        if vars[k..k + 5] == " var "
+            into.push(vars[from..k])
+            k += 5
+            from = k
+        else: k += 1
+    if from < vars.len: into.push(vars[from..vars.len])
+
+fn path_kind(name: str) -> int
+    if has_folded(name, "file"): return 1
+    if has_folded(name, "path") or has_folded(name, "dir") or has_folded(name, "folder"): return 2
+    return 0

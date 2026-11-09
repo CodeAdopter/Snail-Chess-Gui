@@ -1,0 +1,59 @@
+use src/play/play_game
+
+const EndWords = ["playing", "checkmate", "stalemate", "repetition", "fifty-moves", "dead-position", "time", "time-no-mate", "resignation", "agreement", "engine-failure", "illegal-move", "abandoned", "adjudicated-win", "adjudicated-draw", "illegal-no-mate"]
+
+enum JournalLast: u8
+    JournalNothing
+    JournalBegun
+    JournalPaused
+    JournalResumed
+    JournalStopped
+    JournalFinished
+
+struct GameRecord
+    done: bool
+    result: GameResult
+    end: PlayEnd
+    order: int = -1
+
+fn journal_add(path: str, line: str) -> bool
+    return add_line(path, line)
+
+fn read_journal(text: str, records: *[..]GameRecord) -> JournalLast
+    var last = JournalNothing
+    var games = 0
+    var from = 0
+    for i in 0..text.len + 1
+        if i < text.len and text[i] != '\n': continue
+        let line = text[from..i]
+        from = i as int + 1
+        if i == text.len: break
+        var w = UciWords(text: line)
+        let first = w.next()
+        if first == "begun": last = JournalBegun
+        elif first == "paused": last = JournalPaused
+        elif first == "resumed": last = JournalResumed
+        elif first == "stopped": last = JournalStopped
+        elif first == "finished": last = JournalFinished
+        elif first == "game"
+            let (n, n_ok) = uci_number(w.next())
+            let (result, result_ok) = result_of_text(w.next())
+            let end = end_named(w.next())
+            if n_ok and result_ok and end != NotEnded and n >= 0 and n < records.len as i64
+                records[n] = GameRecord(true, result, end, games)
+            games += 1
+    return last
+
+fn journal_begun(text: str) -> i64
+    var w = UciWords(text: text)
+    if w.next() != "begun": return 0
+    let (n, ok) = uci_number(w.next())
+    return ok ? n : 0
+
+fn end_word(why: PlayEnd) -> str
+    return EndWords[why as int]
+
+fn end_named(w: str) -> PlayEnd
+    for i in 1..EndWords.len
+        if EndWords[i] == w: return i as PlayEnd
+    return NotEnded

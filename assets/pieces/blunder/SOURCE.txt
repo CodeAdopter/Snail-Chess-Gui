@@ -1,0 +1,4 @@
+Blunder pieces, Snail Chess GUI's own, drawn by tools/piece_sets/blunder.py, the animated SVGs. tools/pieces.py
+reads their CSS animations as motions and stands them in the square as it stands every set. A file named for a
+mood, as wP-promoting, wK-checked or wK-mated, is that piece in the mood, standing where the calm piece stands.
+Dedicated to the public domain under CC0 1.0 Universal, https://creativecommons.org/publicdomain/zero/1.0/

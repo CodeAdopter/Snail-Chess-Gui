@@ -1,0 +1,142 @@
+use engine/desktop/crash_report
+use src/tabs/board_editor
+use src/tabs/play_setup
+use src/tabs/event_tab
+use src/tabs/new_tournament
+use src/tabs/fast_tab
+use src/uci/game_review
+use src/views/database_panel
+use src/database/contribute_run
+
+enum TabKind: u8
+    NewTab
+    Analysis
+    Play
+    Tournaments
+    Event
+    NewTournament
+    Engines
+    Books
+    Profile
+    Settings
+    Database
+    Lichess
+    FastChess
+    Contribute
+
+struct GuiTab
+    id: int
+    kind: TabKind
+    title: [48]u8
+    title_len: int
+    live: bool
+    flipped: bool
+    game: *Game
+    board: BoardView
+    moves: MovesPanel
+    analysis: *EngineAnalysis
+    review: *GameReview
+    panel: AnalysisPanel
+    database: DatabasePanel
+    editing: bool
+    editor: BoardEditor
+    play: *PlayGame
+    setup: PlaySetupPanel
+    resigning: bool
+    event: *EventRunner
+    event_view: EventView
+    draft: *TournamentDraft
+    fast: *FastRun
+    fast_view: FastView
+    run: *ContributeRun
+
+    fn title_text() -> str
+        return str(title[0..title_len])
+
+    fn set_title(s: str)
+        title_len = min(s.len, 48) as int
+        for i in 0..title_len
+            title[i] = s[i]
+
+fn is_singleton(kind: TabKind) -> bool
+    return kind == Tournaments or kind == Engines or kind == Books or kind == Profile or kind == Settings or kind == Database or kind == Lichess
+
+fn kind_title(kind: TabKind) -> str
+    match kind
+        NewTab: return "New tab"
+        Analysis: return "Analysis"
+        Play: return "Play"
+        Tournaments: return "Tournaments"
+        Event: return "Event"
+        NewTournament: return "New tournament"
+        Engines: return "Engines"
+        Books: return "Books"
+        Profile: return "Profile"
+        Settings: return "Settings"
+        Database: return "Database"
+        Lichess: return "Lichess"
+        FastChess: return "FastChess"
+        Contribute: return "Contribute"
+    return "Tab"
+
+struct TabSet
+    tabs: [..]GuiTab
+    active: int
+    next_id: int = 1
+
+    fn open(kind: TabKind) -> int
+        if is_singleton(kind)
+            for i in 0..tabs.len
+                if tabs[i].kind == kind
+                    active = i as int
+                    return active
+        var t: GuiTab
+        t.id = next_id
+        next_id += 1
+        t.kind = kind
+        t.set_title(kind_title(kind))
+        crash_note("open tab", kind_title(kind))
+        let at = tabs.len == 0 ? 0 : active + 1
+        tabs.push(t)
+        var i = tabs.len as int - 1
+        while i > at
+            tabs[i] = tabs[i - 1]
+            i -= 1
+        tabs[at] = t
+        active = at
+        return at
+
+    fn close(i: int)
+        if i < 0 or i >= tabs.len: return
+        tabs.remove(i)
+        if tabs.len == 0
+            open(NewTab)
+            return
+        if active > i or active >= tabs.len: active -= 1
+        active = clamp(active, 0, tabs.len as int - 1)
+
+    fn move(from: int, to: int)
+        if from == to or from < 0 or to < 0 or from >= tabs.len or to >= tabs.len: return
+        let t = tabs[from]
+        let chosen = tabs[active].id
+        tabs.remove(from)
+        tabs.push(t)
+        var i = tabs.len as int - 1
+        while i > to
+            tabs[i] = tabs[i - 1]
+            i -= 1
+        tabs[to] = t
+        for k in 0..tabs.len
+            if tabs[k].id == chosen: active = k as int
+
+    fn current() -> *GuiTab
+        return &tabs[active]
+
+    fn by_id(id: int) -> *GuiTab
+        for i in 0..tabs.len
+            if tabs[i].id == id: return &tabs[i]
+        return current()
+
+    fn step(by: int)
+        let n = tabs.len as int
+        active = ((active + by) % n + n) % n

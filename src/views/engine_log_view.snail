@@ -1,0 +1,81 @@
+use engine/desktop/desktop_app
+use src/uci/engine_log
+use src/views/rail
+
+const LogRowHeight: f32 = 18.0
+
+struct EngineLogView
+    shown: bool
+    tab_id: int
+    search_lines: bool
+    index: [..]i64
+    made_for: i64 = -1
+    made_search: bool
+    list_id: u32
+    last_span: f32
+    fresh: bool
+
+    fn open_for(tab: int)
+        shown = true
+        tab_id = tab
+        fresh = true
+
+    fn draw(app: *DesktopApp, log: *EngineLog, title: str, theme: *GuiTheme, fonts: *GuiFonts) -> bool
+        if not shown: return false
+        let ui = &app.ui
+        var copy = false
+        refresh(log)
+        let w = clamp(ui.width - 80.0, 360.0, 980.0)
+        let h = clamp(ui.height - 260.0, 160.0, 620.0)
+        var line: [200]u8
+        var sheet = sheet_popup(ui, theme, fonts, "enginelog", ref shown, w, h, 0.0)
+        with sheet.header("Engine log", title)
+            ui.checkbox("Search lines", ref search_lines)
+            if ui.button("Copy"): copy = true
+            if ui.button("Clear")
+                log.clear()
+                refresh(log)
+        with sheet.body(Vec4(16.0, 12.0, 16.0, 12.0), 8.0)
+            follow(ui)
+            with v = ui.virtual_list("logrows", index.len as int, LogRowHeight, UiNode(width: UiSize.grow(), height: UiSize.grow(), padding: Vec4.splat(8.0)))
+                list_id = v.id
+                for r in v.first..v.last
+                    row(ui, log, index[r], theme, fonts)
+            ui.label(format(&line, "{log.count} lines · Limit: {LogLines} lines or {LogBytes / 1024} KB"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+        sheet.end()
+        if sheet.closed: shown = false
+        return copy
+
+    fn refresh(log: *EngineLog)
+        if log.added == made_for and search_lines == made_search: return
+        made_for = log.added
+        made_search = search_lines
+        index.clear()
+        for seq in log.oldest()..log.added
+            let l = log.line(seq)
+            if search_lines or l.side != LogRead or not is_search_line(log.text(l)): index.push(seq)
+
+    fn follow(ui: *UiCanvas)
+        if list_id == 0: return
+        let m = ui.memory(list_id)
+        let content = index.len as f32 * LogRowHeight
+        let span = max(content - m.view.y, 0.0)
+        if fresh or m.target.y >= last_span - 2.0
+            m.content.y = content
+            m.target.y = span
+            m.scroll.y = span
+        last_span = span
+        fresh = false
+
+    fn release()
+        index.free()
+
+fn row(ui: *UiCanvas, log: *EngineLog, seq: i64, theme: *GuiTheme, fonts: *GuiFonts)
+    let l = log.line(seq)
+    let color = l.side == LogSent ? theme.accent : l.side == LogNote ? theme.muted : theme.ink
+    let mark = l.side == LogSent ? ">" : l.side == LogRead ? "<" : "*"
+    var stamp: [24]u8
+    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(LogRowHeight), gap: 10.0, align: Vec2(0.0, 0.5), clip: true))
+        ui.label(format(&stamp, "{log.seconds(l):.3}"), UiTextStyle(face: fonts.mono, size: 11.5, color: theme.muted), UiNode(width: UiSize.fixed(70.0)))
+        ui.label(mark, UiTextStyle(face: fonts.mono, size: 11.5, color: color), UiNode(width: UiSize.fixed(8.0)))
+        ui.label(log.text(l), UiTextStyle(face: fonts.mono, size: 11.5, color: color))

@@ -1,0 +1,235 @@
+use engine/desktop/zip_archive
+use src/engines/releases
+
+const BooksUrl = "https://raw.githubusercontent.com/CodeAdopter/Chess-Engines/main/books.json"
+const BooksHome = "https://raw.githubusercontent.com/CodeAdopter/Chess-Engines/main/"
+const BooksMostBytes: i64 = 8388608
+const BooksMost = 5000
+const BookArchiveMost: i64 = 1073741824
+const BookContentMost: i64 = 536870912
+
+struct RegistryBook
+    id: PoolSpan
+    name: PoolSpan
+    description: PoolSpan
+    collection: PoolSpan
+    category: PoolSpan
+    variant: PoolSpan
+    file_name: PoolSpan
+    url: PoolSpan
+    archive_sha: PoolSpan
+    content_sha: PoolSpan
+    author: PoolSpan
+    license: PoolSpan
+    license_url: PoolSpan
+    source: PoolSpan
+    source_url: PoolSpan
+    notes: PoolSpan
+    archive_size: i64
+    content_size: i64
+    positions: int
+    min_ply: int
+    max_ply: int
+    pgn: bool
+    standard: bool
+    licensed: bool
+
+struct BookCatalog
+    books: [..]RegistryBook
+    pool: [..]u8
+    updated: PoolSpan
+
+    fn text(s: PoolSpan) -> str
+        return str(pool[s.at..s.at + s.len])
+
+    fn keep(s: str) -> PoolSpan
+        let at = pool.len as int
+        let n = min(s.len, CatalogTextMost) as int
+        for k in 0..n
+            pool.push(s[k])
+        return PoolSpan(at, n)
+
+    fn read(json_text: str) -> bool
+        clear()
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(json_text)
+        let list = doc.get(root, "books")
+        if not doc.is(list, JsonArray): return false
+        updated = keep(catalog_text(&doc, root, "updated_at"))
+        var v = doc.first(list)
+        while v >= 0 and books.len < BooksMost
+            if doc.is(v, JsonObject): read_book(&doc, v)
+            v = doc.next(v)
+        if books.len == 0
+            clear()
+            return false
+        return true
+
+    fn read_book(doc: *JsonDoc, v: int)
+        let id = catalog_text(doc, v, "id")
+        let name = catalog_text(doc, v, "name")
+        let format = catalog_text(doc, v, "format")
+        let file_name = catalog_text(doc, v, "file_name")
+        let url = web_address(catalog_text(doc, v, "url"))
+        let archive = doc.get(v, "archive")
+        let content = doc.get(v, "content")
+        let archive_sha = catalog_text(doc, archive, "sha256")
+        let content_sha = catalog_text(doc, content, "sha256")
+        if id.len == 0 or name.len == 0 or format != "epd" and format != "pgn": return
+        if not book_file_name(file_name, format) or not starts(url, BooksHome) or not sha_text(archive_sha) or not sha_text(content_sha): return
+        var b: RegistryBook
+        b.archive_size = doc.num_at(archive, "size", 0.0) as i64
+        b.content_size = doc.num_at(content, "size", 0.0) as i64
+        if b.archive_size <= 0 or b.archive_size > BookArchiveMost or b.content_size <= 0 or b.content_size > BookContentMost: return
+        b.id = keep(id)
+        b.name = keep(name)
+        b.description = keep(catalog_text(doc, v, "description"))
+        b.collection = keep(catalog_text(doc, v, "collection"))
+        b.category = keep(catalog_text(doc, v, "category"))
+        let variant = catalog_text(doc, v, "variant")
+        b.variant = keep(variant)
+        b.standard = variant == "standard"
+        b.pgn = format == "pgn"
+        b.file_name = keep(file_name)
+        b.url = keep(url)
+        b.archive_sha = keep(archive_sha)
+        b.content_sha = keep(content_sha)
+        b.author = keep(catalog_text(doc, v, "author"))
+        let license = doc.get(v, "license")
+        b.license = keep(catalog_text(doc, license, "name"))
+        b.license_url = keep(web_address(catalog_text(doc, license, "url")))
+        b.licensed = catalog_text(doc, license, "spdx_id").len > 0
+        let source = doc.get(v, "source")
+        b.source = keep(catalog_text(doc, source, "name"))
+        b.source_url = keep(web_address(catalog_text(doc, source, "url")))
+        b.notes = keep(catalog_text(doc, v, "notes"))
+        let positions = doc.get(v, "positions")
+        b.positions = doc.num_at(positions, "total", 0.0) as int
+        b.min_ply = doc.num_at(positions, "min_ply", -1.0) as int
+        b.max_ply = doc.num_at(positions, "max_ply", -1.0) as int
+        books.push(b)
+
+    fn clear()
+        books.clear()
+        pool.clear()
+        updated = PoolSpan(0, 0)
+
+    fn release()
+        books.free()
+        pool.free()
+
+struct BookRegistry
+    catalog: BookCatalog
+    incoming: BookCatalog
+    version: int
+    fetch: HttpGet
+    fetching: bool
+    fetched_ns: i64
+    loaded: bool
+    source: [..]u8
+    failure: [240]u8
+    failure_len: int
+    data: *DataFolder
+    ranks: [..]u8
+
+    fn load(folder: *DataFolder)
+        data = folder
+        if loaded: return
+        loaded = true
+        var buf: [600]u8
+        let path = data.path("registry\\books.json", &buf)
+        let bytes = read_file(path.ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len > 0 and catalog.read(str(bytes))
+            fetched_ns = modified_time(path.ptr as cstr)
+            version += 1
+
+    fn due() -> bool
+        return catalog.books.len == 0 or wall_ns() - fetched_ns > CatalogDayNs
+
+    fn refresh()
+        if fetching: return
+        if source.len == 0: hold_text(&source, BooksUrl)
+        failure_len = 0
+        fetch.most = BooksMostBytes
+        fetching = fetch.start(str(source[0..source.len]), RegistryAgent, "Accept: application/json\n")
+
+    fn update() -> bool
+        if not fetching or not fetch.finished(): return false
+        fetching = false
+        if not fetch.done()
+            fail(fetch.error_text())
+            return true
+        let body = fetch.body_text()
+        if not incoming.read(body)
+            fail("The server returned an invalid book catalog.")
+            return true
+        let kept = catalog
+        catalog = incoming
+        incoming = kept
+        incoming.clear()
+        version += 1
+        fetched_ns = wall_ns()
+        var buf: [600]u8
+        data.make_folder("registry")
+        if not save_whole(data.path("registry\\books.json", &buf), body as []u8): fail("The catalog was downloaded but could not be saved.")
+        return true
+
+    fn fail(why: str)
+        failure_len = min(why.len, 240) as int
+        for k in 0..failure_len
+            failure[k] = why[k]
+
+    fn failure_text() -> str
+        return str(failure[0..failure_len])
+
+    fn search(query: str, into: *[..]int)
+        into.clear()
+        var words = UciWords(text: query)
+        let first = words.next()
+        ranks.resize(catalog.books.len)
+        for i in 0..catalog.books.len
+            let b = &catalog.books[i]
+            ranks[i] = all_words(b, query) ? rank(b, first) as u8 : 5
+        for r in 0..5
+            for i in 0..ranks.len
+                if ranks[i] == r: into.push(i as int)
+
+    fn all_words(b: *RegistryBook, query: str) -> bool
+        var words = UciWords(text: query)
+        loop
+            let w = words.next()
+            if w.len == 0: return true
+            if rank(b, w) == 5: return false
+
+    fn rank(b: *RegistryBook, word: str) -> int
+        if word.len == 0: return 0
+        let c = &catalog
+        let at = find_folded(c.text(b.name), word)
+        if at == 0: return 0
+        if at > 0: return 1
+        if has_folded(c.text(b.id), word) or has_folded(c.text(b.file_name), word): return 2
+        if has_folded(c.text(b.collection), word) or has_folded(c.text(b.category), word) or has_folded(c.text(b.variant), word): return 3
+        if has_folded(c.text(b.description), word): return 4
+        return 5
+
+    fn release()
+        fetch.release()
+        catalog.release()
+        incoming.release()
+        source.free()
+        ranks.free()
+
+fn book_file_name(name: str, format: str) -> bool
+    if name.len < 5 or name.len > 120 or find_folded(name, "\\") >= 0 or find_folded(name, "/") >= 0: return false
+    var safe: [..]u8
+    defer safe.free()
+    if not zip_safe_path(name, &safe) or safe.len != name.len: return false
+    return name[name.len - 4] == '.' and same_folded(name[name.len - 3..name.len], format)
+
+fn sha_text(s: str) -> bool
+    if s.len != 64: return false
+    for k in 0..s.len
+        if not (s[k] >= '0' and s[k] <= '9' or s[k] >= 'a' and s[k] <= 'f'): return false
+    return true

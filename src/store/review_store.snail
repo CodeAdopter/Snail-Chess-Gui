@@ -1,0 +1,122 @@
+use src/store/data_folder
+use src/game/game
+
+fn line_key(game: *Game) -> u64
+    var k: u64 = 0xCBF29CE484222325
+    k = (k ^ game.nodes[0].board.key) * 0x100000001B3
+    var i = game.nodes[0].first
+    while i != NoNode
+        k = (k ^ game.nodes[i].move as u64) * 0x100000001B3
+        i = game.nodes[i].first
+    return k
+
+fn line_key_of(first: u64, moves: []Move) -> u64
+    var k: u64 = 0xCBF29CE484222325
+    k = (k ^ first) * 0x100000001B3
+    for m in moves
+        k = (k ^ m as u64) * 0x100000001B3
+    return k
+
+fn review_path(data: *DataFolder, game: *Game, buf: *[600]u8) -> str
+    return review_path_of(data, line_key(game), buf)
+
+fn review_path_of(data: *DataFolder, k: u64, buf: *[600]u8) -> str
+    var name: [40]u8
+    let digits = "0123456789abcdef"
+    var hex: [16]u8
+    for d in 0..16
+        hex[d] = digits[((k >> ((15 - d) * 4) as u64) & 15) as int]
+    return data.path(format(&name, "reviews\\{str(hex[0..16])}.txt"), buf)
+
+fn save_review(data: *DataFolder, game: *Game, engine: str, done: bool) -> bool
+    if not data.make_folder("reviews"): return false
+    var text: [..]u8
+    defer text.free()
+    var line: [200]u8
+    push_text(&text, format(&line, "engine {engine}\ndone {done ? 1 : 0}\n"))
+    var ply = 0
+    var i = 0
+    while i != NoNode
+        let n = &game.nodes[i]
+        if n.eval_depth > 0 or n.second_depth > 0: push_text(&text, format(&line, "{ply} {n.eval_cp} {n.eval_mate} {n.eval_depth} {n.eval_best as int} {n.second_cp} {n.second_mate} {n.second_depth} {n.second_best as int}\n"))
+        i = n.first
+        ply += 1
+    var path: [600]u8
+    return save_whole(review_path(data, game, &path), text[0..text.len])
+
+fn review_scores(data: *DataFolder, k: u64, scores: []i16, cap: int, none: i16) -> bool
+    var path: [600]u8
+    let bytes = read_file(review_path_of(data, k, &path).ptr as cstr)
+    defer free_file(bytes)
+    let text = str(bytes)
+    var any = false
+    var from = 0
+    for at in 0..text.len + 1
+        if at < text.len and text[at] != '\n': continue
+        var line = text[from..at]
+        from = at as int + 1
+        if line.len == 0 or line[0] < '0' or line[0] > '9': continue
+        var w = UciWords(text: line)
+        var v: [4]int
+        var ok = true
+        for j in 0..4
+            let (n, read) = uci_number(w.next())
+            v[j] = n as int
+            ok = ok and read
+        if not ok or v[0] < 1 or v[0] > scores.len as int or v[3] <= 0: continue
+        let score = v[2] != 0 ? (v[2] > 0 ? cap : -cap) : clamp(v[1], -cap, cap)
+        scores[v[0] - 1] = score as i16
+        any = true
+    if not any
+        for i in 0..scores.len
+            scores[i] = none
+    return any
+
+fn load_review(data: *DataFolder, game: *Game, name: *[96]u8) -> (str, bool)
+    var path: [600]u8
+    let bytes = read_file(review_path(data, game, &path).ptr as cstr)
+    defer free_file(bytes)
+    let text = str(bytes)
+    if text.len == 0: return "", false
+    var line_nodes: [..]int
+    defer line_nodes.free()
+    var i = 0
+    while i != NoNode
+        line_nodes.push(i)
+        i = game.nodes[i].first
+    var engine = ""
+    var done = false
+    var from = 0
+    for at in 0..text.len + 1
+        if at < text.len and text[at] != '\n': continue
+        var line = text[from..at]
+        from = at as int + 1
+        if line.len > 0 and line[line.len - 1] == '\r': line = line[0..line.len - 1]
+        if line.len > 7 and line[0..7] == "engine "
+            engine = line[7..line.len]
+            continue
+        if line.len > 5 and line[0..5] == "done "
+            done = line[5] == '1'
+            continue
+        var w = UciWords(text: line)
+        var v: [9]int
+        var ok = true
+        for k in 0..9
+            let (n, read) = uci_number(w.next())
+            v[k] = n as int
+            ok = ok and read
+        if not ok or v[0] < 0 or v[0] >= line_nodes.len as int: continue
+        let n = &game.nodes[line_nodes[v[0]]]
+        n.eval_cp = v[1] as i32
+        n.eval_mate = v[2] as i32
+        n.eval_depth = v[3] as i32
+        n.eval_best = v[4] as Move
+        n.second_cp = v[5] as i32
+        n.second_mate = v[6] as i32
+        n.second_depth = v[7] as i32
+        n.second_best = v[8] as Move
+    game.version += 1
+    let len = min(engine.len, 96)
+    for k in 0..len
+        name[k] = engine[k]
+    return str(name[0..len]), done

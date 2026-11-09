@@ -1,0 +1,238 @@
+use src/board3d/room_shapes
+
+const MarsGround: f32 = -0.62
+
+const MarsGroundPart = 0
+const MarsSlabPart = 1
+const MarsRidgePart = 2
+const MarsSkyPart = 3
+const MarsMetalPart = 4
+const MarsFoilPart = 5
+const MarsPanelPart = 6
+const MarsDomePart = 7
+const MarsDevilPart = 8
+const MarsGlowPart = 9
+const MarsParts = 10
+
+const MarsRocks = 900
+
+fn mars_sun_way() -> Vec3
+    return Vec3(-0.85, 0.2, -0.5).normalized
+
+fn mars_rover_at() -> Vec3
+    return Vec3(6.2, 0.0, -5.4)
+
+fn mars_mast_light() -> Vec3
+    return Vec3(5.35, MarsGround + 2.05, -4.7)
+
+fn mars_habitat_at() -> Vec3
+    return Vec3(48.0, 0.0, -135.0)
+
+fn mars_height(x: f32, z: f32) -> f32
+    let r = sqrt(x * x + z * z)
+    let a = smoothstep(5.0, 40.0, r) * 1.8 + smoothstep(1.5, 6.0, r) * 0.08
+    let h = 0.6 * sin(0.08 * x + 0.6 * sin(0.05 * z)) + 0.4 * sin(0.13 * z + 0.03 * x + 1.7) + 0.2 * sin(0.31 * (x + z) + 0.4)
+    return MarsGround + a * h
+
+struct MarsBuild
+    parts: [MarsParts]Mesh
+    part: Mesh
+    rocks: *Mat4
+    rock_tints: *Color
+    rock_count: int
+    rng: Mulberry32
+
+    fn init()
+        for k in 0..MarsParts: parts[k].init(4096, 16384)
+        part.init(4096, 16384)
+        rocks = alloc[Mat4](MarsRocks)
+        rock_tints = alloc[Color](MarsRocks)
+        rng = Mulberry32(0x3A125)
+
+    fn free_parts()
+        for k in 0..MarsParts: parts[k].free_all()
+        part.free_all()
+
+    fn free_all()
+        free_parts()
+        free(rocks)
+        free(rock_tints)
+
+    fn random(lo: f32, hi: f32) -> f32
+        return lo + (hi - lo) * rng.next() as f32
+
+    fn build()
+        ground()
+        ridge()
+        sky()
+        slab()
+        cases()
+        rover()
+        habitat()
+        devil()
+        scatter()
+
+    fn scale_all()
+        let s = Mat4.trs(Vec3(0.0, 0.0, 0.0), Quat.identity(), Vec3.splat(Metre))
+        for k in 0..MarsParts: parts[k].transform(s)
+
+    fn box(k: int, low: Vec3, high: Vec3, tint: Color, turn: Mat4 = Mat4.identity())
+        part.clear()
+        part.set_color(tint)
+        add_box(&part, high - low)
+        parts[k].append(&part, turn * Mat4.translation((low + high) * 0.5))
+
+    fn soft(k: int, at: Vec3, half: Vec3, round: f32, tint: Color, turn: Mat4 = Mat4.identity())
+        part.clear()
+        part.set_color(tint)
+        add_rounded_box(&part, half, round, 3)
+        parts[k].append(&part, turn * Mat4.translation(at))
+
+    fn tube(k: int, from: Vec3, to: Vec3, radius: f32, tint: Color, turn: Mat4 = Mat4.identity())
+        part.clear()
+        part.set_color(tint)
+        add_capsule(&part, radius, (to - from).length, 10, 4)
+        parts[k].append(&part, turn * Mat4.trs((from + to) * 0.5, Quat.between(Vec3(0.0, 1.0, 0.0), (to - from).normalized), Vec3.splat(1.0)))
+
+    fn wheel(k: int, at: Vec3, radius: f32, wide: f32, tint: Color, turn: Mat4)
+        part.clear()
+        part.set_color(tint)
+        add_cylinder(&part, radius, wide, 20, true)
+        parts[k].append(&part, turn * Mat4.trs(at, Quat.axis_angle(Vec3(1.0, 0.0, 0.0), Pi * 0.5), Vec3.splat(1.0)))
+
+    fn ground()
+        part.clear()
+        part.set_color(Color(1.0, 1.0, 1.0, 1.0))
+        let n = 144
+        let size: f32 = 360.0
+        for j in 0..n + 1
+            for i in 0..n + 1
+                let x = (i as f32 / n as f32 - 0.5) * size
+                let z = (j as f32 / n as f32 - 0.5) * size
+                let e: f32 = 0.5
+                let dx = mars_height(x + e, z) - mars_height(x - e, z)
+                let dz = mars_height(x, z + e) - mars_height(x, z - e)
+                let made = part.vertex(Vec3(x, mars_height(x, z), z), Vec3(-dx, 2.0 * e, -dz).normalized, Vec2(x, z))
+        for j in 0..n
+            for i in 0..n
+                let a = (j * (n + 1) + i) as u32
+                let w = (n + 1) as u32
+                part.quad(a + w, a + w + 1, a + 1, a)
+        parts[MarsGroundPart].append(&part, Mat4.identity())
+
+    fn ridge()
+        part.clear()
+        part.set_color(Color(1.0, 1.0, 1.0, 1.0))
+        let segs = 220
+        let rings = 6
+        for j in 0..rings + 1
+            let t = j as f32 / rings as f32
+            for i in 0..segs + 1
+                let a = i as f32 / segs as f32 * Tau
+                let peak = 28.0 + 22.0 * sin(a * 3.0 + 0.7) + 14.0 * sin(a * 7.0 + 2.1) + 7.0 * sin(a * 17.0 + 0.3) + 4.0 * sin(a * 41.0)
+                let r = 520.0 + t * 380.0
+                let lift = peak * sin(t * Pi) * (0.6 + 0.4 * t) + MarsGround - 4.0 + t * 30.0
+                let at = Vec3(sin(a) * r, lift, cos(a) * r)
+                let made = part.vertex(at, Vec3(-sin(a), 0.6, -cos(a)).normalized, Vec2(a, t))
+        for j in 0..rings
+            for i in 0..segs
+                let a = (j * (segs + 1) + i) as u32
+                let w = (segs + 1) as u32
+                part.quad(a, a + 1, a + w + 1, a + w)
+        parts[MarsRidgePart].append(&part, Mat4.identity())
+
+    fn sky()
+        part.clear()
+        part.set_color(Color(1.0, 1.0, 1.0, 1.0))
+        add_sphere(&part, 2200.0, 48, 24)
+        parts[MarsSkyPart].append(&part, Mat4.identity())
+
+    fn slab()
+        let top = -BoardDepth / Metre
+        let k = MarsSlabPart
+        let stone = Color(1.0, 1.0, 1.0, 1.0)
+        let tall = top - MarsGround
+        soft(k, Vec3(0.0, top - tall * 0.5 - 0.03, 0.0), Vec3(0.56, tall * 0.5 + 0.03, 0.44), 0.06, stone)
+        let lumps = [Vec3(-0.5, 0.0, 0.25), Vec3(0.48, 0.0, -0.3), Vec3(0.1, 0.0, 0.42), Vec3(-0.25, 0.0, -0.43), Vec3(0.55, 0.0, 0.2)]
+        for i in 0..5
+            let l = lumps[i]
+            part.clear()
+            part.set_color(stone)
+            add_sphere(&part, 1.0, 14, 8)
+            parts[k].append(&part, Mat4.trs(Vec3(l.x, MarsGround + tall * 0.42, l.z), Quat.axis_angle(Vec3(0.0, 1.0, 0.0), i as f32), Vec3(0.24, tall * 0.48, 0.2)))
+
+    fn cases()
+        let silver = Color.hex(0xC8CCD2).with_alpha(0.9)
+        let rim = Color.hex(0x3A3C40).with_alpha(0.3)
+        for i in 0..2
+            let side: f32 = i == 0 ? 1.0 : -1.0
+            let z = side * 0.95
+            let turn = Mat4.rotation(Quat.axis_angle(Vec3(0.0, 1.0, 0.0), side * 0.06))
+            let y0 = mars_height(0.0, z)
+            box(MarsMetalPart, Vec3(-0.27, y0, z - 0.17), Vec3(0.27, y0 + 0.4, z + 0.17), silver, turn)
+            box(MarsMetalPart, Vec3(-0.28, y0 + 0.22, z - 0.18), Vec3(0.28, y0 + 0.24, z + 0.18), rim, turn)
+            for c in 0..4
+                let cx: f32 = c % 2 == 0 ? -0.27 : 0.27
+                let cz: f32 = c < 2 ? -0.17 : 0.17
+                box(MarsMetalPart, Vec3(cx - 0.025, y0 + 0.37, z + cz - 0.025), Vec3(cx + 0.025, y0 + 0.415, z + cz + 0.025), rim, turn)
+            box(MarsMetalPart, Vec3(-0.12, y0 + 0.19, z + side * 0.175), Vec3(-0.07, y0 + 0.26, z + side * 0.185), rim, turn)
+            box(MarsMetalPart, Vec3(0.07, y0 + 0.19, z + side * 0.175), Vec3(0.12, y0 + 0.26, z + side * 0.185), rim, turn)
+
+    fn rover()
+        let at = mars_rover_at()
+        let g = mars_height(at.x, at.z)
+        let turn = Mat4.trs(Vec3(at.x, g, at.z), Quat.axis_angle(Vec3(0.0, 1.0, 0.0), 0.75), Vec3.splat(1.0))
+        let white = Color.hex(0xE6E2DA).with_alpha(0.1)
+        let dark = Color.hex(0x2A2C30).with_alpha(0.6)
+        let alu = Color.hex(0xB8BCC0).with_alpha(0.85)
+        box(MarsMetalPart, Vec3(-0.95, 0.75, -0.6), Vec3(0.95, 1.2, 0.6), white, turn)
+        box(MarsFoilPart, Vec3(-0.9, 0.62, -0.55), Vec3(0.9, 0.76, 0.55), Color(1.0, 1.0, 1.0, 1.0), turn)
+        box(MarsPanelPart, Vec3(-1.15, 1.2, -0.85), Vec3(1.0, 1.24, 0.85), Color(1.0, 1.0, 1.0, 1.0), turn)
+        box(MarsMetalPart, Vec3(0.95, 0.85, -0.3), Vec3(1.15, 1.1, 0.3), white, turn)
+        tube(MarsMetalPart, Vec3(0.75, 1.24, 0.35), Vec3(0.75, 2.05, 0.35), 0.04, alu, turn)
+        box(MarsMetalPart, Vec3(0.62, 2.05, 0.2), Vec3(0.9, 2.22, 0.52), white, turn)
+        box(MarsMetalPart, Vec3(0.9, 2.08, 0.25), Vec3(0.93, 2.18, 0.47), dark, turn)
+        box(MarsGlowPart, Vec3(0.905, 1.95, 0.3), Vec3(0.935, 2.02, 0.42), Color(0.85, 0.92, 1.0, 1.0), turn)
+        tube(MarsMetalPart, Vec3(-0.6, 1.24, -0.5), Vec3(-0.75, 1.9, -0.6), 0.015, alu, turn)
+        for i in 0..6
+            let wx: f32 = -0.85 + (i % 3) as f32 * 0.85
+            let wz: f32 = i < 3 ? -0.78 : 0.78
+            wheel(MarsMetalPart, Vec3(wx, 0.26, wz), 0.26, 0.22, alu, turn)
+            wheel(MarsMetalPart, Vec3(wx, 0.26, wz), 0.1, 0.24, dark, turn)
+            tube(MarsMetalPart, Vec3(wx, 0.26, wz * 0.82), Vec3(wx * 0.6, 0.72, wz * 0.62), 0.03, alu, turn)
+
+    fn habitat()
+        let at = mars_habitat_at()
+        let g = mars_height(at.x, at.z) - 0.5
+        let white = Color(1.0, 1.0, 1.0, 1.0)
+        part.clear()
+        part.set_color(white)
+        add_sphere(&part, 1.0, 40, 20)
+        parts[MarsDomePart].append(&part, Mat4.trs(Vec3(at.x, g, at.z), Quat.identity(), Vec3(9.0, 7.0, 9.0)))
+        parts[MarsDomePart].append(&part, Mat4.trs(Vec3(at.x - 17.0, g, at.z + 6.0), Quat.identity(), Vec3(5.0, 4.2, 5.0)))
+        tube(MarsDomePart, Vec3(at.x - 12.5, g + 1.2, at.z + 4.4), Vec3(at.x - 8.0, g + 1.2, at.z + 2.6), 1.1, white)
+        tube(MarsMetalPart, Vec3(at.x + 6.0, g, at.z - 4.0), Vec3(at.x + 6.0, g + 12.0, at.z - 4.0), 0.15, Color.hex(0xB8BCC0).with_alpha(0.8))
+
+    fn devil()
+        part.clear()
+        part.set_color(Color(1.0, 1.0, 1.0, 1.0))
+        add_frustum(&part, 8.0, 34.0, 300.0, 32, false)
+        parts[MarsDevilPart].append(&part, Mat4.translation(Vec3(-260.0, MarsGround + 150.0, -420.0)))
+
+    fn scatter()
+        while rock_count < MarsRocks
+            let a = random(0.0, Tau)
+            let r = 1.3 + pow(random(0.0, 1.0), 2.2) * 110.0
+            let x = sin(a) * r
+            let z = cos(a) * r
+            if abs(x - mars_rover_at().x) < 2.0 and abs(z - mars_rover_at().z) < 2.0: continue
+            if abs(x) < 0.5 and abs(z) < 1.3: continue
+            let big = random(0.0, 1.0) < 0.06
+            let size = big ? random(0.35, 1.3) : random(0.03, 0.18) * (1.0 + r * 0.01)
+            let squash = Vec3(size * random(0.8, 1.3), size * random(0.45, 0.8), size * random(0.8, 1.3))
+            let turn = Quat.axis_angle(Vec3(0.0, 1.0, 0.0), random(0.0, Tau)) * Quat.axis_angle(Vec3(1.0, 0.0, 0.0), random(-0.3, 0.3))
+            let y = mars_height(x, z) + squash.y * 0.35
+            rocks[rock_count] = Mat4.trs(Vec3(x, y, z) * Metre, turn, squash * Metre)
+            let tone = random(0.0, 1.0)
+            rock_tints[rock_count] = Color(0.24 + tone * 0.12, 0.16 + tone * 0.06, 0.12 + tone * 0.04, random(0.0, 1.0))
+            rock_count += 1

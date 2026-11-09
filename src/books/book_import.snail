@@ -1,0 +1,103 @@
+use src/books/polyglot_book
+use engine/platform/files
+use src/uci/uci_engine
+use src/engines/folded_text
+
+var book_wake_event: u32
+
+const ImportIdle = 0
+const ImportReading = 1
+const ImportDone = 2
+
+enum ImportFormat: u8
+    ImportPolyglot
+    ImportPgn
+    ImportEpd
+
+struct ImportSettings
+    format: ImportFormat
+    plies: int = 8
+    share: int = 5
+    most: int = 1000
+    whole: bool = true
+
+struct BookImport
+    path: [600]u8
+    path_len: int
+    settings: ImportSettings
+    found: BookRead
+    problem: [200]u8
+    problem_len: int
+    work: int
+    thread: u64
+
+    fn path_text() -> str
+        return str(path[0..path_len])
+
+    fn problem_text() -> str
+        return str(problem[0..problem_len])
+
+    fn start(file: str, s: ImportSettings) -> bool
+        if thread != 0: return false
+        path_len = keep_text(file, path[0..600])
+        settings = s
+        found.clear()
+        problem_len = 0
+        if book_wake_event == 0: book_wake_event = SDL_RegisterEvents(1)
+        atomic_store(&work, ImportReading)
+        thread = spawn(import_work, self)
+        return true
+
+    fn update() -> bool
+        if thread == 0 or atomic_load(&work) == ImportReading: return false
+        join(thread)
+        thread = 0
+        return true
+
+    fn reading() -> bool
+        return thread != 0
+
+    fn read() -> bool
+        return thread == 0 and atomic_load(&work) == ImportDone
+
+    fn cancel()
+        if thread == 0: return
+        atomic_store(&found.cancelled, 1)
+        join(thread)
+        thread = 0
+        atomic_store(&work, ImportIdle)
+
+    fn forget()
+        cancel()
+        atomic_store(&work, ImportIdle)
+        found.clear()
+
+    fn release()
+        cancel()
+        found.release()
+
+fn import_work(j: *BookImport)
+    let bytes = read_file(j.path_text().ptr as cstr)
+    defer free_file(bytes)
+    let s = &j.settings
+    if bytes.len == 0: j.problem_len = keep_text("The file is empty or could not be read.", j.problem[0..200])
+    elif s.format == ImportPolyglot
+        var book: PolyglotBook
+        defer book.release()
+        let bad = book.read(bytes)
+        if bad.len > 0: j.problem_len = keep_text(bad, j.problem[0..200])
+        else
+            var walk = PolyglotWalk(book: &book, into: &j.found, plies: s.plies, share: s.share)
+            defer walk.release()
+            walk.run(s.most)
+    elif s.format == ImportPgn: read_pgn_openings(str(bytes), s.plies, s.whole, &j.found)
+    else: read_epd_openings(str(bytes), &j.found)
+    atomic_store(&j.work, ImportDone)
+    var e: SDL_Event
+    e.type = book_wake_event
+    SDL_PushEvent(&e)
+
+fn import_format_of(path: str) -> ImportFormat
+    if ends_folded(path, ".bin"): return ImportPolyglot
+    if ends_folded(path, ".epd"): return ImportEpd
+    return ImportPgn

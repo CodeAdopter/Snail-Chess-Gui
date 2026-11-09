@@ -1,0 +1,124 @@
+use engine/ui/ui_fill_path
+use src/chess/primitives
+
+enum PieceMood: u8
+    Calm
+    Promoting
+    Checked
+    Mated
+
+const MoodCount = 4
+
+struct PiecePart
+    side: Side
+    kind: Kind
+    d: str
+    fill: u32
+    stroke: u32
+    width: f32
+    cap: UiCap
+    join: UiJoin
+    paint: int = -1
+    motion: int = -1
+    mood: PieceMood = Calm
+
+enum PieceEase: u8
+    EaseLinear
+    Ease
+    EaseIn
+    EaseOut
+    EaseInOut
+    EaseSteps
+
+struct PieceMotion
+    first: int
+    count: int
+    seconds: f32
+    ease: PieceEase
+    steps: int
+    alternate: bool
+    origin: Vec2
+    parent: int
+
+struct PieceKey
+    at: f32
+    shift: Vec2
+    turn: f32
+    size: Vec2
+    skew: f32
+    alpha: f32
+
+struct PiecePaint
+    radial: bool
+    a: Vec2
+    b: Vec2
+    r0: f32
+    r1: f32
+    squash: Vec2
+    first: int
+    count: int
+
+struct PieceStop
+    at: f32
+    color: u32
+
+struct PieceArt
+    name: str
+    size: f32
+    parts: []PiecePart
+    paints: []PiecePaint
+    stops: []PieceStop
+    picture: []u8
+    paper: bool
+    motions: []PieceMotion
+    keys: []PieceKey
+
+fn art_color(rgba: u32) -> Color
+    return Color(((rgba >> 24) & 255) as f32 / 255.0, ((rgba >> 16) & 255) as f32 / 255.0, ((rgba >> 8) & 255) as f32 / 255.0, (rgba & 255) as f32 / 255.0)
+
+fn art_gradient(stops: []PieceStop, p: PiecePaint) -> UiGradient
+    var g = UiGradient(radial: p.radial, a: p.a, b: p.b, r0: p.r0, r1: p.r1, squash: p.squash)
+    for i in p.first..p.first + p.count: g = g.stop(stops[i].at, art_color(stops[i].color))
+    return g
+
+fn motion_at(art: *PieceArt, i: int, seconds: f32) -> (UiTransform, f32)
+    let mo = art.motions[i]
+    var f = seconds / max(mo.seconds, 0.001)
+    let loops = floor(f)
+    f -= loops
+    if mo.alternate and (loops as int) % 2 == 1: f = 1.0 - f
+    var k = mo.first
+    while k + 2 < mo.first + mo.count and art.keys[k + 1].at < f: k += 1
+    let a = art.keys[k]
+    let b = art.keys[min(k + 1, mo.first + mo.count - 1)]
+    let u = eased(mo.ease, mo.steps, b.at > a.at ? clamp((f - a.at) / (b.at - a.at), 0.0, 1.0) : 0.0)
+    let shift = a.shift + (b.shift - a.shift) * u
+    let size = a.size + (b.size - a.size) * u
+    let o = mo.origin
+    var t = UiTransform.translate(-o.x, -o.y).then(UiTransform.skew(0.0, a.skew + (b.skew - a.skew) * u)).then(UiTransform.scale(size.x, size.y)).then(UiTransform.rotate(a.turn + (b.turn - a.turn) * u)).then(UiTransform.translate(o.x + shift.x, o.y + shift.y))
+    var alpha = a.alpha + (b.alpha - a.alpha) * u
+    if mo.parent >= 0
+        let (up, up_alpha) = motion_at(art, mo.parent, seconds)
+        t = t.then(up)
+        alpha *= up_alpha
+    return t, alpha
+
+fn eased(ease: PieceEase, steps: int, u: f32) -> f32
+    match ease
+        EaseLinear: return u
+        EaseSteps: return floor(u * max(steps, 1) as f32) / max(steps, 1) as f32
+        EaseIn: return bezier_ease(0.42, 0.0, 1.0, 1.0, u)
+        EaseOut: return bezier_ease(0.0, 0.0, 0.58, 1.0, u)
+        EaseInOut: return bezier_ease(0.42, 0.0, 0.58, 1.0, u)
+    return bezier_ease(0.25, 0.1, 0.25, 1.0, u)
+
+fn bezier_ease(x1: f32, y1: f32, x2: f32, y2: f32, u: f32) -> f32
+    var lo: f32 = 0.0
+    var hi: f32 = 1.0
+    var s: f32 = u
+    for i in 0..20
+        s = (lo + hi) * 0.5
+        let x = 3.0 * (1.0 - s) * (1.0 - s) * s * x1 + 3.0 * (1.0 - s) * s * s * x2 + s * s * s
+        if x < u: lo = s
+        else: hi = s
+    return 3.0 * (1.0 - s) * (1.0 - s) * s * y1 + 3.0 * (1.0 - s) * s * s * y2 + s * s * s

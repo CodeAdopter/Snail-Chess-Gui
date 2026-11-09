@@ -1,0 +1,601 @@
+use src/game/game
+use src/lichess/lichess_client
+use src/lichess/lichess_game
+use src/lichess/lichess_token
+
+const LichessPresets = ["10+0", "10+5", "15+10", "30+0", "30+20"]
+const LichessPresetMinutes = [10, 10, 15, 30, 30]
+const LichessPresetIncrement = [0, 5, 10, 0, 20]
+const LichessCustom = 5
+const LichessLeastSeekS = 480
+const LichessChatMost = 140
+const LichessChatKept = 200
+
+const LichessTagAccount = 1
+const LichessTagMove = 2
+const LichessTagAction = 3
+const LichessTagChat = 4
+const LichessTagChallenge = 5
+const LichessTagRevoke = 6
+
+const LichessRetryNs: i64 = 2000000000
+const LichessRetryMostNs: i64 = 30000000000
+const LichessSeekGraceNs: i64 = 5000000000
+
+enum LichessState: u8
+    LichessSignedOut
+    LichessChecking
+    LichessReady
+    LichessSearching
+    LichessStarting
+    LichessLive
+    LichessOver
+
+struct LichessChatLine
+    who: ShortText
+    text: ShortText
+    mine: bool
+
+struct LichessPlay
+    client: LichessClient
+    token: LichessToken
+    state: LichessState
+    problem: ShortText
+    name: ShortText
+    user_id: ShortText
+    rapid: int
+    classical: int
+    preset: int = 1
+    custom_minutes: int = 20
+    custom_increment: int = 10
+    rated: bool = true
+    seek_minutes: int
+    seek_increment: int
+    seek_rated: bool
+    seek_ended_ns: i64
+    searched_ns: i64
+    game: LichessGame
+    view: Game
+    white: bool
+    applied: [..]u8
+    left_ms: [2]i64
+    since_ns: i64
+    running: int = -1
+    gone_ns: i64
+    draw_sent: bool
+    takeback_sent: bool
+    chat: [..]LichessChatLine
+    chat_seen: int
+    challenges: [..]LichessEvent
+    events_retry_ns: i64
+    events_wait_ns: i64 = LichessRetryNs
+    game_retry_ns: i64
+    account_retry_ns: i64
+    ended: bool
+    changed: bool
+    queue_asked: int = -1
+    replaced: [256]u8
+    replaced_len: int
+
+    fn load(data: *DataFolder)
+        token.load(data, LichessPersonFile)
+        view.reset_to_start()
+        if token.saved(): check()
+
+    fn check()
+        client.set_token(token.text())
+        client.get(LichessTagAccount, "/api/account")
+        state = LichessChecking
+        changed = true
+
+    fn sign_in(typed: str) -> bool
+        problem.clear()
+        var old: [256]u8
+        let n = min(token.token.len, 256) as int
+        for k in 0..n
+            old[k] = token.token[k]
+        if not token.save(typed)
+            problem.add_str("That isn't a Lichess token. Copy the whole token Lichess shows.")
+            changed = true
+            return false
+        if n > 0 and str(old[0..n]) != token.text()
+            client.events.cancel()
+            client.seek.cancel()
+            client.drop_waiting()
+            if replaced_len == 0
+                for k in 0..n
+                    replaced[k] = old[k]
+                replaced_len = n
+        check()
+        return true
+
+    fn put_back() -> bool
+        if replaced_len == 0: return false
+        let t = str(replaced[0..replaced_len])
+        token.save(t)
+        client.set_token(t)
+        replaced_len = 0
+        state = LichessReady
+        changed = true
+        return true
+
+    fn sign_out()
+        client.drop_waiting()
+        if token.saved(): client.revoke(LichessTagRevoke, token.text())
+        if replaced_len > 0: client.revoke(LichessTagRevoke, str(replaced[0..replaced_len]))
+        replaced_len = 0
+        token.remove()
+        client.events.cancel()
+        client.seek.cancel()
+        client.game.cancel()
+        client.set_token("")
+        name.clear()
+        state = LichessSignedOut
+        changed = true
+
+    fn signed_in() -> bool
+        return state != LichessSignedOut and state != LichessChecking
+
+    fn playing() -> bool
+        return state == LichessStarting or state == LichessLive
+
+    fn clock_chosen() -> (int, int)
+        if preset == LichessCustom: return custom_minutes, custom_increment
+        return LichessPresetMinutes[preset], LichessPresetIncrement[preset]
+
+    fn speed_word(minutes: int, increment: int) -> str
+        return minutes * 60 + increment * 40 >= 1500 ? "Classical" : "Rapid"
+
+    fn queue() -> bool
+        if state != LichessReady and state != LichessOver: return false
+        let (minutes, increment) = clock_chosen()
+        problem.clear()
+        if minutes * 60 + increment * 40 < LichessLeastSeekS
+            problem.add_str("Lichess only pairs rapid and classical games here, 8 minutes or more.")
+            changed = true
+            return false
+        var form: [80]u8
+        if not client.open_seek(format(&form, "rated={rated ? "true" : "false"}&time={minutes}&increment={increment}&variant=standard"))
+            problem.add_str(client.quiet_left_ns() > 0 ? "Lichess asked for a minute's wait. Try again soon." : "A seek is already open.")
+            changed = true
+            return false
+        seek_minutes = minutes
+        seek_increment = increment
+        seek_rated = rated
+        seek_ended_ns = 0
+        searched_ns = now_ns()
+        state = LichessSearching
+        changed = true
+        return true
+
+    fn cancel_queue()
+        if state != LichessSearching: return
+        client.seek.cancel()
+        state = LichessReady
+        changed = true
+
+    fn leave_game()
+        if state != LichessOver: return
+        state = LichessReady
+        view.reset_to_start()
+        applied.clear()
+        problem.clear()
+        client.get(LichessTagAccount, "/api/account")
+        changed = true
+
+    fn say(text: str)
+        problem.clear()
+        problem.add_str(text)
+        changed = true
+
+    fn game_path(buf: *[160]u8, action: str) -> str
+        return lichess_game_path(buf, false, game.id.text(), action)
+
+    fn act(action: str)
+        var path: [160]u8
+        client.post(LichessTagAction, game_path(&path, action))
+
+    fn my_side() -> Side
+        return white ? White : Black
+
+    fn my_turn() -> bool
+        return state == LichessLive and end_board().side == my_side()
+
+    fn end_board() -> *Board
+        var i = 0
+        while view.nodes[i].first != NoNode
+            i = view.nodes[i].first
+        return &view.nodes[i].board
+
+    fn at_end() -> bool
+        return view.nodes[view.at].first == NoNode
+
+    fn move(m: Move)
+        if not my_turn() or not at_end(): return
+        var uci: ShortText
+        write_uci(m, &uci)
+        view.play(m)
+        if applied.len > 0: applied.push(' ')
+        for k in 0..uci.len
+            applied.push(uci.bytes[k])
+        let now = now_ns()
+        let mine = white ? 0 : 1
+        if running == mine: left_ms[mine] = left_ms[mine] - (now - since_ns) / 1000000 + game.increment_ms
+        since_ns = now
+        running = game.plies + 1 >= 2 ? 1 - mine : -1
+        draw_sent = false
+        var path: [160]u8
+        var action: [24]u8
+        client.post(LichessTagMove, game_path(&path, format(&action, "move/{uci.text()}")))
+        changed = true
+
+    fn resign()
+        if state == LichessLive: act("resign")
+
+    fn can_abort() -> bool
+        return state == LichessLive and game.plies < 2
+
+    fn abort()
+        if can_abort(): act("abort")
+
+    fn opponent_offers_draw() -> bool
+        return state == LichessLive and (white ? game.black_draw : game.white_draw)
+
+    fn offer_draw()
+        if state != LichessLive or draw_sent: return
+        draw_sent = true
+        act("draw/yes")
+        changed = true
+
+    fn answer_draw(yes: bool)
+        act(yes ? "draw/yes" : "draw/no")
+
+    fn opponent_asks_takeback() -> bool
+        return state == LichessLive and (white ? game.black_takeback : game.white_takeback)
+
+    fn ask_takeback()
+        if state != LichessLive or takeback_sent or game.plies == 0: return
+        takeback_sent = true
+        act("takeback/yes")
+        changed = true
+
+    fn answer_takeback(yes: bool)
+        act(yes ? "takeback/yes" : "takeback/no")
+
+    fn claim_in_s() -> int
+        if state != LichessLive or not game.opponent_gone or game.claim_in_s < 0: return -1
+        return max(game.claim_in_s - ((now_ns() - gone_ns) / 1000000000) as int, 0)
+
+    fn claim_victory()
+        if claim_in_s() == 0: act("claim-victory")
+
+    fn send_chat(text: str)
+        if not playing() and state != LichessOver or text.len == 0: return
+        var form: [..]u8
+        defer form.free()
+        let lead = "room=player&text="
+        for k in 0..lead.len
+            form.push(lead[k])
+        lichess_form_escape(text[0..min(text.len, LichessChatMost)], &form)
+        var path: [160]u8
+        client.post(LichessTagChat, game_path(&path, "chat"), str(form[0..form.len]))
+
+    fn accept(i: int)
+        if i < 0 or i >= challenges.len or playing(): return
+        var path: [160]u8
+        client.post(LichessTagChallenge, format(&path, "/api/challenge/{challenges[i].id.text()}/accept"))
+        challenges.remove(i)
+        changed = true
+
+    fn decline(i: int)
+        if i < 0 or i >= challenges.len: return
+        var path: [160]u8
+        client.post(LichessTagChallenge, format(&path, "/api/challenge/{challenges[i].id.text()}/decline"))
+        challenges.remove(i)
+        changed = true
+
+    fn clock_ms(side: Side, now: i64) -> i64
+        if game.initial_ms < 0: return -1
+        let k = side == White ? 0 : 1
+        if running == k and state == LichessLive: return max(left_ms[k] - (now - since_ns) / 1000000, 0)
+        return max(left_ms[k], 0)
+
+    fn clock_running(side: Side) -> bool
+        return state == LichessLive and running == (side == White ? 0 : 1)
+
+    fn next_clock_change_s(now: i64) -> f64
+        if state != LichessLive or running < 0: return -1.0
+        let left = clock_ms(running == 0 ? White : Black, now)
+        let step: i64 = left < 10000 ? 100 : 1000
+        let into = left % step
+        return (into == 0 ? step : into) as f64 / 1000.0 + 0.001
+
+    fn result_words(buf: *[120]u8) -> str
+        if not game.over(): return format(buf, "")
+        let s = game.status.text()
+        let w = game.winner.text()
+        let who = w == "white" ? "White won" : w == "black" ? "Black won" : ""
+        if s == "mate": return format(buf, "{who} by checkmate")
+        if s == "resign": return format(buf, "{who} by resignation")
+        if s == "outoftime" or s == "timeout": return w.len > 0 ? format(buf, "{who} on time") : format(buf, "Draw, time ran out")
+        if s == "stalemate": return format(buf, "Draw by stalemate")
+        if s == "draw": return format(buf, "Draw")
+        if s == "aborted": return format(buf, "Game aborted")
+        if s == "noStart": return w.len > 0 ? format(buf, "{who}, no first move") : format(buf, "Game ended, no first move")
+        return who.len > 0 ? format(buf, "{who}") : format(buf, "Game over")
+
+    fn result() -> GameResult
+        if not game.over(): return Unfinished
+        let w = game.winner.text()
+        if w == "white": return WhiteWins
+        if w == "black": return BlackWins
+        return game.status.text() == "aborted" ? Unfinished : Drawn
+
+    fn take_ended() -> bool
+        if not ended: return false
+        ended = false
+        return true
+
+    fn tick(now: i64) -> bool
+        var r: LichessReply
+        defer r.release()
+        while client.poll(&r)
+            take_reply(&r)
+        if signed_in() and not client.events.running() and client.events.finished()
+            if events_retry_ns == 0
+                client.heed(&client.events)
+                if client.events.answered() == 401: lost_token()
+                else
+                    events_retry_ns = now + events_wait_ns
+                    events_wait_ns = min(events_wait_ns * 2, LichessRetryMostNs)
+            if signed_in() and now >= events_retry_ns and client.open_events(): events_retry_ns = 0
+        take_events(now)
+        if state == LichessSearching and client.seek.finished() and not client.seek.running()
+            if not client.seek.done()
+                client.heed(&client.seek)
+                seek_problem()
+                state = LichessReady
+                changed = true
+            elif seek_ended_ns == 0: seek_ended_ns = now
+            elif now - seek_ended_ns > LichessSeekGraceNs
+                problem.clear()
+                problem.add_str("No game was found. Try again.")
+                state = LichessReady
+                changed = true
+        if playing()
+            take_game(now)
+            let s = client.game.answered()
+            if state == LichessStarting and not client.game.running() and client.game.finished() and s >= 400 and s < 500 and s != 429
+                seek_problem_of(&client.game)
+                state = LichessReady
+                changed = true
+            elif not game.over() and not client.game.running() and now >= game_retry_ns
+                client.heed(&client.game)
+                if client.open_game(game.id.text(), false): game_retry_ns = now + LichessRetryNs
+        if state == LichessChecking and account_retry_ns > 0 and now >= account_retry_ns
+            account_retry_ns = 0
+            check()
+        let was = changed
+        changed = false
+        return was
+
+    fn next_wake_s(now: i64) -> f64
+        var at: i64 = -1
+        for t in [events_retry_ns, account_retry_ns, game_retry_ns, client.quiet_until]
+            if t > now and (at < 0 or t < at): at = t
+        if state == LichessSearching and seek_ended_ns > 0: at = at < 0 ? seek_ended_ns + LichessSeekGraceNs : min(at, seek_ended_ns + LichessSeekGraceNs)
+        var s = at < 0 ? -1.0 : (at - now) as f64 / 1.0e9 + 0.001
+        let c = next_clock_change_s(now)
+        if c >= 0.0 and (s < 0.0 or c < s): s = c
+        if claim_in_s() > 0 and (s < 0.0 or s > 1.0): s = 1.0
+        return s
+
+    fn lost_token()
+        token.remove()
+        client.set_token("")
+        problem.clear()
+        state = LichessSignedOut
+        changed = true
+        if put_back(): problem.add_str("Lichess didn't accept that token. Kept the one you had.")
+        else: problem.add_str("Lichess no longer accepts this token. Sign in again.")
+
+    fn seek_problem()
+        seek_problem_of(&client.seek)
+
+    fn seek_problem_of(stream: *HttpStream)
+        problem.clear()
+        let s = stream.answered()
+        var line: [..]u8
+        defer line.free()
+        var doc: JsonDoc
+        defer doc.free_all()
+        if stream.next(&line)
+            let said = doc.get(doc.parse(str(line[0..line.len])), "error")
+            if doc.is(said, JsonString)
+                problem.add_str(doc.str_of(said))
+                return
+        if s == 429: problem.add_str("Lichess asked for a minute's wait. Try again soon.")
+        elif s == 0: problem.add_str("Lichess couldn't be reached. Is the computer online?")
+        else: problem.add_str(stream.error_text())
+
+    fn take_reply(r: *LichessReply)
+        if r.tag == LichessTagRevoke
+            if not r.ok and r.status != 401: say("Removed from this computer, but Lichess couldn't revoke it. Revoke it on Lichess.")
+            return
+        if r.tag == LichessTagAccount
+            if r.ok
+                take_account(r.text_of())
+                return
+            if r.status == 401
+                lost_token()
+                return
+            problem.clear()
+            problem.add_str(r.status == 0 ? "Lichess couldn't be reached. Trying again soon." : r.error_text())
+            account_retry_ns = now_ns() + LichessRetryMostNs
+            changed = true
+            return
+        if r.ok: return
+        if r.tag == LichessTagMove
+            var start = *view.start_board()
+            view.reset(&start)
+            applied.clear()
+            sync_moves()
+        if r.tag == LichessTagAction
+            draw_sent = false
+            takeback_sent = false
+        problem.clear()
+        problem.add_str(r.error_text())
+        changed = true
+
+    fn take_account(text: str)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let me = doc.parse(text)
+        let title = doc.get(me, "title")
+        if doc.is(title, JsonString) and doc.str_of(title) == "BOT"
+            token.remove()
+            client.set_token("")
+            problem.clear()
+            state = LichessSignedOut
+            changed = true
+            if put_back(): problem.add_str("That token is for a bot account. Kept the one you had.")
+            else: problem.add_str("That token is for a bot account. Use one from your own account.")
+            return
+        lichess_keep(&doc, me, "username", &name)
+        lichess_keep(&doc, me, "id", &user_id)
+        let perfs = doc.get(me, "perfs")
+        rapid = doc.num_at(doc.get(perfs, "rapid"), "rating", 1500.0) as int
+        classical = doc.num_at(doc.get(perfs, "classical"), "rating", 1500.0) as int
+        problem.clear()
+        if state == LichessChecking: state = LichessReady
+        if replaced_len > 0
+            client.revoke(LichessTagRevoke, str(replaced[0..replaced_len]))
+            replaced_len = 0
+        if not client.events.running(): events_retry_ns = now_ns()
+        events_wait_ns = LichessRetryNs
+        changed = true
+        if queue_asked >= 0
+            preset = clamp(queue_asked, 0, LichessCustom)
+            queue_asked = -1
+            queue()
+
+    fn take_events(now: i64)
+        var line: [..]u8
+        defer line.free()
+        var e: LichessEvent
+        while client.events.next(&line)
+            if not read_lichess_event(str(line[0..line.len]), &e): continue
+            events_wait_ns = LichessRetryNs
+            match e.kind
+                LichessGameStart
+                    if not playing() and e.speed.text() != "correspondence": start_game(&e, now)
+                LichessChallengeIn
+                    if e.challenger.text() != name.text() and e.variant.text() == "standard"
+                        challenges.push(e)
+                        changed = true
+                LichessChallengeCanceled, LichessChallengeDeclined
+                    for i in 0..challenges.len
+                        if challenges[i].id.text() == e.id.text()
+                            challenges.remove(i)
+                            changed = true
+                            break
+
+    fn start_game(e: *LichessEvent, now: i64)
+        client.seek.cancel()
+        client.game.cancel()
+        game.release()
+        game = LichessGame()
+        game.id.add_str(e.id.text())
+        white = e.white
+        view.reset_to_start()
+        applied.clear()
+        chat.clear()
+        chat_seen = 0
+        challenges.clear()
+        problem.clear()
+        draw_sent = false
+        takeback_sent = false
+        running = -1
+        ended = false
+        game_retry_ns = 0
+        state = LichessStarting
+        changed = true
+
+    fn take_game(now: i64)
+        var line: [..]u8
+        defer line.free()
+        while client.game.next(&line)
+            let kind = game.take(str(line[0..line.len]))
+            match kind
+                LichessFullLine, LichessStateLine
+                    if kind == LichessFullLine
+                        white = game.white.id.text() == user_id.text() or user_id.len == 0 and white
+                        if game.start_fen.len > 0
+                            var b: Board
+                            if b.load_fen(game.start_fen.text())
+                                view.reset(&b)
+                                applied.clear()
+                        if state == LichessStarting: state = LichessLive
+                    sync_moves()
+                    left_ms[0] = game.wtime_ms
+                    left_ms[1] = game.btime_ms
+                    since_ns = now
+                    running = game.plies >= 2 and not game.over() ? game.plies % 2 : -1
+                    if not game.white_draw and not game.black_draw: draw_sent = false
+                    if not game.white_takeback and not game.black_takeback: takeback_sent = false
+                    if game.over() and state == LichessLive
+                        state = LichessOver
+                        running = -1
+                        view.result = result()
+                        ended = true
+                    changed = true
+                LichessChatLine
+                    if chat.len >= LichessChatKept: chat.remove(0)
+                    var c: LichessChatLine
+                    c.who.add_str(game.chat_who.text())
+                    c.text.add_str(game.chat_text.text())
+                    c.mine = game.chat_who.text() == name.text()
+                    if not game.chat_spectator: chat.push(c)
+                    changed = true
+                LichessGoneLine
+                    gone_ns = now
+                    changed = true
+
+    fn sync_moves()
+        let have = str(applied[0..applied.len])
+        let want = game.moves_text()
+        if have == want: return
+        let follow = at_end()
+        let extends = have.len == 0 or want.len > have.len and want[0..have.len] == have and want[have.len] == ' '
+        if not extends
+            var start = *view.start_board()
+            view.reset(&start)
+            applied.clear()
+        var at = 0
+        while view.nodes[at].first != NoNode
+            at = view.nodes[at].first
+        var k = applied.len as int
+        while k < want.len
+            while k < want.len and want[k] == ' '
+                k += 1
+            var e = k
+            while e < want.len and want[e] != ' '
+                e += 1
+            if e > k
+                let (m, ok) = parse_move(&view.nodes[at].board, want[k..e])
+                if not ok: break
+                at = view.add_move(at, m)
+            k = e
+        applied.clear()
+        for k in 0..want.len
+            applied.push(want[k])
+        if follow: view.go(at)
+        view.version += 1
+
+    fn release()
+        client.release()
+        token.release()
+        game.release()
+        applied.free()
+        chat.free()
+        challenges.free()

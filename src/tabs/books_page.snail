@@ -1,0 +1,364 @@
+use engine/desktop/command_bar
+use src/views/wrap_rows
+use src/tabs/book_import_popup
+use src/books/book_export
+use src/tournament/event_runner
+use src/tabs/book_generate_popup
+use src/tabs/book_registry_popup
+use src/views/gallery
+
+const BookFilters = ["All", "Imported", "Generated"]
+const BookPreviewRow: f32 = 24.0
+const BookPreviewMost = 500
+const BookPreviewViews = ["Boards", "Moves"]
+const BookSampleMost = 24
+const BookBoardSize: f32 = 150.0
+const BookBoardGap: f32 = 14.0
+const BookColumn: f32 = 1120.0
+const BookPlySeconds: f32 = 0.5
+
+struct BooksPage
+    search: UiEditText
+    filter: int
+    chosen: int
+    shown: [..]int
+    importing: BookImportPopup
+    fetching: BookRegistryPopup
+    exporting: FileDialog
+    export_id: int
+    removing: bool
+    confirm_id: int
+    preview: [..]u8
+    preview_starts: [..]int
+    preview_id: int
+    preview_version: u64
+    preview_positions: int
+    preview_view: int
+    preview_boards: [..]Board
+    preview_moves: [..]Move
+    preview_move_starts: [..]int
+    sample: [..]int
+    rng: SplitMix64
+    hover: int = -1
+    hover_since: f32
+    used: [..]u8
+    use_id: int
+    generating: BookGeneratePopup
+    stop_id: int
+    resume_id: int
+    remove_id: int
+    kit: SettingsKit
+
+    fn update(app: *DesktopApp, books: *BookLibrary)
+        fetching.update(app)
+        if fetching.ready and importing.step == ImportClosed
+            fetching.ready = false
+            let j = &fetching.job
+            var path: [700]u8
+            var from: [300]u8
+            let file = str(j.file_name[0..j.file_name.len])
+            importing.take_download(app, j.book_path(&path), j.name_text(), format(&from, "{file} from the registry"), j.plies)
+        importing.update(app)
+        if importing.auto and importing.downloaded
+            if importing.step == ImportChoosing: importing.read()
+            elif importing.step == ImportReport and importing.job.found.count > 0
+                importing.auto = false
+                importing.save(app, books, null)
+        if importing.added_id > 0
+            chosen = importing.added_id
+            importing.added_id = 0
+            let e = books.find(chosen)
+            var line: [200]u8
+            if e: app.ui.toast(format(&line, "Saved {e.name_text()} with {e.positions} openings."))
+            app.redraw()
+        if exporting.cancelled(): export_id = 0
+        var buf: [600]u8
+        let path = exporting.take(buf[0..590])
+        if path.len > 0: export(app, books, path)
+
+    fn draw(app: *DesktopApp, desk: *DesktopLook, books: *BookLibrary, events: []*EventRunner, makers: []*BookMaker, look: *BoardLook)
+        let ui = &app.ui
+        if not books.find(chosen) and books.books.len > 0: chosen = books.books[books.books.len - 1].id
+        let rail_w = list_rail_width(ui)
+        command_bar_rail(app, desk, rail_w, PageCurve)
+        list(app, books, makers, look.theme, look.fonts, rail_w)
+        kit = SettingsKit(ui, look.theme, look.fonts, page_column(ui, rail_w, BookColumn), 0, 0.0)
+        with page_room(ui, "bookdetail", chosen, rail_w, BookColumn)
+            details(app, books, events, makers, look)
+
+    fn list(app: *DesktopApp, books: *BookLibrary, makers: []*BookMaker, theme: *GuiTheme, fonts: *GuiFonts, rail_w: f32)
+        let ui = &app.ui
+        shown.clear()
+        let wanted = search.text()
+        var k = books.books.len as int - 1
+        while k >= 0
+            let b = books.books[k]
+            k -= 1
+            if filter == 1 and not b.imported() or filter == 2 and b.imported(): continue
+            if wanted.len == 0 or has_folded(b.name_text(), wanted) or has_folded(b.origin_text(), wanted): shown.push(b.id)
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        var line: [120]u8
+        var count: [40]u8
+        with rail_room(ui, "booklist", rail_w, 2.0)
+            ui.text_field("booksearch", &search, "Search books", UiNode(width: UiSize.grow()))
+            with ui.open(UiNode(name: "bookfilterrow", width: UiSize.grow(), padding: Vec4(0.0, 6.0, 0.0, 0.0)))
+                var rk = SettingsKit(ui, theme, fonts, rail_w, 0, 0.0)
+                rk.segments("bookfilter", BookFilters, ref filter)
+            rail_group(ui, theme, fonts, 0, format(&count, "BOOKS  {shown.len}"), false)
+            if books.books.len == 0: ui.paragraph("No books yet. Import a Polyglot book, a PGN or an EPD, or add one from the registry.", note, UiNode(width: UiSize.grow(), padding: Vec4(12.0, 4.0, 12.0, 4.0)))
+            elif shown.len == 0: ui.paragraph("No matching books.", note, UiNode(width: UiSize.grow(), padding: Vec4(12.0, 4.0, 12.0, 4.0)))
+            with v = ui.virtual_list("bookrows", shown.len as int, RailEntryTall + 2.0)
+                for r in v.first..v.last
+                    let id = shown[r]
+                    let b = books.find(id)
+                    var aside = ""
+                    if not b.imported() and b.state != BookReady
+                        aside = "paused"
+                        for m in makers
+                            if m.book == b and m.state == MakerRunning: aside = "making"
+                    with ui.open(UiNode(key: id, width: UiSize.grow(), height: UiSize.fixed(RailEntryTall + 2.0)))
+                        if rail_entry(ui, theme, fonts, "book", id, b.name_text(), format(&line, "{book_kind_label(b.kind)}  ·  {b.positions} positions"), aside, id == chosen): chosen = id
+
+    fn details(app: *DesktopApp, books: *BookLibrary, events: []*EventRunner, makers: []*BookMaker, look: *BoardLook)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let b = books.find(chosen)
+        if not b
+            kit.title("BOOKS", "No book selected", "Use the toolbar to import a Polyglot, PGN or EPD file, download a book from the registry, or generate one with an engine.")
+            return
+        if preview_id != b.id or preview_version != books.version or preview_positions != b.positions: read_preview(books, b)
+        let n = preview_starts.len as int - 1
+        var line: [300]u8
+        var date: [32]u8
+        let group = b.imported() ? "IMPORTED BOOK" : b.kind == BookConsensus ? "CONSENSUS BOOK" : "GENERATED BOOK"
+        kit.title(group, b.name_text(), b.imported() ? format(&line, "Source: {b.origin_text()}") : b.origin_text())
+        with page_actions(ui, 1, 2.0)
+            with acts = wrap_rows(ui, "bookactions", kit.width - 4.0, 8.0)
+                acts.next(button_width(ui, "Use in a tournament") + 6.0)
+                if ui.button("Use in a tournament", true): use_id = b.id
+                acts.next(button_width(ui, "Export"))
+                if ui.button("Export") and not exporting.is_open()
+                    export_id = b.id
+                    exporting.save_file(app.window.handle, "EPD or PGN", "epd;pgn", null)
+                acts.next(button_width(ui, "Uninstall"))
+                ui.spacer()
+                if ui.button("Uninstall")
+                    confirm_id = b.id
+                    removing = true
+        with kit.card(2, "Book details")
+            fact_row(&kit, 20, "Format", book_kind_label(b.kind))
+            fact_row(&kit, 21, "Positions", format(&line, "{b.positions}"))
+            if b.imported(): fact_row(&kit, 22, "Depth", b.plies > 0 ? format(&line, "Lines up to {b.plies} half-moves") : "Positions without moves")
+            fact_row(&kit, 23, "Made", date_text(b.made, &date))
+            used.clear()
+            for r in events
+                let c = &r.config
+                if c.book != CollectionBook or c.book_id != b.id or c.book_made != b.made: continue
+                if used.len > 0: push_text(&used, ", ")
+                push_text(&used, c.name_text())
+            fact_row(&kit, 24, "Used by", used.len > 0 ? str(used[0..used.len]) : "No tournaments yet")
+        if not b.imported(): making(app, b, makers, theme, fonts)
+        with kit.heading(5, "Openings", n < b.positions ? format(&line, "Showing {n} of {b.positions}") : format(&line, "All {n}"))
+            if preview_view == 0 and n > BookSampleMost and ui.button("Shuffle"): shuffle()
+            kit.segments("bookpreviewview", BookPreviewViews, ref preview_view)
+        if n <= 0
+            ui.paragraph("This book has no openings to display.", note, UiNode(width: UiSize.grow(), padding: Vec4(2.0, 6.0, 0.0, 0.0)))
+            return
+        if preview_view == 0
+            boards(app, look)
+            return
+        let row = UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink)
+        let tall = min(n as f32 * BookPreviewRow + 20.0, 560.0)
+        with v = ui.virtual_list("bookpreview", n, BookPreviewRow, UiNode(width: UiSize.grow(), height: UiSize.fixed(tall), padding: Vec4(14.0, 10.0, 14.0, 10.0), box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(10.0), border: 1.0, border_color: theme.line))))
+            for r in v.first..v.last
+                with ui.open(UiNode(key: r as int, flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(BookPreviewRow), gap: 10.0, align: Vec2(0.0, 0.5)))
+                    ui.label(format(&line, "{r + 1}"), note, UiNode(width: UiSize.fixed(40.0)))
+                    ui.label(str(preview[preview_starts[r]..preview_starts[r + 1]]), row, UiNode(width: UiSize.grow(), clip: true))
+
+    fn boards(app: *DesktopApp, look: *BoardLook)
+        let ui = &app.ui
+        let theme = look.theme
+        let pad: f32 = 8.0
+        let cols = max(floor((kit.width + BookBoardGap) / (BookBoardSize + pad * 2.0 + BookBoardGap)) as int, 1)
+        let card = floor((kit.width - (cols - 1) as f32 * BookBoardGap) / cols as f32)
+        let size = floor(card - pad * 2.0)
+        look.sheet.prepare(&app.gpu, &app.ui_gpu, look.set, max(floor(size / 8.0 * app.scale) as int, 8), look.costume)
+        let pieces = PieceSource(look.sheet, null, look.set)
+        let caption = UiTextStyle(face: look.fonts.text, size: 11.5, color: theme.muted)
+        var over = -1
+        var k = 0
+        while k < sample.len
+            with ui.open(UiNode(key: k, name: "bookboardrow", flow: FlowRow, width: UiSize.grow(), gap: BookBoardGap, padding: Vec4(0.0, 6.0, 0.0, 6.0)))
+                for c in 0..cols
+                    if k >= sample.len: break
+                    let i = sample[k]
+                    let first = preview_move_starts[i]
+                    let count = preview_move_starts[i + 1] - first
+                    let o = ui.open(UiNode(key: k, name: "bookboard", width: UiSize.fixed(card), padding: Vec4.splat(pad), gap: 8.0, hit: true))
+                    let hv = ui.interact(o.id)
+                    let lit = ui.spring(o.id, 0, hv.hovered ? 1.0 : 0.0, 22.0)
+                    ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.4 * lit)), radius: Vec4.splat(10.0), border: 1.0, border_color: theme.line))
+                    var ply = count
+                    if hv.hovered
+                        over = k
+                        if hover != k
+                            hover = k
+                            hover_since = ui.time
+                        let elapsed = ui.time - hover_since
+                        ply = min(floor(elapsed / BookPlySeconds) as int, count)
+                        if ply < count: ui.wake_in(BookPlySeconds * (ply + 1) as f32 - elapsed)
+                    var board = preview_boards[i]
+                    for m in preview_moves[first..first + ply]
+                        board.play(m)
+                    board_nodes(ui, look.colors, look.surfaces, pieces, &board, ply > 0 and look.highlights ? preview_moves[first + ply - 1] : NoMove, size, 0)
+                    let to_move = board.side == White ? "White to move" : "Black to move"
+                    ui.label(count > 0 ? str(preview[preview_starts[i]..preview_starts[i + 1]]) : to_move, caption, UiNode(width: UiSize.grow(), clip: true, padding: Vec4(2.0, 0.0, 2.0, 2.0)))
+                    ui.close()
+                    k += 1
+        if over < 0: hover = -1
+
+    fn shuffle()
+        let n = preview_starts.len as int - 1
+        if rng.state == 0: rng = SplitMix64(state: now_ns() as u64)
+        sample.clear()
+        for i in 0..n
+            sample.push(i)
+        let k = min(n, BookSampleMost)
+        for i in 0..k
+            let j = i + (rng.next() % (n - i) as u64) as int
+            let t = sample[i]
+            sample[i] = sample[j]
+            sample[j] = t
+        sample.resize(k)
+        hover = -1
+
+    fn making(app: *DesktopApp, b: *BookEntry, makers: []*BookMaker, theme: *GuiTheme, fonts: *GuiFonts)
+        let ui = &app.ui
+        var line: [400]u8
+        var m: *BookMaker = null
+        for k in makers
+            if k.book == b: m = k
+        let running = m and m.state == MakerRunning
+        var state = format(&line, "Paused at {b.positions} of {b.wanted}")
+        if running: state = format(&line, "Generating: {m.accepted} of {b.wanted} openings saved · {m.rejected} rejected")
+        elif m and m.state == MakerFailed: state = format(&line, "Stopped at {b.positions} of {b.wanted}: {m.failure_text()}")
+        elif b.state == BookShort: state = format(&line, "Incomplete: {b.positions} of {b.wanted} openings. No new line within the evaluation range after {b.tries} consecutive attempts.")
+        elif b.state == BookReady: state = "Done"
+        with kit.card(3, "Generation details")
+            with kit.row(30, state, b.kind == BookConsensus and b.state != BookReady ? "Use Pause and Resume in the associated tournament to control generation." : "")
+                if running
+                    if ui.button("Cancel"): stop_id = b.id
+                elif b.kind != BookConsensus and b.state != BookReady and ui.button("Resume", true): resume_id = b.id
+            if running
+                with ui.open(UiNode(width: UiSize.grow(), padding: Vec4(18.0, 0.0, 18.0, 14.0)))
+                    ui.progress(m.accepted as f32 / max(b.wanted, 1) as f32)
+            if b.kind == BookConsensus
+                fact_row(&kit, 31, "Engines", b.origin_text())
+                fact_row(&kit, 32, "Depth", format(&line, "Generated at depth {b.depth}; verified by every engine at depth {b.agree_depth}"))
+            else
+                fact_row(&kit, 31, "Engine", format(&line, "{b.engine_name_text()}, profile {b.profile_name_text()}"))
+                fact_row(&kit, 32, "Depth", format(&line, "Searched to depth {b.depth}"))
+            var band: [80]u8
+            fact_row(&kit, 33, "Range", book_band_text(b, &band))
+            fact_row(&kit, 34, "Lines", format(&line, "{b.plies_low} to {b.plies_high} plies, moves within {b.margin} cp of the best"))
+
+    fn read_preview(books: *BookLibrary, b: *BookEntry)
+        preview_id = b.id
+        preview_version = books.version
+        preview_positions = b.positions
+        preview.clear()
+        preview_starts.clear()
+        preview_starts.push(0)
+        preview_boards.clear()
+        preview_moves.clear()
+        preview_move_starts.clear()
+        preview_move_starts.push(0)
+        defer first_sample()
+        var at: [640]u8
+        let bytes = read_file(books.file(b.id, "openings.txt", &at).ptr as cstr)
+        defer free_file(bytes)
+        let text = str(bytes)
+        var start: Board
+        var moves: [..]Move
+        defer moves.free()
+        var from = 0
+        for i in 0..text.len
+            if preview_starts.len > BookPreviewMost: break
+            if text[i] != '\n': continue
+            let line = text[from..i]
+            from = i as int + 1
+            if not read_opening(line, &start, &moves): continue
+            preview_boards.push(start)
+            for m in moves
+                preview_moves.push(m)
+            preview_move_starts.push(preview_moves.len as int)
+            write_opening_san(&start, moves[0..moves.len], &preview)
+            let ops = opening_ops(line)
+            if ops.len > 0
+                push_text(&preview, "   ")
+                push_text(&preview, ops)
+            preview_starts.push(preview.len as int)
+
+    fn first_sample()
+        sample.clear()
+        for i in 0..min(preview_starts.len as int - 1, BookSampleMost)
+            sample.push(i)
+        hover = -1
+
+    fn export(app: *DesktopApp, books: *BookLibrary, path: str)
+        let b = books.find(export_id)
+        export_id = 0
+        if not b: return
+        var named: [620]u8
+        let as_pgn = ends_folded(path, ".pgn")
+        let to = as_pgn or ends_folded(path, ".epd") ? path : format(&named, "{path}.epd")
+        var at: [640]u8
+        let bytes = read_file(books.file(b.id, "openings.txt", &at).ptr as cstr)
+        defer free_file(bytes)
+        let n = export_openings(str(bytes), as_pgn, b.name_text(), to)
+        var line: [700]u8
+        if n < 0: app.ui.toast(format(&line, "{file_name_of(to)} could not be written"))
+        else: app.ui.toast(format(&line, "{n} openings written to {file_name_of(to)}"))
+
+    fn draw_popups(app: *DesktopApp, books: *BookLibrary, choices: *EngineChoices, look: *BoardLook)
+        let theme = look.theme
+        let fonts = look.fonts
+        fetching.draw(app, theme, fonts)
+        importing.draw(app, books, theme, fonts)
+        generating.draw(app, books, choices, look)
+        if not removing: return
+        let ui = &app.ui
+        let b = books.find(confirm_id)
+        if not b
+            removing = false
+            return
+        var line: [400]u8
+        with ui.modal("removebook", ref removing, 440.0)
+            ui.label(format(&line, "Uninstall {b.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(format(&line, "Delete this book and its {b.positions} openings from the data folder. Tournaments using the book keep their own copies."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5), padding: Vec4(0.0, 6.0, 0.0, 0.0)))
+                ui.spacer()
+                if ui.button("Cancel"): removing = false
+                if ui.button("Uninstall", true)
+                    remove_id = confirm_id
+                    removing = false
+
+    fn release()
+        importing.release()
+        fetching.release()
+        shown.free()
+        preview.free()
+        preview_starts.free()
+        preview_boards.free()
+        preview_moves.free()
+        preview_move_starts.free()
+        sample.free()
+        used.free()
+        generating.release()
+
+fn date_text(seconds: i64, buf: *[32]u8) -> str
+    var d: SDL_DateTime
+    if seconds <= 0 or not SDL_TimeToDateTime(seconds * 1000000000, &d, true): return format(buf, "Not known")
+    return format(buf, "{d.year}-{d.month:02}-{d.day:02}")

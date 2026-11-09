@@ -1,0 +1,1572 @@
+use engine/desktop/crash_report
+use engine/desktop/desktop_look
+use engine/render/renderer_views
+use src/views/piece_slide
+use src/views/board_palette
+use src/views/arrow_bend
+use src/board3d/piece_carving
+use src/board3d/board_shapes
+use src/board3d/free_board
+use src/board3d/scene_looks
+use src/board3d/piece_cache
+use src/board3d/paper_fold
+use src/board3d/park_scene
+use src/board3d/den_scene
+use src/board3d/mars_scene
+use src/board3d/scene_shrink
+use src/board3d/scene_fx
+use src/views/load_mark
+use src/store/data_folder
+
+const SceneArrows = 16
+
+const WholePass = 0
+const AsidePass = 1
+const SharpPass = 2
+
+const SceneTickNs: i64 = 33333333
+
+const StillFrameNs: i64 = 6000000
+const UploadFrameNs: i64 = 4000000
+
+const FieldMesh = 7
+const FrameMesh = 8
+const DotMesh = 9
+const RingMesh = 10
+const TubeMesh = 11
+const HeadMesh = 12
+const TableMesh = 13
+const CardMesh = 14
+const CaseMesh = 16
+const LcdMesh = 17
+const ButtonMesh = 18
+const FlatShaftMesh = 19
+const FlatHeadMesh = 20
+const FlatCapMesh = 21
+const FlatFrameMesh = 22
+const StoneFrameMesh = 23
+const MatFrameMesh = 24
+const DialMesh = 25
+const BallMesh = 26
+const FeltMesh = 27
+const BlockMesh = 28
+const BlockPlateMesh = 29
+const StandBaseMesh = 31
+const StandBoardMesh = 32
+const FxRootMesh = 34
+const FxMidMesh = 35
+const SceneMeshes = 36
+
+const CardsX: f32 = -6.32
+const CardsApart: f32 = 1.55
+const ClockX: f32 = 5.97
+
+const LiftHeight: f32 = 0.45
+const PickHeight: f32 = 0.16
+const PickRise: f32 = 0.2
+const BobHeight: f32 = 0.03
+const BobSeconds: f32 = 1.8
+const CarrySeconds: f32 = 0.18
+
+const FlingSpeed: f32 = 9.0
+const FlingLift: f32 = 0.25
+
+struct ArcArrow
+    from: Square
+    to: Square
+    color: Color
+    width: f32
+
+struct BoardShow
+    board: *Board
+    last: Move
+    selected: Square
+    lifted: bool
+    pointer: Vec2
+    hover: Square
+    targets: u64
+    captures: u64
+    target: Color
+    check: Square
+    slides: *PieceSlides
+    landed: Move
+    arrows: [SceneArrows]ArcArrow
+    arrow_count: int
+    flat_arrows: bool
+    flipped: bool
+    accent: Color
+    accent_ink: Color
+    page: Color
+    fonts: *GuiFonts
+    free: *FreeBoard
+    fx: SceneFx
+
+    fn arrow(from: Square, to: Square, color: Color, width: f32)
+        if arrow_count >= SceneArrows: return
+        arrows[arrow_count] = ArcArrow(from, to, color, width)
+        arrow_count += 1
+
+struct SceneQuality
+    samples: int = 4
+    scale: f32 = 1.0
+    shadow: int = 2048
+    aniso: f32 = 8.0
+
+struct BoardScene
+    ready: bool
+    carving: int
+    carver: u64
+    carved: [SceneMeshes]Mesh
+    upload_frame: int
+    room_frame: int
+    whole: bool
+    redo: bool
+    renderer: Renderer
+    shapes: [SceneMeshes]GpuMesh
+    made: [SceneMeshes]bool
+    meshes: [SceneMeshes]int
+    bends: ArrowBends
+    looks: SceneLooks
+    style: SceneStyle
+    placed: [MaxMen]PlacedPiece
+    placed_count: int
+    glass_layer: [MaxMen]int
+    marks: int
+    glow: int
+    table: int
+    camera: Camera
+    yaw: f32
+    pitch: f32
+    distance: f32
+    turned: f32
+    orbiting: bool
+    target: Texture
+    big: Texture
+    shrink: SceneShrink
+    shown: u64
+    place: Vec4
+    desk: DeskShow
+    props: DeskLook
+    look: f32
+    want_look: f32
+    rocker: f32
+    clock_stands: bool = true
+    quality: SceneQuality
+    data: *DataFolder
+    room: RoomScene
+    park: ParkScene
+    den: DenScene
+    mars: MarsScene
+    den_screen: DenScreen
+    den_made: bool
+    den_spot: int
+    den_close: bool
+    den_placed: bool
+    den_px: int = -1
+    den_py: int = -1
+    seat_eye: Vec3
+    seat_aim: Vec3
+    seat_fov: f32
+    looked_at: Vec3
+    backdrop: SceneBackdrop
+    aside_key: u64
+    aside_ns: i64
+    seen_height: f32
+    fx_look: SceneFxLook
+    ghosts: [7]int
+    fx_now: *SceneFx
+    folds: [7]int
+    fold_shapes: [7]GpuMesh
+    folded: bool
+    folding: int
+    folder: u64
+    paper: [7]Mesh
+    sways: [MaxMen]GooSway
+    sway_count: int
+    sway_ns: i64
+    swaying: bool
+    live: bool
+    reduced: bool
+    pick_id: int = -1
+    pick_ns: i64
+    picked_at: Vec3
+    carry_id: int = -1
+    carry_ns: i64
+    carry_from: Vec3
+    carried: bool
+    fling: Vec2
+    fling_at: Vec3
+    fling_ns: i64
+    easing: bool
+
+    fn ready_on(gpu: *Gpu)
+        if ready: return
+        if carving == 0: carve_meshes()
+        if carving == 1 or carving == 2: join(carver)
+        carving = 0
+        ready = true
+        let aside = gpu.aside_on
+        gpu.build_aside(true)
+        upload_carved(gpu)
+        stage(gpu)
+        gpu.build_aside(aside)
+        camera.init()
+        camera.near = 0.05
+        pitch = 0.84
+        distance = 11.8
+        yaw = arg_number("--scene-yaw", 0.0) as f32
+        pitch = arg_number("--scene-pitch", pitch) as f32
+        distance = arg_number("--scene-distance", distance) as f32
+
+    fn prepare(app: *DesktopApp) -> bool
+        if ready: return true
+        let gpu = &app.gpu
+        if carving == 0
+            carving = 1
+            carver = spawn(scene_carver, self)
+        if atomic_load(&carving) == 1: return false
+        if carving == 2
+            join(carver)
+            carving = 3
+        if carving == 3
+            if app.stats.built == upload_frame: return false
+            upload_frame = app.stats.built
+            if not upload_carved(gpu, UploadFrameNs): return false
+            carving = 4
+            return false
+        ready_on(gpu)
+        return false
+
+    fn room_ready(app: *DesktopApp) -> bool
+        if style.set == PaperSet and not fold_ready(&app.gpu): return false
+        let r = style.room
+        if r == NoRoom or r == CozyRoom and room.built or r == ParkRoom and park.built or r == MarsRoom and mars.built or r == DenRoom and den.built: return true
+        if r == CozyRoom and not room.parts_ready(): return false
+        if r == ParkRoom and not park.parts_ready(): return false
+        if r == MarsRoom and not mars.parts_ready(): return false
+        if r == DenRoom
+            if not den_made
+                den_made = true
+                den_screen.init(DenCoverCd)
+            if not den.parts_ready(den_screen.disc): return false
+        if app.stats.built == room_frame: return false
+        room_frame = app.stats.built
+        if r == CozyRoom: return room.carve(&app.gpu, UploadFrameNs)
+        if r == ParkRoom: return park.carve(&app.gpu, UploadFrameNs)
+        if r == MarsRoom: return mars.carve(&app.gpu, UploadFrameNs)
+        return den.carve(&app.gpu, &den_screen, UploadFrameNs)
+
+    fn carve_meshes()
+        var m: Mesh
+        m.init(65536, 262144)
+        var cache: PieceCache
+        var buf: [600]u8
+        var kept: cstr = null
+        if data: kept = data.path("pieces3d.bin", &buf).ptr as cstr
+        if kept: cache.open(kept, piece_cache_key(72))
+        for k in 0..SceneMeshes
+            m.clear()
+            let piece = k >= Pawn as int and k <= King as int
+            let read = piece and kept != null and cache.take(&m)
+            if not read and k == Pawn as int: add_pawn(&m, 72)
+            if not read and k == Knight as int: add_knight(&m, 72)
+            if not read and k == Bishop as int: add_bishop(&m, 72)
+            if not read and k == Rook as int: add_rook(&m, 72)
+            if not read and k == Queen as int: add_queen(&m, 72)
+            if not read and k == King as int: add_king(&m, 72)
+            if piece and kept: cache.keep(&m, not read)
+            if k == FieldMesh: add_board_field(&m)
+            if k == FrameMesh: add_frame_of(&m, WalnutBoard)
+            if k == FlatFrameMesh: add_frame_of(&m, TournamentBoard)
+            if k == StoneFrameMesh: add_frame_of(&m, MarbleBoard)
+            if k == MatFrameMesh: add_frame_of(&m, VinylBoard)
+            if k == DialMesh: add_clock_dial(&m)
+            if k == DotMesh: add_disc(&m, 1.0, 0.0, 40, true)
+            if k == RingMesh: add_torus(&m, 1.0, 0.08, 48, 8)
+            if k == TubeMesh: add_cylinder(&m, 1.0, 1.0, 24, false)
+            if k == BallMesh: add_sphere(&m, 1.0, 24, 12)
+            if k == HeadMesh: add_cone(&m, 1.0, 1.0, 16, true)
+            if k == TableMesh: add_plane(&m, 90.0, 90.0, 1, 1)
+            if k == CardMesh: add_tent_card(&m, 0.0, 0.5)
+            if k == CardMesh + 1: add_tent_card(&m, 0.5, 1.0)
+            if k == CaseMesh: add_clock_case(&m)
+            if k == LcdMesh: add_clock_lcd(&m)
+            if k == ButtonMesh: add_box(&m, Vec3(ButtonWide, ButtonTall, ButtonLong))
+            if k == FlatShaftMesh: add_flat_shaft(&m)
+            if k == FlatHeadMesh: add_flat_head(&m)
+            if k == FlatCapMesh: add_flat_cap(&m)
+            if k == FeltMesh: add_felt(&m)
+            if k == BlockMesh: add_block_body(&m)
+            if k == BlockPlateMesh: add_block_plates(&m, 0.0, 0.5)
+            if k == BlockPlateMesh + 1: add_block_plates(&m, 0.5, 1.0)
+            if k == StandBaseMesh: add_stand_base(&m)
+            if k == StandBoardMesh: add_stand_board(&m, 0.0, 0.5)
+            if k == StandBoardMesh + 1: add_stand_board(&m, 0.5, 1.0)
+            if k == FxRootMesh: add_glow_quad(&m, 0.0)
+            if k == FxMidMesh: add_glow_quad(&m, -0.5)
+            if m.vertex_count == 0: continue
+            copy_mesh(&carved[k], &m)
+        if kept: cache.close(kept)
+        m.free_all()
+
+    fn upload_carved(gpu: *Gpu, ns: i64 = 0) -> bool
+        let began = now_ns()
+        for k in 0..SceneMeshes
+            if carved[k].vertex_count == 0: continue
+            if ns > 0 and now_ns() - began > ns: return false
+            shapes[k] = gpu.upload_mesh(&carved[k])
+            made[k] = true
+            carved[k].free_all()
+            carved[k].vertex_count = 0
+        return true
+
+    fn stage(gpu: *Gpu)
+        crash_note("3d scene staged")
+        renderer.init(gpu, LinearAces, quality.samples)
+        renderer.exposure = 0.75
+        for k in 0..SceneMeshes
+            if not made[k]: continue
+            meshes[k] = renderer.add_mesh(&shapes[k])
+            let casting = k <= FrameMesh or k == TubeMesh or k == HeadMesh or k == BallMesh or k == FeltMesh or k >= CardMesh and k <= ButtonMesh and k != LcdMesh or k >= FlatFrameMesh and k <= MatFrameMesh or k >= BlockMesh
+            if casting: renderer.casts[meshes[k]] = 1
+        for k in Pawn as int..King as int + 1: ghosts[k] = renderer.add_mesh(&shapes[k])
+        if folded
+            for k in Pawn as int..King as int + 1: folds[k] = renderer.add_mesh(&fold_shapes[k])
+        looks.init(gpu, quality.aniso)
+        fx_look.init(&renderer, &looks.field)
+        props.init(&renderer)
+        props.aniso = quality.aniso
+        var flat = MaterialDesc.three(shader("engine/shaders/three.hlsl", fragment: "unlit_ps"))
+        flat.blend = Glaze
+        flat.depth = TestOnly
+        marks = renderer.add_material_desc(&flat)
+        renderer.materials[marks].order = 200
+        renderer.materials[marks].no_fog = true
+        var lit = MaterialDesc.three(shader("shaders/arrow3d.hlsl", fragment: "arrow_ps"))
+        glow = renderer.add_material_desc(&lit)
+        renderer.materials[glow].no_fog = true
+        var matte = MaterialDesc.three(shader("engine/shaders/three.hlsl", fragment: "standard_ps"))
+        table = renderer.add_material_desc(&matte)
+        renderer.materials[table].values[1] = Vec4(0.85, 0.0, 0.0, 1.0)
+        light_from(0.0)
+        sun_setup()
+
+    fn sun_setup()
+        renderer.exposure = 0.75
+        renderer.lighting.sun_color = Vec4(1.6, 1.5, 1.36, 0.0)
+        renderer.lighting.sky_color = Vec4(0.5, 0.47, 0.43, 0.0)
+        renderer.lighting.ground_color = Vec4(0.16, 0.12, 0.09, 0.0)
+        renderer.lighting.lamp_room = Vec4(0.0, 0.0, 0.0, 0.0)
+        renderer.lighting.sun_through = Vec4(0.0, 0.0, 0.0, 0.0)
+        for k in 0..2
+            let s = &renderer.shadows[k]
+            s.on = k == 0
+            s.every_frame = true
+            s.target = Vec3(0.0, 0.0, 0.0)
+            s.left = -8.5
+            s.right = 8.5
+            s.bottom = -8.5
+            s.top = 8.5
+            s.near = 1.0
+            s.far = 30.0
+            s.width = quality.shadow
+            s.height = quality.shadow
+            s.bias = -0.0001
+            s.normal_bias = 0.012
+            s.radius = k == 0 ? 2.0 : 2.8
+        renderer.shadows[2].on = false
+
+    fn surrounded() -> bool
+        return style.room != NoRoom
+
+    fn ticking() -> bool
+        return surrounded() or style.set == GooSet
+
+    fn fold_ready(gpu: *Gpu) -> bool
+        if folded: return true
+        if folding == 0
+            folding = 1
+            folder = spawn(paper_folder, self)
+        if atomic_load(&folding) == 1: return false
+        fold(gpu)
+        return true
+
+    fn fold(gpu: *Gpu)
+        if folded: return
+        if folding == 0: fold_meshes()
+        else: join(folder)
+        folding = 0
+        folded = true
+        for k in Pawn as int..King as int + 1
+            fold_shapes[k] = gpu.upload_mesh(&paper[k])
+            folds[k] = renderer.add_mesh(&fold_shapes[k])
+            paper[k].free_all()
+
+    fn fold_meshes()
+        var m: Mesh
+        m.init(65536, 262144)
+        var cache: PieceCache
+        var buf: [600]u8
+        var kept: cstr = null
+        if data: kept = data.path("pieces3d.bin", &buf).ptr as cstr
+        if kept: cache.open(kept, piece_cache_key(72))
+        for k in Pawn as int..King as int + 1
+            m.clear()
+            if not (kept != null and cache.take(&m))
+                if k == Pawn as int: add_pawn(&m, 72)
+                if k == Knight as int: add_knight(&m, 72)
+                if k == Bishop as int: add_bishop(&m, 72)
+                if k == Rook as int: add_rook(&m, 72)
+                if k == Queen as int: add_queen(&m, 72)
+                if k == King as int: add_king(&m, 72)
+            fold_paper(&m, PaperFolds[k])
+            copy_mesh(&paper[k], &m)
+        if kept: cache.close(kept)
+        m.free_all()
+
+    fn piece_mesh(p: *PlacedPiece) -> int
+        if p.ghost: return ghosts[p.kind]
+        if style.set == PaperSet and folded: return folds[p.kind]
+        return meshes[p.kind]
+
+    fn piece_matrix(p: *PlacedPiece, flipped: bool) -> Mat4
+        let wide = 1.0 + p.squash * 0.5
+        let tall = 1.0 - p.squash
+        var m = Mat4.trs(Vec3(p.at.x, flipped ? -p.at.y : p.at.y, p.at.z), Quat.axis_angle(Vec3.up(), p.angle), Vec3(wide, flipped ? -tall : tall, wide))
+        m.c1.x += p.lean.x
+        m.c1.z += p.lean.y
+        return m
+
+    fn glass_layers() -> int
+        var far: [MaxMen]f32
+        var box: [MaxMen]Vec4
+        var order: [MaxMen]int
+        for i in 0..placed_count
+            let p = &placed[i]
+            let kind = p.kind as Kind
+            let half = foot_width(kind)
+            let tall = piece_height(kind)
+            var b = Vec4(1.0e9, 1.0e9, -1.0e9, -1.0e9)
+            for c in 0..8
+                let s = looks.view.project_point(p.at + Vec3((c & 1) == 0 ? -half : half, (c & 2) == 0 ? 0.0 : tall, (c & 4) == 0 ? -half : half))
+                b = Vec4(min(b.x, s.x), min(b.y, s.y), max(b.z, s.x), max(b.w, s.y))
+            box[i] = b
+            far[i] = (looks.view * Vec4.of(p.at, 1.0)).w
+            var j = i
+            while j > 0 and far[order[j - 1]] < far[i]
+                order[j] = order[j - 1]
+                j -= 1
+            order[j] = i
+        var layers = 1
+        for a in 0..placed_count
+            let i = order[a]
+            let b = box[i]
+            let reach = (b.z - b.x) * 0.5
+            var l = 0
+            for c in 0..a
+                let o = box[order[c]]
+                if o.x < b.z + reach and o.z > b.x - reach and o.y < b.w + reach and o.w > b.y - reach: l = max(l, glass_layer[order[c]] + 1)
+            glass_layer[i] = min(l, GlassLayers - 1)
+            layers = max(layers, glass_layer[i] + 1)
+        return layers
+
+    fn sway(on: bool)
+        if style.set != GooSet or not on
+            swaying = false
+            return
+        let now = now_ns()
+        let dt = clamp((now - sway_ns) as f32 / 1.0e9, 0.0, 0.05)
+        sway_ns = now
+        var next: [MaxMen]GooSway
+        var taken: [MaxMen]bool
+        for j in 0..sway_count: taken[j] = false
+        swaying = false
+        for i in 0..placed_count
+            let p = &placed[i]
+            let id = p.kind * 2 + (p.tint.r > 0.5 ? 1 : 0)
+            var w = GooSway(id, p.at, Vec3(0.0, 0.0, 0.0), Vec2(0.0, 0.0), Vec2(0.0, 0.0), 0.0, 0.0)
+            var best = -1
+            var near: f32 = 1.6
+            for j in 0..sway_count
+                if taken[j] or sways[j].id != id: continue
+                let d = (sways[j].at - p.at).length()
+                if d < near
+                    near = d
+                    best = j
+            let sag = p.at.y > LiftHeight * 0.5 ? -GooSag : 0.0
+            if best >= 0 and dt > 0.0
+                taken[best] = true
+                let was = sways[best]
+                w.speed = (p.at - was.at) * (1.0 / dt)
+                var aim = Vec2(w.speed.x, w.speed.z) * -GooDrag
+                if aim.length() > GooMostLean: aim = aim * (GooMostLean / aim.length())
+                w.lean_speed = was.lean_speed + ((aim - was.lean) * GooSpring - was.lean_speed * GooDamping) * dt
+                w.lean = was.lean + w.lean_speed * dt
+                if w.lean.length() > GooMostLean * 1.5: w.lean = w.lean * (GooMostLean * 1.5 / w.lean.length())
+                w.squash_speed = was.squash_speed + (w.speed.y - was.speed.y) * GooKick + ((sag - was.squash) * GooSquashSpring - was.squash_speed * GooSquashDamping) * dt
+                w.squash = clamp(was.squash + w.squash_speed * dt, -0.15, 0.25)
+            else: w.squash = sag
+            if w.lean.length() > 0.002 or w.lean_speed.length() > 0.02 or abs(w.squash - sag) > 0.002 or abs(w.squash_speed) > 0.02 or w.speed.length() > 0.001: swaying = true
+            p.lean = w.lean
+            p.squash = w.squash
+            next[i] = w
+        for i in 0..placed_count: sways[i] = next[i]
+        sway_count = placed_count
+
+    fn draw_drops(r: *Renderer)
+        let drop = looks.goo_drop(r)
+        let ball = meshes[BallMesh]
+        let upright = Quat.identity()
+        let felt = style.felt == NoFelt ? 0.0 : FeltThick
+        for i in 0..placed_count
+            let p = &placed[i]
+            if p.ghost: continue
+            let wide = foot_scale(p.kind) * 0.27 * (1.0 + p.squash * 0.5)
+            let lift = p.at.y - felt
+            if lift < 0.01
+                r.draw_with(drop, ball, Mat4.trs(Vec3(p.at.x, lift, p.at.z), upright, Vec3(wide * 1.12, 0.014, wide * 1.12)), p.tint)
+                continue
+            if lift < 0.03: continue
+            let long = min(lift * 0.55, 0.28)
+            let top = p.at + Vec3(p.lean.x * 0.05, 0.0, p.lean.y * 0.05)
+            r.draw_with(drop, ball, Mat4.trs(top - Vec3(0.0, long * 0.5, 0.0), upright, Vec3(0.03, long * 0.5 + 0.02, 0.03)), p.tint)
+            r.draw_with(drop, ball, Mat4.trs(top - Vec3(0.0, long, 0.0), upright, Vec3.splat(0.04)), p.tint)
+
+    fn set_quality(gpu: *Gpu, q: SceneQuality)
+        let restage = q.samples != quality.samples or q.aniso != quality.aniso
+        if not restage and q.scale == quality.scale and q.shadow == quality.shadow: return
+        quality = q
+        shown = 0
+        if not ready: return
+        if restage
+            unstage(gpu)
+            stage(gpu)
+        renderer.shadows[0].width = q.shadow
+        renderer.shadows[0].height = q.shadow
+
+    fn most_samples(gpu: *Gpu) -> int
+        return gpu.most_samples(HdrFormat, 8)
+
+    fn unstage(gpu: *Gpu)
+        room.unstage()
+        park.unstage()
+        mars.unstage()
+        den.unstage()
+        backdrop.unstage()
+        aside_key = 0
+        looks.release(gpu)
+        props.release(gpu)
+        renderer.release()
+        renderer = Renderer()
+
+    fn steer(app: *DesktopApp, hovered: bool)
+        if style.room == DenRoom
+            steer_den(app, hovered)
+            return
+        want_look = 0.0
+        let keys = &app.pointer
+        if not app.ui.wants_text and not keys.ctrl
+            if keys.down(A) and has_look(false): want_look -= 1.0
+            if keys.down(D) and has_look(true): want_look += 1.0
+        if has_arg("--desk-look"): want_look = arg_number("--desk-look", 0.0) as f32
+        let m = &app.pointer.mouse
+        if orbiting
+            if not m.down(MouseLeft): orbiting = false
+            else
+                yaw -= m.dx * 0.006
+                pitch = clamp(pitch + m.dy * 0.006, 0.2, 1.45)
+        if hovered and m.wheel != 0.0: distance = clamp(distance * pow(0.9, m.wheel), 6.0, 22.0)
+
+    fn steer_den(app: *DesktopApp, hovered: bool)
+        orbiting = false
+        want_look = 0.0
+        let keys = &app.pointer
+        if not app.ui.wants_text and not keys.ctrl
+            if keys.pressed(A)
+                if not den_close: den_spot = max(den_spot - 1, -2)
+                den_close = false
+            if keys.pressed(D)
+                if not den_close: den_spot = min(den_spot + 1, 2)
+                den_close = false
+            if keys.pressed(W)
+                den_spot = 0
+                den_close = true
+            if keys.pressed(S): den_close = false
+        let m = &app.pointer.mouse
+        if hovered and m.wheel > 0.0
+            den_spot = 0
+            den_close = true
+        if hovered and m.wheel < 0.0: den_close = false
+        den_px = -1
+        den_py = -1
+        if hovered and place.z > 0.0
+            let (x, y, on) = den_pixel(camera.ray_through(m.x - place.x, m.y - place.y, place.z, place.w))
+            if on
+                den_px = x
+                den_py = y
+
+    fn place_den(dt: f32, still: bool) -> bool
+        if not den_placed
+            den_spot = clamp(arg_int("--den-spot", 0) as int, -2, 2)
+            den_close = has_arg("--den-close")
+        let eye = den_eye(den_spot, den_close)
+        let aim = den_look(den_spot, den_close)
+        let k = still or not den_placed ? 1.0 : min(1.0, dt * 4.0)
+        den_placed = true
+        let tall = place.w / max(place.z, 1.0)
+        let fov = den_close ? 2.0 * max(0.37, atan(tan(0.47) * tall)) : max(0.86, 2.0 * atan(tan(0.62) * tall))
+        seat_eye = seat_eye + (eye - seat_eye) * k
+        seat_aim = seat_aim + (aim - seat_aim) * k
+        seat_fov = seat_fov + (fov - seat_fov) * k
+        if (eye - seat_eye).length < 0.002 and (aim - seat_aim).length < 0.002 and abs(fov - seat_fov) < 0.0005
+            seat_eye = eye
+            seat_aim = aim
+            seat_fov = fov
+        camera.position = seat_eye
+        camera.look_at(seat_aim)
+        camera.fov_y = seat_fov
+        looked_at = seat_aim
+        return (eye - seat_eye).length > 0.0 or (aim - seat_aim).length > 0.0 or fov != seat_fov
+
+    fn place_camera(flipped: bool, dt: f32, still: bool) -> bool
+        if style.room == DenRoom: return place_den(dt, still)
+        let want = flipped ? Pi : 0.0
+        turned = still or abs(want - turned) < 0.001 ? want : turned + (want - turned) * min(1.0, dt * 9.0)
+        look = still or abs(want_look - look) < 0.001 ? want_look : look + (want_look - look) * min(1.0, dt * 8.0)
+        let rock: f32 = desk.clock.up == White ? 0.0 : 1.0
+        rocker = still or abs(rock - rocker) < 0.002 ? rock : rocker + (rock - rocker) * min(1.0, dt * 22.0)
+        let a = yaw + turned
+        var aim = Vec3(-sin(a), 0.0, -cos(a)) * 0.35 + Vec3(0.0, -0.3, 0.0)
+        aim = aim + Vec3(arg_number("--scene-x", 0.0) as f32, arg_number("--scene-y", 0.0) as f32, arg_number("--scene-z", 0.0) as f32)
+        var eye = aim + Vec3(sin(a) * cos(pitch), sin(pitch), cos(a) * cos(pitch)) * distance
+        if look != 0.0
+            let (over, from) = look_pose(a, look > 0.0)
+            let k = smoothstep(0.0, 1.0, abs(look))
+            aim = aim + (over - aim) * k
+            eye = eye + (from - eye) * k
+        camera.position = eye
+        camera.look_at(aim)
+        looked_at = aim
+        light_from(a)
+        return turned != want or look != want_look or rocker != rock
+
+    fn light_from(a: f32)
+        let sun_way = Quat.axis_angle(Vec3.up(), a) * Vec3(-0.6, 1.3, 0.9).normalized
+        renderer.lighting.sun_direction = Vec4.of(-sun_way, 0.0)
+        renderer.shadows[0].position = sun_way * 14.0
+        renderer.shadows[1].position = sun_way * 14.0
+
+    fn clock_on_right(a: f32) -> bool
+        return (cos(a) >= 0.0) != style.clock_left
+
+    fn clock_way() -> f32
+        return style.clock_left ? -1.0 : 1.0
+
+    fn has_look(right: bool) -> bool
+        if right == clock_on_right(yaw + turned): return clock_stands
+        return desk.cards[0].shown or desk.cards[1].shown
+
+    fn look_pose(a: f32, right: bool) -> (Vec3, Vec3)
+        let seat = Vec3(sin(a), 0.0, cos(a))
+        let w = clock_way()
+        if right == clock_on_right(a)
+            let at = Vec3((ClockX - 0.25) * w, 0.2 - depth(), 0.0)
+            return at, at + Vec3(-3.3 * w, 3.0, 0.0) + seat * 2.1
+        let at = Vec3((CardsX + 0.3) * w, 0.35 - depth(), 0.0)
+        return at, at + seat * 4.9 + Vec3(1.4 * w, 2.7, 0.0)
+
+    fn clock_under(p: Vec2) -> bool
+        if place.z <= 0.0 or not clock_stands or style.room == DenRoom: return false
+        let ray = camera.ray_through(p.x - place.x, p.y - place.y, place.z, place.w)
+        let x = ClockX * clock_way()
+        let low = Vec3(x - ClockDeep * 0.5, -depth(), -ClockLong * 0.5)
+        let high = Vec3(x + ClockDeep * 0.5, ClockTall + ButtonUp - depth(), ClockLong * 0.5)
+        var near: f32 = 0.0
+        var far: f32 = 1.0e9
+        for k in 0..3
+            let o = k == 0 ? ray.origin.x : k == 1 ? ray.origin.y : ray.origin.z
+            let d = k == 0 ? ray.direction.x : k == 1 ? ray.direction.y : ray.direction.z
+            let lo = k == 0 ? low.x : k == 1 ? low.y : low.z
+            let hi = k == 0 ? high.x : k == 1 ? high.y : high.z
+            if abs(d) < 0.000001
+                if o < lo or o > hi: return false
+                continue
+            let t0 = (lo - o) / d
+            let t1 = (hi - o) / d
+            near = max(near, min(t0, t1))
+            far = min(far, max(t0, t1))
+        return near <= far
+
+    fn square_at(p: Vec2, board: *Board, skip: Square) -> Square
+        if place.z <= 0.0: return Square.none
+        if style.room == DenRoom
+            let (x, y, on) = den_pixel(camera.ray_through(p.x - place.x, p.y - place.y, place.z, place.w))
+            let sq = on ? den_screen.square_at(x, y) : -1
+            return sq < 0 ? Square.none : sq as Square
+        let ray = camera.ray_through(p.x - place.x, p.y - place.y, place.z, place.w)
+        if ray.direction.y < -0.0001
+            let hit = ray.at(-ray.origin.y / ray.direction.y)
+            let under = square_under(hit.x, hit.z)
+            if under != Square.none: return under
+        var best: f32 = 1.0e9
+        var found = Square.none
+        for sq in 0..64
+            let s = sq as Square
+            let piece = board.squares[s]
+            if piece == NoPiece or s == skip: continue
+            let t = ray_piece(ray, square_centre(s), piece_height(piece.kind()))
+            if t >= 0.0 and t < best
+                best = t
+                found = s
+        return found
+
+    fn man_at(p: Vec2, f: *FreeBoard) -> int
+        if place.z <= 0.0: return -1
+        let ray = camera.ray_through(p.x - place.x, p.y - place.y, place.z, place.w)
+        if ray.direction.y < -0.0001
+            let hit = ray.at(-ray.origin.y / ray.direction.y)
+            let under = square_under(hit.x, hit.z)
+            let i = under != Square.none ? f.on(under) : -1
+            if i >= 0 and i != f.held: return i
+        var best: f32 = 1.0e9
+        var found = -1
+        for i in 0..f.count
+            if i == f.held: continue
+            let m = &f.men[i]
+            let foot = Vec3(m.shown.x, m.square != Square.none ? 0.0 : m.low ? ground() : -depth(), m.shown.y)
+            let t = ray_piece(ray, foot, piece_height(m.piece.kind()))
+            if t >= 0.0 and t < best
+                best = t
+                found = i
+        return found
+
+    fn landing(p: Vec2, from: Vec3, v: Vec2) -> FreeLanding
+        var none: FreeLanding
+        if place.z <= 0.0: return none
+        if v.length > FlingSpeed: return thrown_to(from, v)
+        let ray = camera.ray_through(p.x - place.x, p.y - place.y, place.z, place.w)
+        if ray.direction.y > -0.0001: return none
+        let hit = ray.at(-ray.origin.y / ray.direction.y)
+        let under = square_under(hit.x, hit.z)
+        if under != Square.none: return FreeLanding(square: under, spot: Vec2(hit.x, hit.z), ok: true)
+        let low = ray.at((-depth() - ray.origin.y) / ray.direction.y)
+        let spot = Vec2(low.x, low.z)
+        if off_table(spot): return thrown_to(from, v)
+        return FreeLanding(spot: spot, ok: table_room(spot))
+
+    fn thrown_to(from: Vec3, w: Vec2) -> FreeLanding
+        let up = w.length * FlingLift
+        let edge = 4.0 + BoardFrame
+        for level in 0..3
+            let y = level == 0 ? 0.0 : level == 1 ? -depth() : ground()
+            let t = (up + sqrt(max(up * up + 2.0 * FallPull * (from.y - y), 0.0))) / FallPull
+            let at = Vec2(from.x, from.z) + w * t
+            if level == 0
+                if abs(at.x) > edge or abs(at.y) > edge: continue
+                let sq = square_under(at.x, at.y)
+                return FreeLanding(square: sq, spot: at, ok: sq != Square.none, thrown: true, time: t)
+            if level == 1
+                if off_table(at): continue
+                return FreeLanding(spot: at, ok: table_room(at), thrown: true, time: t)
+            return FreeLanding(spot: at, low: true, ok: true, thrown: true, time: t)
+        var none: FreeLanding
+        return none
+
+    fn off_table(at: Vec2) -> bool
+        var reach = Vec2(0.52, 0.36)
+        if style.room == NoRoom: return false
+        if style.room == ParkRoom: reach = Vec2(0.5, 0.42)
+        if style.room == MarsRoom: reach = Vec2(0.5, 0.38)
+        return abs(at.x) > reach.x * Metre - 0.35 or abs(at.y) > reach.y * Metre - 0.35
+
+    fn table_room(at: Vec2) -> bool
+        let edge = 4.0 + BoardFrame + 0.3
+        if abs(at.x) < edge and abs(at.y) < edge: return false
+        let w = clock_way()
+        if clock_stands and abs(at.x - ClockX * w) < ClockDeep * 0.5 + 0.35 and abs(at.y) < ClockLong * 0.5 + 0.35: return false
+        for k in 0..2
+            let z = k == 0 ? CardsApart : -CardsApart
+            if desk.cards[k].shown and abs(at.x - CardsX * w) < CardWidth * 0.5 + 0.35 and abs(at.y - z) < CardSpread + 0.35: return false
+        return true
+
+    fn ground() -> f32
+        let lift = BoardDepth - depth()
+        if style.room == ParkRoom: return ParkGround * Metre + lift
+        if style.room == MarsRoom: return MarsGround * Metre + lift
+        return (RoomFloor + 0.012) * Metre + lift
+
+    fn fling_speed() -> Vec2
+        if now_ns() - fling_ns > 45000000: return Vec2(0.0, 0.0)
+        return fling
+
+    fn screen_of(sq: Square) -> Vec2
+        var middle = square_centre(sq)
+        if style.room == DenRoom
+            let (x, y) = den_screen.square_xy(sq as int)
+            middle = den_glass_at((x + DenSquare / 2) as f32, (y + DenSquare / 2) as f32)
+        let (seen, at) = camera.screen_point(middle, place.z, place.w)
+        if not seen: return Vec2(place.x + place.z * 0.5, place.y + place.w * 0.5)
+        return Vec2(place.x + at.x, place.y + at.y)
+
+    fn show(app: *DesktopApp, s: *BoardShow, room: Vec4, board_size: f32)
+        place = room
+        if not prepare(app) or not room_ready(app)
+            desk.clear()
+            scene_loading(app, s, room)
+            return
+        app.gpu.build_aside(true)
+        let w = max((room.z * app.scale * quality.scale) as int, 8)
+        let h = max((room.w * app.scale * quality.scale) as int, 8)
+        if fit_drawn(&app.gpu, &target, &big, max((room.z * app.scale) as int, 8), max((room.w * app.scale) as int, 8), w, h): shown = 0
+        camera.fov_y = 2.0 * atan(tan(0.45) * room.w / max(board_size, 1.0))
+        let moving = place_camera(s.flipped, app.ui.dt, app.ui.still)
+        let t = s.slides.progress()
+        var key = hash_word(show_key(s, w | h << 16, t), (camera.fov_y * 100000.0) as i64 as u64)
+        key = hash_word(hash_word(key, desk.clock.key()), hash_word(desk.cards[0].key(), desk.cards[1].key()))
+        key = hash_word(key, ((look * 10000.0) as i64 as u64) << 32 | (rocker * 10000.0) as i64 as u64)
+        key = hash_word(key, s.fx.key())
+        if style.room == DenRoom
+            key = hash_word(key, (den_px + 1) as u64 | ((den_py + 1) as u64) << 16 | ((seat_fov * 100000.0) as i64 as u64) << 32)
+            key = hash_word(key, ((seat_eye.x * 1000.0) as i64 as u64) << 42 ^ ((seat_eye.y * 1000.0) as i64 as u64) << 21 ^ (seat_eye.z * 1000.0) as i64 as u64)
+            key = hash_word(key, ((seat_aim.x * 1000.0) as i64 as u64) << 42 ^ ((seat_aim.y * 1000.0) as i64 as u64) << 21 ^ (seat_aim.z * 1000.0) as i64 as u64)
+        if ticking(): key = hash_word(key, (now_ns() / SceneTickNs) as u64)
+        if swaying or easing: key = hash_word(key, now_ns() as u64)
+        if redo and app.gpu.aside_waiting() == 0
+            redo = false
+            shown = 0
+        if key != shown
+            shown = key
+            live = true
+            reduced = app.ui.still
+            easing = false
+            carried = false
+            let missed = aside_missed
+            draw_into(app, s, t, &target, &big)
+            redo = aside_missed != missed
+            if not redo: whole = true
+            if not easing: pick_id = -1
+            if not carried: carry_id = -1
+            live = false
+        desk.clear()
+        app.gpu.build_aside(false)
+        if not whole
+            scene_loading(app, s, room)
+            return
+        if room.y <= TabRowHeight + CommandBarHeight + 0.5
+            let edge = (room.z - 1.0) / max(room.z, 1.0)
+            app.ui.texture(&target, room.x, room.y, room.z - 1.0, room.w, uv: Vec4(0.0, 0.0, edge, 1.0), corners: Vec4(0.0, PageCurve - 1.0, 0.0, 0.0))
+        else: app.ui.texture(&target, room.x, room.y, room.z, room.w)
+        if moving or t < 1.0 or s.free and s.free.moving or swaying or easing: app.ui.wake_in(0.0)
+        elif ticking(): app.ui.wake_in((SceneTickNs - now_ns() % SceneTickNs) as f32 / 1.0e9)
+
+    fn scene_loading(app: *DesktopApp, s: *BoardShow, room: Vec4)
+        app.ui.rect(room.x, room.y, room.z, room.w, s.page)
+        load_spinner(&app.ui, room.x + room.z * 0.5, room.y + room.w * 0.5, 28.0, load_ink(s.page, 0.5))
+        app.ui.wake_in(0.03)
+
+    fn draw_still(app: *DesktopApp, s: *BoardShow, still: *SceneStill, w: int, h: int, eye: Vec3, aim: Vec3, fov: f32, clock: bool, styled: SceneStyle, scale: f32 = 1.0, pace: *StillPace = null, sized: int = 1) -> bool
+        if not prepare(app) or still.missed and app.gpu.aside_waiting() > 0
+            app.ui.wake_in(0.03)
+            desk.clear()
+            return still.key != 0
+        let kept = style
+        style = styled
+        if not room_ready(app)
+            style = kept
+            app.ui.wake_in(0.03)
+            desk.clear()
+            return still.key != 0
+        let dw = max((w as f32 * scale) as int, 8)
+        let dh = max((h as f32 * scale) as int, 8)
+        let stands = clock_stands
+        clock_stands = clock
+        var key = hash_word(show_key(s, dw | dh << 16, 1.0), hash_word(desk.clock.key(), hash_word(desk.cards[0].key(), desk.cards[1].key())))
+        key = hash_word(key, hash_word(((eye.x * 1000.0) as i64 as u64) << 32 | ((eye.y * 1000.0) as i64 as u64) & 0xFFFFFFFF, ((eye.z * 1000.0) as i64 as u64) << 32 | (fov * 100000.0) as i64 as u64))
+        key = hash_word(key, ((aim.x * 1000.0) as i64 as u64) << 42 ^ ((aim.y * 1000.0) as i64 as u64) << 21 ^ (aim.z * 1000.0) as i64 as u64)
+        key = hash_word(key, w as u64 | (h as u64) << 16)
+        if key != still.key and (not pace or pace.lets())
+            let into = still.key == 0 ? &still.target : &still.next
+            fit_drawn(&app.gpu, into, &still.big, w, h, dw, dh)
+            shown = 0
+            let px = den_px
+            den_px = -1
+            camera.fov_y = fov
+            camera.position = eye
+            camera.look_at(aim)
+            looked_at = aim
+            light_from(atan2(eye.x - aim.x, eye.z - aim.z))
+            let missed = aside_missed
+            app.gpu.build_aside(true)
+            renderer.use_targets(sized)
+            draw_into(app, s, 1.0, into, &still.big)
+            renderer.use_targets(0)
+            app.gpu.build_aside(false)
+            den_px = px
+            still.missed = aside_missed != missed
+            if not still.missed: still.take(key, into)
+        clock_stands = stands
+        style = kept
+        desk.clear()
+        return still.key != 0
+
+    fn draw_into(app: *DesktopApp, s: *BoardShow, t: f32, into: *Texture, big: *Texture)
+        if style.room == DenRoom
+            draw_den(app, s, into, big)
+            return
+        den.lens_on(&renderer, false)
+        if style.set == PaperSet: fold(&app.gpu)
+        if style.room == CozyRoom
+            room.carve(&app.gpu)
+            room.stage(&renderer)
+        if style.room == ParkRoom
+            park.carve(&app.gpu)
+            park.stage(&renderer)
+        if style.room == MarsRoom
+            mars.carve(&app.gpu)
+            mars.stage(&renderer)
+        room.lens_on(&renderer, style.room == CozyRoom)
+        park.lens_on(&renderer, style.room == ParkRoom)
+        mars.lens_on(&renderer, style.room == MarsRoom)
+        if surrounded()
+            backdrop.carve(&app.gpu)
+            backdrop.stage(&renderer)
+        let back = toned_back(s.page, 0.75)
+        renderer.fog = SceneFog(surrounded() ? NoFog : LinearFog, Color(to_srgb(back.r), to_srgb(back.g), to_srgb(back.b), 1.0), 16.0, 42.0, 0.0)
+        var frame = app.gpu.offscreen_frame()
+        place_pieces(s, t)
+        let drawn = big.handle ? big : into
+        let aspect = drawn.width as f32 / max(drawn.height, 1) as f32
+        looks.view = camera.projection(aspect) * camera.view
+        if board_mirrors(style.board)
+            renderer.fit(&looks.mirror, drawn.width, drawn.height, HdrFormat)
+            let (upright, flipped) = looks.set(&renderer, style.set)
+            looks.show_board(&renderer, style.set, style.board)
+            for i in 0..placed_count
+                let p = &placed[i]
+                renderer.draw_with(flipped, piece_mesh(p), piece_matrix(p, true), p.tint)
+            let (felt, felt_twin) = looks.felt(&renderer)
+            draw_felts(felt_twin, true)
+            var kept: [MaxShadowMaps]bool
+            for k in 0..MaxShadowMaps
+                kept[k] = renderer.shadows[k].on
+                renderer.shadows[k].on = false
+            renderer.sky = Color(0.0, 0.0, 0.0, 0.0)
+            renderer.behind_order = see_through(style.set) ? GlassOrder : 0
+            renderer.behind_layers = 1
+            renderer.render_lit_into(&frame, &camera, &looks.mirror)
+            for k in 0..MaxShadowMaps: renderer.shadows[k].on = kept[k]
+        if surrounded()
+            var h = hash_word(style.key(), (into.width | into.height << 16) as u64)
+            h = hash_word(h, ((camera.position.x * 1000.0) as i64 as u64) << 42 ^ ((camera.position.y * 1000.0) as i64 as u64) << 21 ^ (camera.position.z * 1000.0) as i64 as u64)
+            h = hash_word(h, ((camera.rotation.x * 100000.0) as i64 as u64) << 48 ^ ((camera.rotation.y * 100000.0) as i64 as u64) << 32 ^ ((camera.rotation.z * 100000.0) as i64 as u64) << 16 ^ (camera.fov_y * 100000.0) as i64 as u64)
+            let now = now_ns()
+            if h != aside_key or now - aside_ns >= SceneTickNs or not backdrop.texture.handle
+                aside_key = h
+                aside_ns = now
+                backdrop.fit(&renderer, drawn.width, drawn.height)
+                seen_height = backdrop.texture.height as f32
+                draw_scene(s, t, AsidePass)
+                scene_lens().aside(true)
+                renderer.render_aside_into(&frame, &camera, &backdrop.texture)
+                scene_lens().aside(false)
+            seen_height = drawn.height as f32
+            draw_scene(s, t, SharpPass)
+            backdrop.hold_shadows(&renderer, 1)
+        else: draw_scene(s, t)
+        renderer.sky = back
+        props.print(&app.gpu, &app.ui, &renderer, &frame, &desk, s.fonts, s.accent, s.accent_ink, style.card)
+        if big.handle
+            renderer.render_into(&frame, &camera, big)
+            shrink.run(&app.gpu, &frame, big, into)
+        else: renderer.render_into(&frame, &camera, into)
+        if surrounded(): backdrop.free_shadows(&renderer)
+        frame.submit()
+        app.present_now()
+
+    fn draw_den(app: *DesktopApp, s: *BoardShow, into: *Texture, big: *Texture)
+        if not den_made
+            den_made = true
+            den_screen.init(DenCoverCd)
+        den_screen.present(s.board, s.last, s.selected, s.targets, s.captures, s.check, s.flipped, s.lifted, &desk)
+        den_screen.point(den_px, den_py)
+        den.carve(&app.gpu, &den_screen)
+        den.stage(&renderer)
+        room.lens_on(&renderer, false)
+        park.lens_on(&renderer, false)
+        mars.lens_on(&renderer, false)
+        den.lens_on(&renderer, true)
+        renderer.fog = SceneFog(NoFog, Color(0.0, 0.0, 0.0, 1.0), 16.0, 42.0, 0.0)
+        renderer.sky = Color(0.0, 0.0, 0.0, 1.0)
+        var frame = app.gpu.offscreen_frame()
+        den.show(&app.gpu, &frame, &den_screen)
+        let drawn = big.handle ? big : into
+        let now = ((now_ns() % 3600000000000) as f64 / 1.0e9) as f32
+        den.focus((looked_at - camera.position).length, drawn.height as f32, now)
+        den.draw(&renderer, &camera, now)
+        if big.handle
+            renderer.render_into(&frame, &camera, big)
+            shrink.run(&app.gpu, &frame, big, into)
+        else: renderer.render_into(&frame, &camera, into)
+        frame.submit()
+        app.present_now()
+
+    fn show_key(s: *BoardShow, px: int, t: f32) -> u64
+        var h = hash_word(0x9E3779B97F4A7C15, s.board.key)
+        h = hash_word(h, s.last as u64 | (s.selected as u64) << 16 | (s.hover as u64) << 24 | (s.check as u64) << 32 | (s.landed as u64) << 40)
+        h = hash_word(h, s.targets)
+        h = hash_word(h, s.captures ^ pack_color(s.target) as u64)
+        h = hash_word(h, (s.lifted ? 1 : 0) as u64 | (px as u64) << 8 | ((s.flipped ? 1 : 0) as u64) << 40)
+        if s.lifted: h = hash_word(h, ((s.pointer.x * 64.0) as i64 as u64) << 32 | (((s.pointer.y * 64.0) as i64 as u64) & 0xFFFFFFFF))
+        h = hash_word(h, ((yaw + turned) * 10000.0) as i64 as u64)
+        h = hash_word(h, ((pitch * 10000.0) as i64 as u64) << 32 | (distance * 1000.0) as i64 as u64)
+        h = hash_word(h, (t * 4096.0) as i64 as u64)
+        h = hash_word(h, (pack_color(s.page) as u64) << 32 | pack_color(s.accent) as u64)
+        h = hash_word(h, (s.flat_arrows ? 1 : 0) as u64 | (clock_stands ? 2 : 0) as u64 | style.key() << 8)
+        if s.free: h = hash_word(h, s.free.key())
+        for i in 0..s.arrow_count
+            let a = &s.arrows[i]
+            h = hash_word(h, a.from as u64 | (a.to as u64) << 8 | (pack_color(a.color) as u64) << 16 | ((a.width * 1000.0) as i64 as u64) << 48)
+        return h
+
+    fn place_pieces(s: *BoardShow, t: f32)
+        looks.field.clear()
+        placed_count = 0
+        fx_now = &s.fx
+        lay_moves(&s.fx)
+        if style.set == GooSet: looks.field.clock.x = ((now_ns() % 3600000000000) as f64 / 1.0e9) as f32
+        if s.free
+            place_men(s)
+            sway(live)
+            return
+        let board = s.board
+        let slides = s.slides
+        for sq in 0..64
+            let at = sq as Square
+            let piece = board.squares[at]
+            if piece == NoPiece or slides.lands_on(at): continue
+            if s.landed != NoMove and at == s.landed.from: continue
+            if s.lifted and at == s.selected: continue
+            var p = square_centre(at)
+            if at == s.selected
+                p.y += pick_height(at as int)
+                picked_at = p
+            set_piece(board, piece, at, p)
+        let eased = t * t * (3.0 - 2.0 * t)
+        for i in 0..slides.slide_count
+            let sl = slides.slides[i]
+            let piece = board.squares[sl.to]
+            let a = square_centre(sl.from)
+            let b = square_centre(sl.to)
+            var p = a + (b - a) * eased
+            p.y += sin(t * Pi) * (piece.kind() == Knight ? 0.5 : 0.08)
+            set_piece(board, piece, sl.to, p)
+        if s.landed != NoMove: set_piece(board, board.squares[s.landed.from], s.landed.to, square_centre(s.landed.to))
+        if s.lifted and s.selected != Square.none
+            let ray = camera.ray_through(s.pointer.x - place.x, s.pointer.y - place.y, place.z, place.w)
+            if ray.direction.y < -0.0001
+                let held = ray.at((LiftHeight - ray.origin.y) / ray.direction.y)
+                set_piece(board, board.squares[s.selected], s.selected, carried_to(s.selected as int, Vec3(held.x, LiftHeight, held.z), picked_at))
+        let f = &s.fx
+        if f.on and f.burst >= 0.0 and f.burst_piece != NoPiece and f.burst_at != Square.none
+            let cut = clamp(f.burst / (SceneBurstLength * 0.75), 0.0, 1.0)
+            if cut < 1.0: set_man(f.burst_piece, 0.5, square_centre(f.burst_at) + Vec3(0.0, cut * 0.35, 0.0), false, Square.none, cut)
+        sway(live)
+
+    fn pick_height(id: int) -> f32
+        let now = now_ns()
+        if id != pick_id
+            pick_id = id
+            pick_ns = now
+        if reduced or not live: return PickHeight
+        easing = true
+        let age = (now - pick_ns) as f32 / 1.0e9
+        if age < PickRise
+            let k = 1.0 - age / PickRise
+            return (PickHeight + BobHeight) * (1.0 - k * k * k)
+        return PickHeight + BobHeight * cos((age - PickRise) / BobSeconds * 2.0 * Pi)
+
+    fn carried_to(id: int, held: Vec3, from: Vec3) -> Vec3
+        let now = now_ns()
+        carried = true
+        if id != carry_id
+            carry_id = id
+            carry_ns = now
+            carry_from = from
+            fling = Vec2(0.0, 0.0)
+            fling_at = held
+            fling_ns = now
+        let dt = (now - fling_ns) as f32 / 1.0e9
+        if dt > 0.002
+            let seen = Vec2(held.x - fling_at.x, held.z - fling_at.z) * (1.0 / dt)
+            fling = fling + (seen - fling) * (1.0 - exp(-dt / 0.04))
+            fling_at = held
+            fling_ns = now
+        if reduced or not live: return held
+        let k = (now - carry_ns) as f32 / 1.0e9 / CarrySeconds
+        if k >= 1.0: return held
+        easing = true
+        let e = 1.0 - (1.0 - k) * (1.0 - k) * (1.0 - k)
+        return carry_from + (held - carry_from) * e
+
+    fn place_men(s: *BoardShow)
+        let f = s.free
+        for i in 0..f.count
+            let m = &f.men[i]
+            let on_board = m.square != Square.none
+            var p = Vec3(m.shown.x, on_board ? 0.0 : m.low ? ground() : -depth(), m.shown.y)
+            p.y = m.fall < 1.0 ? f.fall_height(i, p.y) : p.y + f.rise(i)
+            let cut = m.magic and s.fx.on ? (1.0 - m.fall) * 0.95 : 0.0
+            if i == f.held and s.lifted
+                let ray = camera.ray_through(s.pointer.x - place.x, s.pointer.y - place.y, place.z, place.w)
+                if ray.direction.y < -0.0001
+                    let held = ray.at((LiftHeight - ray.origin.y) / ray.direction.y)
+                    p = carried_to(64 + i, Vec3(held.x, LiftHeight, held.z), m.drawn)
+            elif i == f.picked or i == f.held: p.y += pick_height(64 + i)
+            m.drawn = p
+            set_man(m.piece, m.seed, p, on_board, on_board ? m.square : Square.none, cut)
+
+    fn scene_lens() -> *SceneLens
+        if style.room == MarsRoom: return &mars.lens
+        return style.room == ParkRoom ? &park.look.lens : &room.look.lens
+
+    fn draw_scene(s: *BoardShow, t: f32, pass: int = WholePass)
+        let r = &renderer
+        let near = pass == SharpPass
+        let aside = pass == AsidePass
+        let white = Color.hex(0xFFFFFF)
+        let (squares, frame) = looks.board(r, style.board)
+        let (pieces, twin) = looks.set(r, style.set)
+        looks.show_board(r, style.set, style.board)
+        if not aside
+            r.draw_with(squares, meshes[FieldMesh], Mat4.identity(), white)
+            r.draw_with(frame, meshes[frame_mesh(style.board)], Mat4.identity(), white)
+        let glass = see_through(style.set)
+        r.behind_order = glass ? GlassOrder : 0
+        r.behind_layers = 1
+        let now = ((now_ns() % 3600000000000) as f64 / 1.0e9) as f32
+        if style.room == CozyRoom
+            room.draw(r, &camera, looked_at, now, seen_height, quality.shadow, BoardDepth - depth(), near, aside ? backdrop.unseen : -1)
+            for k in Pawn as int..King as int + 1: r.casts[meshes[k]] = 1
+        elif style.room == ParkRoom
+            park.draw(r, &camera, looked_at, now, seen_height, quality.shadow, BoardDepth - depth(), near, aside ? backdrop.unseen : -1)
+            for k in Pawn as int..King as int + 1: r.casts[meshes[k]] = 1
+        elif style.room == MarsRoom
+            mars.draw(r, &camera, looked_at, now, seen_height, quality.shadow, BoardDepth - depth(), near, aside ? backdrop.unseen : -1)
+            for k in Pawn as int..King as int + 1: r.casts[meshes[k]] = 1
+        else
+            sun_setup()
+            r.draw_with(table, meshes[TableMesh], Mat4.translation(Vec3(0.0, -depth(), 0.0)), Color.hex(0x2A2623))
+            r.shadows[1].on = glass and r.shadows[0].on
+            for k in Pawn as int..King as int + 1: r.casts[meshes[k]] = glass ? 2 : 1
+        if folded
+            for k in Pawn as int..King as int + 1: r.casts[folds[k]] = r.casts[meshes[k]]
+        if aside: return
+        let layered = style.set == GlassSet
+        if layered: r.behind_layers = glass_layers() as u8
+        for i in 0..placed_count
+            let p = &placed[i]
+            r.draw_layered(pieces, piece_mesh(p), piece_matrix(p, false), p.tint, layered ? glass_layer[i] : 0)
+        if style.set == GooSet: draw_drops(r)
+        let (felt, felt_twin) = looks.felt(r)
+        draw_felts(felt, false)
+        draw_fx(s)
+        if near: backdrop.draw(r, scene_lens())
+        let board = s.board
+        draw_marks(s)
+        bends.clear()
+        if s.flat_arrows
+            for i in 0..s.arrow_count: bends.add(s.arrows[i].from, s.arrows[i].to)
+            bends.settle()
+        for i in 0..s.arrow_count
+            let a = &s.arrows[i]
+            if a.from == a.to: renderer.draw_with(marks, meshes[RingMesh], Mat4.trs(square_centre(a.from) + Vec3(0.0, 0.008, 0.0), Quat.identity(), Vec3(0.44, 0.3, 0.44)), a.color)
+            elif s.flat_arrows: draw_flat(a, bends.bend[i])
+            else: draw_arc(board, a)
+        draw_desk()
+
+    fn draw_desk()
+        let white = Color.hex(0xFFFFFF)
+        let w = clock_way()
+        let along = Quat.axis_angle(Vec3.up(), Pi * 0.5)
+        for k in 0..2
+            if not desk.cards[k].shown: continue
+            let z = k == 0 ? CardsApart : -CardsApart
+            let spot = Vec3(CardsX * w, -depth(), z)
+            if style.plate == BlockPlate
+                renderer.draw_with(props.case, meshes[BlockMesh], Mat4.trs(spot, along, Vec3.splat(1.0)), Color.hex(0x4A2D1F).with_alpha(k == 0 ? 0.23 : 0.71))
+                renderer.draw_with(props.card, meshes[BlockPlateMesh + k], Mat4.translation(spot), white)
+            elif style.plate == StandPlate
+                renderer.draw_with(props.plastic, meshes[StandBaseMesh], Mat4.trs(spot, along, Vec3.splat(1.0)), Color.hex(0x18191C))
+                renderer.draw_with(props.card, meshes[StandBoardMesh + k], Mat4.translation(spot), white)
+            else: renderer.draw_with(props.card, meshes[CardMesh + k], Mat4.translation(spot), white)
+        if not clock_stands: return
+        let at = Vec3(ClockX * w, -depth(), 0.0)
+        let turn = Quat.axis_angle(Vec3.up(), style.clock_left ? Pi : 0.0)
+        let case_at = Mat4.trs(at, turn, Vec3.splat(1.0))
+        let black = style.clock == BlackClock
+        let shell = black ? props.plastic : props.case
+        let wood = style.clock == AnalogClock ? Color.hex(0x5C2F1F) : Color.hex(0x4A2D1F)
+        renderer.draw_with(shell, meshes[CaseMesh], case_at, black ? Color.hex(0x18191C) : wood.with_alpha(0.31))
+        props.show_clock(&renderer, &desk.clock, style.clock)
+        for k in 0..2
+            let side_white = k == 0
+            let near = side_white != style.clock_left
+            let shift = case_at * Mat4.translation(Vec3(0.0, 0.0, clock_lcd_shift(near)))
+            if style.clock == AnalogClock: renderer.draw_with(props.dials[k], meshes[DialMesh], shift, white)
+            else: renderer.draw_with(props.lcds[k], meshes[LcdMesh], shift, white)
+            let up = side_white ? 1.0 - rocker : rocker
+            var tint = side_white ? Color.hex(0xC9AD87).with_alpha(0.63) : Color.hex(0x2B1A12).with_alpha(0.87)
+            if black: tint = side_white ? Color.hex(0xBDBDB8) : Color.hex(0x2A2B2F)
+            renderer.draw_with(shell, meshes[ButtonMesh], case_at * Mat4.translation(clock_button_at(near, up)), tint)
+
+
+    fn set_piece(board: *Board, piece: Piece, at: Square, p: Vec3)
+        var nth = 0
+        for sq in 0..at as int
+            if board.squares[sq as Square] == piece: nth += 1
+        set_man(piece, man_seed(piece, nth), p, true, at)
+
+    fn set_man(piece: Piece, seed: f32, p: Vec3, on_board: bool, sq: Square = Square.none, cut: f32 = 0.0)
+        let kind = piece.kind()
+        let side = piece.side()
+        var angle = seed * Tau
+        if kind == Knight and style.sideways: angle = side == White ? Pi : 0.0
+        elif kind == Knight: angle = side == White ? Pi * 0.5 : -Pi * 0.5
+        if kind == Bishop or kind == King or kind == Queen: angle = 0.0
+        if on_board: looks.field.foot(p.x, p.z, p.y, foot_width(kind))
+        if placed_count >= MaxMen: return
+        var tint = side == White ? Color.hex(0xC9AD87) : Color.hex(0x4A2D1F)
+        if style.set != WoodSet: tint = side == White ? Color.hex(0xFFFFFF) : Color.hex(0x303030)
+        let felt = style.felt == NoFelt ? 0.0 : FeltThick
+        placed[placed_count] = PlacedPiece(kind as int, p + Vec3(0.0, felt, 0.0), angle, tint.with_alpha(0.02 + seed * 0.96))
+        placed_count += 1
+        placed[placed_count - 1].fx = wear_of(sq, placed[placed_count - 1].at, cut)
+        placed[placed_count - 1].ghost = cut > 0.0
+
+    fn wear_of(sq: Square, at: Vec3, cut: f32) -> int
+        let f = fx_now
+        if not f or not f.on: return -1
+        if cut > 0.0: return looks.field.effect(at, 0.0, Vec4(0.0, 0.0, cut, 0.0), fx_hue(0.0), 0.5)
+        if sq == Square.none: return -1
+        let i = sq as int
+        let glint = f.glint >= 0.0 and sq == f.glint_at ? max(f.glint, 0.001) : 0.0
+        let flame = f.flame[i]
+        if f.moss[i] <= 0.0 and flame <= 0.0 and glint <= 0.0: return -1
+        let charred = f.hue[i] < 0.5 ? flame : 0.0
+        return looks.field.effect(at, f.moss[i], Vec4(charred, glint, 0.0, flame), fx_hue(f.hue[i]), f.seeds[i])
+
+    fn lay_moves(f: *SceneFx)
+        let field = &looks.field
+        if not f.on: return
+        field.counts.w = f.time
+        if f.dust >= 0.0 and f.dust_at != Square.none
+            let c = square_centre(f.dust_at)
+            field.moves[0] = Vec4(c.x, c.z, f.dust, f.dust_strength)
+        if f.trail >= 0.0 and f.trail_from != Square.none and f.trail_to != Square.none
+            let a = square_centre(f.trail_from)
+            let b = square_centre(f.trail_to)
+            field.moves[1] = Vec4(a.x, a.z, b.x, b.z)
+            field.moves[2] = Vec4(f.trail, f.trail_reach, f.trail_strength, f.trail_length)
+        if f.burst >= 0.0 and f.burst_at != Square.none
+            let c = square_centre(f.burst_at)
+            field.moves[3] = Vec4(c.x, c.z, f.burst, f.burst_strength)
+
+    fn draw_fx(s: *BoardShow)
+        let f = &s.fx
+        if not f.on: return
+        let r = &renderer
+        fx_look.tick(r, f.time)
+        let eye = camera.position
+        let field = &looks.field
+        for i in 0..placed_count
+            let p = &placed[i]
+            if p.fx < 0: continue
+            let spot = field.spots[p.fx]
+            let wear = field.wear[p.fx]
+            let hue = field.hues[p.fx]
+            let kind = p.kind as Kind
+            if spot.w > 0.0: fx_look.moss_shells(r, ghosts[p.kind], Mat4.trs(p.at, Quat.axis_angle(Vec3.up(), p.angle), Vec3.splat(1.0)))
+            if wear.w > 0.0: fx_look.fire_round(r, eye, meshes[FxRootMesh], meshes[FxMidMesh], p.at, piece_height(kind), foot_width(kind), wear.w, Vec3(hue.x, hue.y, hue.z), hue.w)
+            if wear.z > 0.0: fx_look.embers_off(r, eye, meshes[FxRootMesh], p.at, piece_height(kind), f.burst, f.burst_strength, 0.3)
+        if f.sacrifice > 0.0 and f.sacrifice_at != Square.none: fx_look.fire_on_square(r, eye, meshes[FxRootMesh], square_centre(f.sacrifice_at), f.sacrifice, fx_hue(2.0), f.sacrifice_seed)
+        if f.dust >= 0.0 and f.dust_at != Square.none: fx_look.dust_round(r, eye, meshes[FxMidMesh], square_centre(f.dust_at), f.dust, f.dust_strength, f.dust_at as int as f32 * 0.37)
+
+    fn draw_felts(material: int, flipped: bool)
+        if style.felt == NoFelt: return
+        let tint = Color.hex(FeltColors[style.felt as int])
+        for i in 0..placed_count
+            let p = &placed[i]
+            let wide = foot_scale(p.kind)
+            let y = p.at.y - FeltThick
+            renderer.draw_with(material, meshes[FeltMesh], Mat4.trs(Vec3(p.at.x, flipped ? -y : y, p.at.z), Quat.axis_angle(Vec3.up(), p.angle), Vec3(wide, flipped ? -1.0 : 1.0, wide)), tint)
+
+    fn draw_marks(s: *BoardShow)
+        let f = &looks.field
+        if s.last != NoMove
+            f.stain(s.last.from, Color(0.8, 0.72, 0.45, 0.32))
+            f.stain(s.last.to, Color(0.8, 0.72, 0.45, 0.32))
+        if s.check != Square.none: f.counts.y = (s.check.rank as int * 8 + s.check.file as int) as f32
+        if s.selected != Square.none: f.stain(s.selected, s.target.with_alpha(0.5))
+        if s.hover != Square.none: f.stain(s.hover, s.target.with_alpha(0.25))
+        for sq in 0..64
+            let bit = (1 as u64) << (sq as u64)
+            if s.targets & bit == 0: continue
+            let c = square_centre(sq as Square) + Vec3(0.0, 0.006, 0.0)
+            let top = c + Vec3(0.0, 0.001, 0.0)
+            if s.captures & bit != 0
+                renderer.draw_with(marks, meshes[RingMesh], Mat4.trs(c, Quat.identity(), Vec3(0.455, 0.3, 0.455)), TargetRim)
+                renderer.draw_with(marks, meshes[RingMesh], Mat4.trs(c, Quat.identity(), Vec3(0.385, 0.3, 0.385)), TargetRim)
+                renderer.draw_with(marks, meshes[RingMesh], Mat4.trs(top, Quat.identity(), Vec3(0.42, 0.3, 0.42)), s.target)
+            else
+                renderer.draw_with(marks, meshes[DotMesh], Mat4.trs(c, Quat.identity(), Vec3.splat(0.17)), TargetRim)
+                renderer.draw_with(marks, meshes[DotMesh], Mat4.trs(top, Quat.identity(), Vec3.splat(0.14)), s.target)
+
+    fn draw_arc(board: *Board, a: *ArcArrow)
+        let from = square_centre(a.from)
+        let to = square_centre(a.to)
+        let span = (to - from).length
+        let way = (to - from) * (1.0 / span)
+        let thick = a.width * 0.36
+        let lift = Vec3(0.0, thick, 0.0)
+        let taken = board.squares[a.to]
+        let start = from + lift
+        let end = to + lift - way * (taken == NoPiece ? 0.0 : foot_width(taken.kind()) + 0.05)
+        let bend = (start + end) * 0.5 + Vec3(0.0, 0.6 + span * 0.3, 0.0)
+        let head = thick * 6.0
+        let c = Color(a.color.r, a.color.g, a.color.b, 1.0)
+        renderer.draw_with(marks, meshes[DotMesh], Mat4.trs(to + Vec3(0.0, 0.006, 0.0), Quat.identity(), Vec3.splat(0.34)), c.with_alpha(0.3))
+        let seat = thick * 1.6
+        renderer.draw_with(glow, meshes[BallMesh], Mat4.trs(from + Vec3(0.0, seat, 0.0), Quat.identity(), Vec3.splat(seat)), c)
+        let steps = 28
+        var prev = start
+        for i in 1..steps + 1
+            let u = i as f32 / steps as f32
+            let p = arc_point(start, bend, end, u)
+            if (end - p).length < head: break
+            if i > 1: renderer.draw_with(glow, meshes[BallMesh], Mat4.trs(prev, Quat.identity(), Vec3.splat(thick)), c)
+            tube(prev, p, thick, c)
+            prev = p
+        let tip = end - prev
+        if tip.length > 0.0001
+            renderer.draw_with(glow, meshes[HeadMesh], Mat4.trs((prev + end) * 0.5, Quat.between(Vec3.up(), tip.normalized), Vec3(thick * 3.0, tip.length, thick * 3.0)), c)
+
+    fn draw_flat(a: *ArcArrow, bend: Square)
+        let lift = Vec3(0.0, 0.008, 0.0)
+        let w = a.width
+        let from = square_centre(a.from) + lift
+        let to = square_centre(a.to) + lift
+        let knee = bend == Square.none ? from : square_centre(bend) + lift
+        let first = (bend == Square.none ? to : knee) - from
+        let opening = Quat.axis_angle(Vec3.up(), atan2(first.x, first.z))
+        renderer.draw_with(marks, meshes[FlatCapMesh], Mat4.trs(from, opening, Vec3(w, 1.0, w)), a.color)
+        var skip: f32 = 0.0
+        if bend != Square.none
+            let long = first.length - w * 0.5
+            renderer.draw_with(marks, meshes[FlatShaftMesh], Mat4.trs(from, opening, Vec3(w, 1.0, long)), a.color)
+            renderer.draw_with(marks, meshes[FlatShaftMesh], Mat4.trs(from + first * (long / first.length), opening, Vec3(w, 1.0, w)), a.color)
+            skip = w * 0.5
+        let way = to - knee
+        let span = way.length
+        let head = min(0.42, span * 0.6)
+        let turn = Quat.axis_angle(Vec3.up(), atan2(way.x, way.z))
+        renderer.draw_with(marks, meshes[FlatShaftMesh], Mat4.trs(knee + way * (skip / span), turn, Vec3(w, 1.0, span - head - skip)), a.color)
+        renderer.draw_with(marks, meshes[FlatHeadMesh], Mat4.trs(knee + way * ((span - head) / span), turn, Vec3(w * 2.9, 1.0, head)), a.color)
+
+    fn tube(a: Vec3, b: Vec3, thick: f32, c: Color)
+        let d = b - a
+        let long = d.length
+        if long < 0.0001: return
+        renderer.draw_with(glow, meshes[TubeMesh], Mat4.trs((a + b) * 0.5, Quat.between(Vec3.up(), d * (1.0 / long)), Vec3(thick, long, thick)), c)
+
+    fn release(gpu: *Gpu)
+        if carving == 1 or carving == 2: join(carver)
+        if carving != 0
+            carving = 0
+            for k in 0..SceneMeshes
+                if carved[k].vertex_count > 0: carved[k].free_all()
+                carved[k].vertex_count = 0
+        if folding == 1 or folding == 2: join(folder)
+        if folding != 0
+            folding = 0
+            for k in Pawn as int..King as int + 1: paper[k].free_all()
+        if not ready: return
+        whole = false
+        redo = false
+        for k in 0..SceneMeshes
+            if made[k]: gpu.release_mesh(&shapes[k])
+            made[k] = false
+        if folded
+            for k in Pawn as int..King as int + 1: gpu.release_mesh(&fold_shapes[k])
+            folded = false
+        if target.handle: gpu.release_texture(&target)
+        if big.handle: gpu.release_texture(&big)
+        shrink.release(gpu)
+        unstage(gpu)
+        room.release(gpu)
+        park.release(gpu)
+        mars.release(gpu)
+        den.release(gpu)
+        if den_made: den_screen.release()
+        den_made = false
+        backdrop.release(gpu)
+        ready = false
+
+    fn depth() -> f32
+        return board_depth(style.board)
+
+struct PlacedPiece
+    kind: int
+    at: Vec3
+    angle: f32
+    tint: Color
+    fx: int = -1
+    ghost: bool
+    lean: Vec2
+    squash: f32
+
+fn frame_mesh(b: BoardStyle) -> int
+    if b == WalnutBoard or b == BurlBoard: return FrameMesh
+    if b == MarbleBoard: return StoneFrameMesh
+    if b == VinylBoard: return MatFrameMesh
+    return FlatFrameMesh
+
+fn add_frame_of(m: *Mesh, b: BoardStyle)
+    add_board_frame(m, b)
+    add_board_floor(m, board_depth(b))
+
+struct SceneStill
+    target: Texture
+    next: Texture
+    big: Texture
+    key: u64
+    missed: bool
+
+    fn take(shows: u64, drawn: *Texture)
+        if drawn == &next
+            let t = target
+            target = next
+            next = t
+        key = shows
+
+    fn release(gpu: *Gpu)
+        if target.handle: gpu.release_texture(&target)
+        if next.handle: gpu.release_texture(&next)
+        if big.handle: gpu.release_texture(&big)
+        key = 0
+        missed = false
+
+struct StillPace
+    frame: int
+    page: int
+    waiting: bool
+    began_ns: i64
+    drew: bool
+    left: bool
+
+    fn begin(at: int, shown: int)
+        waiting = at > frame + 1 or shown != page
+        frame = at
+        page = shown
+        began_ns = now_ns()
+        drew = false
+        left = false
+
+    fn lets() -> bool
+        if not waiting and (not drew or now_ns() - began_ns < StillFrameNs)
+            drew = true
+            return true
+        left = true
+        return false
+
+fn scene_carver(s: *BoardScene)
+    s.carve_meshes()
+    atomic_store(&s.carving, 2)
+
+fn paper_folder(s: *BoardScene)
+    s.fold_meshes()
+    atomic_store(&s.folding, 2)
+
+fn copy_mesh(into: *Mesh, m: *Mesh)
+    into.init(m.vertex_count, m.index_count)
+    for i in 0..m.vertex_count: into.vertices[i] = m.vertices[i]
+    for i in 0..m.index_count: into.indices[i] = m.indices[i]
+    into.vertex_count = m.vertex_count
+    into.index_count = m.index_count
+
+fn add_flat_shaft(m: *Mesh)
+    let up = Vec3.up()
+    let a = m.vertex(Vec3(-0.5, 0.0, 0.0), up, Vec2(0.0, 0.0))
+    let b = m.vertex(Vec3(-0.5, 0.0, 1.0), up, Vec2(0.0, 1.0))
+    let c = m.vertex(Vec3(0.5, 0.0, 1.0), up, Vec2(1.0, 1.0))
+    let d = m.vertex(Vec3(0.5, 0.0, 0.0), up, Vec2(1.0, 0.0))
+    m.quad(a, b, c, d)
+
+fn add_flat_head(m: *Mesh)
+    let up = Vec3.up()
+    let a = m.vertex(Vec3(-0.5, 0.0, 0.0), up, Vec2(0.0, 0.0))
+    let b = m.vertex(Vec3(0.0, 0.0, 1.0), up, Vec2(0.5, 1.0))
+    let c = m.vertex(Vec3(0.5, 0.0, 0.0), up, Vec2(1.0, 0.0))
+    m.triangle(a, b, c)
+
+fn add_flat_cap(m: *Mesh)
+    let up = Vec3.up()
+    let middle = m.vertex(Vec3(0.0, 0.0, 0.0), up, Vec2(0.5, 0.5))
+    var last = m.vertex(Vec3(0.5, 0.0, 0.0), up, Vec2(1.0, 0.5))
+    for i in 1..17
+        let a = Pi * i as f32 / 16.0
+        let p = m.vertex(Vec3(cos(a) * 0.5, 0.0, -sin(a) * 0.5), up, Vec2(0.5 + cos(a) * 0.5, 0.5 + sin(a) * 0.5))
+        m.triangle(middle, last, p)
+        last = p
+
+fn toned_back(c: Color, exposure: f32) -> Color
+    return Color(tone_back(c.r) / exposure, tone_back(c.g) / exposure, tone_back(c.b) / exposure, 1.0)
+
+fn tone_back(v: f32) -> f32
+    let y = v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+    let a = 2.43 * y - 2.51
+    let b = 0.59 * y - 0.03
+    let c = 0.14 * y
+    return (-b - sqrt(b * b - 4.0 * a * c)) / (2.0 * a)
+
+fn to_srgb(c: f32) -> f32
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055
+
+fn arc_point(a: Vec3, b: Vec3, c: Vec3, t: f32) -> Vec3
+    let s = 1.0 - t
+    return a * (s * s) + b * (2.0 * s * t) + c * (t * t)
+
+fn ray_piece(ray: Ray, foot: Vec3, tall: f32) -> f32
+    let radius: f32 = 0.26
+    let o = Vec2(ray.origin.x - foot.x, ray.origin.z - foot.z)
+    let d = Vec2(ray.direction.x, ray.direction.z)
+    let a = d.dot(d)
+    let b = 2.0 * o.dot(d)
+    let c = o.dot(o) - radius * radius
+    let disc = b * b - 4.0 * a * c
+    if a < 0.000001 or disc < 0.0: return -1.0
+    let t = (-b - sqrt(disc)) / (2.0 * a)
+    let y = ray.origin.y + ray.direction.y * t
+    if t >= 0.0 and y >= foot.y and y <= foot.y + tall: return t
+    if ray.direction.y < 0.0
+        let top = (foot.y + tall - ray.origin.y) / ray.direction.y
+        let at = ray.at(top)
+        if top >= 0.0 and Vec2(at.x - foot.x, at.z - foot.z).length <= radius: return top
+    return -1.0
+
+struct GooSway
+    id: int
+    at: Vec3
+    speed: Vec3
+    lean: Vec2
+    lean_speed: Vec2
+    squash: f32
+    squash_speed: f32
+
+const GooSpring: f32 = 170.0
+const GooDamping: f32 = 5.5
+const GooDrag: f32 = 0.03
+const GooMostLean: f32 = 0.16
+const GooSquashSpring: f32 = 260.0
+const GooSquashDamping: f32 = 7.0
+const GooKick: f32 = 0.4
+const GooSag: f32 = 0.05

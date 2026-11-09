@@ -1,0 +1,163 @@
+use src/app/gui_app
+
+const SessionKinds = ["newtab", "analysis", "play", "tournaments", "event", "newtour", "engines", "books", "profile", "settings", "database", "lichess", "fastchess", "contribute"]
+
+extend GuiApp
+    fn keep_session()
+        session_saver.finish()
+        var out: [..]u8
+        defer out.free()
+        session_text(&out)
+        var buf: [600]u8
+        save_whole(data.path("session.json", &buf), out[0..out.len])
+
+    fn session_text(out: *[..]u8)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.object()
+        doc.set(root, "active", doc.number(tabs.active as f64))
+        let list = doc.array()
+        var text: [..]u8
+        defer text.free()
+        for i in 0..tabs.tabs.len
+            let t = &tabs.tabs[i]
+            let v = doc.object()
+            let kind = t.kind == Play ? Analysis : t.kind
+            doc.set(v, "kind", doc.text(SessionKinds[kind as int]))
+            if kind == Analysis and t.game
+                text.clear()
+                write_pgn(t.game, &text)
+                doc.set(v, "pgn", doc.text(str(text[0..text.len])))
+                text.clear()
+                moves_to(t.game, t.game.at, &text)
+                doc.set(v, "path", doc.text(str(text[0..text.len])))
+                doc.set(v, "flipped", doc.boolean(t.flipped))
+                if t.analysis and t.kind == Analysis
+                    doc.set(v, "engine", doc.number(t.analysis.engine_id as f64))
+                    doc.set(v, "profile", doc.number(t.analysis.profile_id as f64))
+                    doc.set(v, "threads", doc.number(t.analysis.threads as f64))
+                    doc.set(v, "lines", doc.number(t.analysis.multipv as f64))
+            if kind == Event and t.event
+                doc.set(v, "event", doc.number(t.event.id as f64))
+                doc.set(v, "panel", doc.number(t.event_view.panel as f64))
+            if kind == Profile: doc.set(v, "section", doc.number(profile_page.section as f64))
+            if kind == Settings: doc.set(v, "section", doc.number(settings_page.section as f64))
+            if kind == Contribute and t.run
+                var fen: ShortText
+                if t.run.has_start: t.run.start.write_fen(&fen)
+                doc.set(v, "fen", doc.text(fen.text() == StartFen ? "" : fen.text()))
+                doc.set(v, "mode", doc.number(t.run.mode as f64))
+                doc.set(v, "depth", doc.number(t.run.depth as f64))
+            doc.push(list, v)
+        doc.set(root, "tabs", list)
+        doc.write(root, out)
+
+    fn restore_session() -> bool
+        var buf: [600]u8
+        let bytes = read_file(data.path("session.json", &buf).ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len == 0: return false
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(str(bytes))
+        let list = doc.get(root, "tabs")
+        if not doc.is(root, JsonObject) or not doc.is(list, JsonArray): return false
+        var v = doc.first(list)
+        while v >= 0
+            if doc.is(v, JsonObject): restore_tab(&doc, v)
+            v = doc.next(v)
+        if tabs.tabs.len == 0: return false
+        tabs.active = clamp(doc.num_at(root, "active", 0.0) as int, 0, tabs.tabs.len as int - 1)
+        return true
+
+    fn restore_tab(doc: *JsonDoc, v: int)
+        let word = json_text(doc, v, "kind")
+        var kind = NewTab
+        var known = false
+        for i in 0..SessionKinds.len
+            if SessionKinds[i] == word
+                kind = i as TabKind
+                known = true
+        if not known or kind == Play or kind == FastChess: return
+        if kind == Event
+            let id = doc.num_at(v, "event", 0.0) as int
+            for r in events
+                if r.id != id: continue
+                open_event(r)
+                tabs.current().event_view.panel = clamp(doc.num_at(v, "panel", 0.0) as int, 0, 3)
+            return
+        open_new(kind)
+        let t = tabs.current()
+        if kind == Profile: profile_page.section = clamp(doc.num_at(v, "section", 0.0) as int, 0, ProfileSections.len as int - 1)
+        if kind == Settings: settings_page.section = clamp(doc.num_at(v, "section", 0.0) as int, 0, SettingsSections.len as int - 1)
+        if kind == Contribute and t.run
+            t.run.set_mode(doc.num_at(v, "mode", t.run.mode as f64) as int)
+            t.run.depth = clamp(doc.num_at(v, "depth", t.run.depth as f64) as int, 8, 60)
+            start_run_at(t, json_text(doc, v, "fen"))
+        if kind != Analysis or not t.game: return
+        let pgn = json_text(doc, v, "pgn")
+        if pgn.len > 0: read_pgn(pgn, 0, t.game)
+        recall_review(t)
+        follow_moves(t.game, json_text(doc, v, "path"))
+        t.flipped = json_flag(doc, v, "flipped")
+        let a = t.analysis
+        if not a: return
+        let engine = doc.num_at(v, "engine", 0.0) as int
+        let entry = library.find(engine)
+        if entry
+            a.switch_engine(engine)
+            let profile = doc.num_at(v, "profile", 0.0) as int
+            a.switch_profile(profile, entry.profile(profile))
+        a.threads = max(doc.num_at(v, "threads", a.threads as f64) as int, 1)
+        a.multipv = clamp(doc.num_at(v, "lines", 1.0) as int, 1, MaxAnalysisLines)
+
+    fn session_stamp() -> u64
+        var h = tabs.active as u64 * 1000003 + tabs.tabs.len as u64
+        for t in tabs.tabs
+            h = h * 31 + t.id as u64
+            if t.game: h = h * 31 + t.game.version + t.game.at as u64
+            if t.flipped: h += 7
+        return h
+
+    fn keep_session_when_due()
+        session_saver.pump()
+        let stamp = session_stamp()
+        if stamp == session_seen: return
+        session_seen = stamp
+        var out: [..]u8
+        defer out.free()
+        session_text(&out)
+        var buf: [600]u8
+        session_saver.save(data.path("session.json", &buf), out[0..out.len])
+
+fn moves_to(game: *Game, node: int, out: *[..]u8)
+    var path: [..]int
+    defer path.free()
+    var n = node
+    while n > 0
+        path.push(n)
+        n = game.nodes[n].parent
+    var k = path.len as int - 1
+    while k >= 0
+        var uci: ShortText
+        write_uci(game.nodes[path[k]].move, &uci)
+        push_text(out, uci.text())
+        if k > 0: out.push(' ')
+        k -= 1
+
+fn follow_moves(game: *Game, moves: str)
+    var n = 0
+    var w = UciWords(text: moves)
+    loop
+        let word = w.next()
+        if word.len == 0: break
+        var c = game.nodes[n].first
+        var found = -1
+        while c != NoNode
+            var uci: ShortText
+            write_uci(game.nodes[c].move, &uci)
+            if uci.text() == word: found = c
+            c = game.nodes[c].next
+        if found < 0: break
+        n = found
+    game.go(n)

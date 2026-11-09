@@ -1,0 +1,187 @@
+use engine/desktop/file_dialog
+use src/store/game_database
+use src/tabs/history_view
+
+const DatabaseListWidth: f32 = 240.0
+const DatabaseSideBelow: f32 = 760.0
+const DatabaseLeast: f32 = 560.0
+
+struct DatabasesView
+    chosen: int
+    dialog: FileDialog
+    importing: DatabaseImport
+    search: UiEditText
+    searched: [..]u8
+    filtered_db: int
+    filtered_count: int = -1
+    shown: [..]int
+    removing: bool
+    names: [..]str
+    ids: [..]int
+    named_for: u64
+    remove_id: int
+    open_db: int
+    open_at: i64 = -1
+    open_len: i64
+
+    fn update(app: *DesktopApp, lib: *DatabaseLibrary)
+        if dialog.cancelled(): app.redraw()
+        var buf: [600]u8
+        let path = dialog.take(buf[0..600])
+        if path.len > 0 and not importing.start(lib, path): app.ui.toast("An import is already running.")
+        if not importing.working(): return
+        let d = importing.update(lib)
+        if d
+            chosen = d.id
+            var line: [300]u8
+            app.ui.toast(format(&line, "Imported {d.name_text()} with {d.count} games."))
+            app.redraw()
+        elif not importing.working()
+            var line: [300]u8
+            app.ui.toast(format(&line, "{file_name_of(importing.source_text())} could not be imported: {importing.problem_text()}"))
+            app.redraw()
+        else: app.wake_in(0.25)
+
+    fn draw(app: *DesktopApp, look: *BoardLook, lib: *DatabaseLibrary, width: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        if not lib.find(chosen) and lib.databases.len > 0: chosen = lib.databases[lib.databases.len - 1].id
+        var line: [300]u8
+        if width < DatabaseSideBelow
+            with ui.open(UiNode(width: UiSize.grow(), height: UiSize.grow(), gap: 8.0))
+                with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                    if ui.button("Import a PGN") and not dialog.is_open(): dialog.pick_file(app.window.handle, "PGN", "pgn", null)
+                    if lib.databases.len > 0
+                        name_list(lib)
+                        var at = 0
+                        for k in 0..ids.len
+                            if ids[k] == chosen: at = k as int
+                        if ui.dropdown("databasepick", ref at, names[0..names.len], UiNode(width: UiSize.grow())): chosen = ids[at]
+                if importing.working(): ui.paragraph(format(&line, "Indexing {file_name_of(importing.source_text())}: {atomic_load(&importing.done)} games processed."), note)
+                if lib.databases.len == 0: ui.paragraph("No databases yet. Import a PGN file to search games and open them for analysis.", note)
+                let d = lib.find(chosen)
+                if d: games(app, look, lib, d, width, true)
+            return
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.grow(), gap: 16.0))
+            with ui.open(UiNode(width: UiSize.fixed(DatabaseListWidth), height: UiSize.grow(), gap: 6.0))
+                if ui.button("Import a PGN") and not dialog.is_open(): dialog.pick_file(app.window.handle, "PGN", "pgn", null)
+                if importing.working(): ui.paragraph(format(&line, "Indexing {file_name_of(importing.source_text())}: {atomic_load(&importing.done)} games processed."), note)
+                if lib.databases.len == 0: ui.paragraph("No databases yet. Import a PGN file to search games and open them for analysis.", note)
+                var k = lib.databases.len as int - 1
+                while k >= 0
+                    let d = lib.databases[k]
+                    k -= 1
+                    let o = ui.open(UiNode(key: d.id, name: "database", width: UiSize.grow(), padding: Vec4(10.0, 6.0, 10.0, 6.0), gap: 2.0, hit: true))
+                    let hv = ui.interact(o.id)
+                    let lit = ui.spring(o.id, 0, hv.hovered ? 1.0 : 0.0, 22.0)
+                    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(d.id == chosen ? theme.accent_soft : theme.accent.with_alpha(0.1 * lit)), radius: Vec4.splat(5.0))
+                    ui.label(d.name_text(), UiTextStyle(face: d.id == chosen ? fonts.strong : fonts.text, size: 12.5, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+                    ui.label(format(&line, "{d.count} games"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+                    ui.close()
+                    if hv.clicked: chosen = d.id
+            with ui.open(UiNode(width: UiSize.grow(), height: UiSize.grow(), gap: 8.0))
+                let d = lib.find(chosen)
+                if d: games(app, look, lib, d, width - DatabaseListWidth - 16.0, false)
+
+    fn name_list(lib: *DatabaseLibrary)
+        if named_for == lib.version + 1 and names.len == lib.databases.len: return
+        named_for = lib.version + 1
+        names.clear()
+        ids.clear()
+        var k = lib.databases.len as int - 1
+        while k >= 0
+            names.push(lib.databases[k].name_text())
+            ids.push(lib.databases[k].id)
+            k -= 1
+
+    fn games(app: *DesktopApp, look: *BoardLook, lib: *DatabaseLibrary, d: *GameDatabase, width: f32, narrow: bool)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        var path: [640]u8
+        for other in lib.databases
+            if other != d and other.loaded: other.unload()
+        if not d.loaded and not d.load_index(lib.file(d.id, "index.bin", &path))
+            ui.paragraph("Could not read the database index. Remove the database and import the PGN file again.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn))
+            return
+        filter(d)
+        var line: [400]u8
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.text_field("databasesearch", &search, "Search players, events, results and openings", UiNode(width: narrow ? UiSize.grow() : UiSize.fixed(320.0)))
+            if not narrow: ui.label(format(&line, "{shown.len} of {d.count} games, from {str(d.source[0..d.source.len])}"), note, UiNode(width: UiSize.grow(), clip: true))
+            if ui.button("Remove")
+                remove_id = d.id
+                removing = true
+        if narrow: ui.label(format(&line, "{shown.len} of {d.count} games, from {str(d.source[0..d.source.len])}"), note, UiNode(width: UiSize.grow(), clip: true, padding: Vec4(2.0, 0.0, 0.0, 0.0)))
+        if shown.len == 0: return
+        var day: [24]u8
+        var big: [8]u8
+        with list = row_list(ui, theme, fonts, "databasegames", d.id, shown.len as int, width, DatabaseLeast, button_width(ui, "Analyze"))
+            for k in list.first()..list.last()
+                let e = &d.entries[shown[k]]
+                let r = e.result as GameResult
+                with list.row(k, shown[k])
+                    with list.middle()
+                        with list.line()
+                            player_tag(ui, theme, fonts, 0, d.white(e), 0, true)
+                            versus(ui, theme, fonts)
+                            player_tag(ui, theme, fonts, 1, d.black(e), 0, false)
+                        let event = d.event(e)
+                        let opening = d.opening(e)
+                        list.note(format(&line, "{event.len > 0 ? event : "No event"}{opening.len > 0 ? "  ·  " : ""}{opening}  ·  {day_short(e.day as int, &day)}"))
+                    let decided = r == WhiteWins or r == BlackWins
+                    list.lead(r == Drawn ? format(&big, "½-½") : result_text(r), r == WhiteWins ? "WHITE" : r == BlackWins ? "BLACK" : r == Drawn ? "DRAW" : "", decided ? theme.ink : theme.muted, 15.0)
+                    with list.actions()
+                        if ui.button("Analyze")
+                            open_db = d.id
+                            open_at = e.at
+                            open_len = e.len
+
+    fn filter(d: *GameDatabase)
+        let wanted = search.text()
+        if d.id == filtered_db and d.entries.len as int == filtered_count and str(searched[0..searched.len]) == wanted: return
+        filtered_db = d.id
+        filtered_count = d.entries.len as int
+        searched.clear()
+        push_text(&searched, wanted)
+        shown.clear()
+        for i in 0..d.entries.len
+            let e = &d.entries[i]
+            var w = UciWords(text: wanted)
+            var all = true
+            loop
+                let word = w.next()
+                if word.len == 0: break
+                if not has_folded(d.white(e), word) and not has_folded(d.black(e), word) and not has_folded(d.event(e), word) and not has_folded(d.opening(e), word) and result_text(e.result as GameResult) != word
+                    all = false
+                    break
+            if all: shown.push(i as int)
+
+    fn draw_popups(app: *DesktopApp, lib: *DatabaseLibrary, theme: *GuiTheme, fonts: *GuiFonts)
+        if not removing: return
+        let ui = &app.ui
+        let d = lib.find(remove_id)
+        if not d
+            removing = false
+            return
+        var line: [400]u8
+        with ui.modal("removedatabase", ref removing, 420.0)
+            ui.label(format(&line, "Remove {d.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(format(&line, "Delete the imported copy of {d.count} games and its index. The original PGN file will be kept."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                ui.spacer()
+                if ui.button("Cancel"): removing = false
+                if ui.button("Remove", true)
+                    if not lib.remove(remove_id): ui.toast("Could not remove the database folder.")
+                    filtered_count = -1
+                    removing = false
+
+    fn release()
+        importing.release()
+        searched.free()
+        shown.free()
+        names.free()
+        ids.free()

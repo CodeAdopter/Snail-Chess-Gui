@@ -1,0 +1,47 @@
+use src/pieces/costume_art
+
+enum Costume: u8
+    NoCostume
+    Halloween
+    Christmas
+    Party
+
+const CostumeWords = ["none", "halloween", "christmas", "party"]
+const CostumeLabels = ["None", "Halloween", "Christmas", "Party"]
+
+struct CostumeWear
+    costume: Costume
+    kind: Kind
+    item: CostumeItem
+    bottom: bool
+    size: f32
+    drop: f32
+    tilt: f32
+
+const CostumeWears = [
+    CostumeWear(Halloween, King, Pumpkin, true, 1.15, 0.02, 0.0),
+    CostumeWear(Halloween, Queen, WitchHat, false, 1.3, 0.3, 0.0),
+    CostumeWear(Halloween, Bishop, WitchHat, false, 1.3, 0.3, 0.0),
+    CostumeWear(Christmas, King, SantaHat, false, 1.0, 0.24, 0.0),
+    CostumeWear(Christmas, Queen, SantaHat, false, 1.0, 0.22, 0.0),
+    CostumeWear(Christmas, Rook, SantaHat, false, 1.0, 0.14, 0.0),
+    CostumeWear(Christmas, Bishop, SantaHat, false, 1.15, 0.26, 0.0),
+    CostumeWear(Christmas, Knight, SantaHat, false, 0.8, 0.14, -0.2),
+    CostumeWear(Christmas, Pawn, SantaHat, false, 1.15, 0.28, 0.0),
+    CostumeWear(Party, King, PartyHat, false, 0.7, 0.2, 0.2),
+    CostumeWear(Party, Queen, PartyHat, false, 0.7, 0.18, -0.2),
+    CostumeWear(Party, Rook, PartyHat, false, 0.7, 0.1, 0.15),
+    CostumeWear(Party, Bishop, PartyHat, false, 0.9, 0.22, -0.15),
+    CostumeWear(Party, Knight, PartyHat, false, 0.6, 0.12, -0.35),
+    CostumeWear(Party, Pawn, PartyHat, false, 0.9, 0.25, 0.15),
+]
+
+fn costume_named(word: str) -> Costume
+    for i in 0..CostumeWords.len
+        if CostumeWords[i] == word: return i as Costume
+    return NoCostume
+
+fn costume_wear(costume: Costume, kind: Kind) -> int
+    for i in 0..CostumeWears.len
+        if CostumeWears[i].costume == costume and CostumeWears[i].kind == kind: return i as int
+    return -1

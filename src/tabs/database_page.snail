@@ -1,0 +1,382 @@
+use src/database/db_jobs
+use src/database/db_export
+use src/tabs/databases_view
+use src/views/rail
+use engine/desktop/command_bar
+
+const DbPreviewWidth: f32 = 320.0
+const DbPreviewBelow: f32 = 1060.0
+const DbGamesLeast: f32 = 520.0
+const DbSources = ["All games", "Played here", "Imported", "Lichess"]
+const DbKindWords = ["All players", "Humans", "Human vs engine", "Engines"]
+const DbBandWords = ["Any rating", "2000+", "2400+", "2700+", "3000+", "3400+"]
+const DbBandLeast = [0, 2000, 2400, 2700, 3000, 3400]
+const DbLichessWords = ["Last 50 games", "Last 200 games", "Last 1000 games", "All games"]
+const DbLichessMost = [50, 200, 1000, 0]
+
+struct DbPreview
+    id: i64 = -1
+    meta: DbGame
+    tags: [..]u8
+    codes: [..]u16
+    boards: [..]Board
+    moves: [..]Move
+    ply: int
+    reach: int
+    reach_ply: int = -1
+    white: [..]u8
+    black: [..]u8
+    event: [..]u8
+
+    fn load(db: *PositionDb, game: i64)
+        id = game
+        boards.clear()
+        moves.clear()
+        reach_ply = -1
+        if not db.read_game(game as u32, &meta, &tags, &codes): return
+        var b: Board
+        let fen = db_tag(str(tags[0..tags.len]), "FEN")
+        if fen.len == 0 or not b.load_fen(fen): b.load_fen(StartFen)
+        boards.push(b)
+        for code in codes
+            let (m, ok) = db_find_move(&b, code)
+            if not ok: break
+            b.play(m)
+            moves.push(m)
+            boards.push(b)
+        ply = moves.len as int
+        db.name_of(meta.white, &white)
+        db.name_of(meta.black, &black)
+        db.name_of(meta.event, &event)
+
+    fn release()
+        tags.free()
+        codes.free()
+        boards.free()
+        moves.free()
+        white.free()
+        black.free()
+        event.free()
+
+struct DatabasePage
+    source: int
+    legacy_id: int = -1
+    legacy: DatabasesView
+    search: UiEditText
+    kind: int
+    band: int
+    shown: [..]u32
+    counts: [4]int
+    filtered_total: int = -1
+    filtered_source: int
+    filtered_kind: int
+    filtered_band: int
+    searched: [..]u8
+    matches: [..]bool
+    chosen: i64 = -1
+    preview: DbPreview
+    job: DbImportJob
+    dialog: FileDialog
+    exporting: bool
+    lichess_open: bool
+    lichess_name: UiEditText
+    lichess_most: int = 1
+    open_game: i64 = -1
+    open_ply: int
+
+    fn update(app: *DesktopApp, db: *PositionDb)
+        if dialog.cancelled(): app.redraw()
+        var buf: [600]u8
+        let path = dialog.take(buf[0..600])
+        if path.len > 0
+            if exporting: export(app, db, path)
+            else: import_file(app, db, path)
+        if not job.working(): return
+        if job.update()
+            var line: [400]u8
+            if job.ok: app.ui.toast(format(&line, "Imported {job.games} games."))
+            else: app.ui.toast(format(&line, "Could not import {file_name_of(job.what_text())}: {job.problem_text()}."))
+            filtered_total = -1
+            app.redraw()
+        else: app.wake_in(0.25)
+
+    fn pick_import(app: *DesktopApp)
+        if dialog.is_open(): return
+        exporting = false
+        dialog.pick_file(app.window.handle, "PGN", "pgn", null)
+
+    fn pick_export(app: *DesktopApp)
+        if dialog.is_open(): return
+        exporting = true
+        dialog.save_file(app.window.handle, "PGN", "pgn", null)
+
+    fn import_file(app: *DesktopApp, db: *PositionDb, path: str)
+        if not job.start(db, DbJobFile, path, 0): app.ui.toast("An import is already running.")
+
+    fn export(app: *DesktopApp, db: *PositionDb, path: str)
+        var out: DbOut
+        var line: [400]u8
+        if not out.open(path)
+            app.ui.toast("Could not create the file.")
+            return
+        var meta: DbGame
+        var tags: [..]u8
+        var moves: [..]u16
+        defer tags.free()
+        defer moves.free()
+        var written = 0
+        for id in shown
+            if not db.read_game(id, &meta, &tags, &moves): continue
+            db_write_pgn(&out.text, str(tags[0..tags.len]), &moves, meta.result)
+            written += 1
+            out.spill_if_full()
+        if out.close(): app.ui.toast(format(&line, "Exported {written} games."))
+        else: app.ui.toast("Could not write the file.")
+
+    fn draw(app: *DesktopApp, desk: *DesktopLook, look: *BoardLook, db: *PositionDb, dbs: *DatabaseLibrary)
+        let ui = &app.ui
+        let rail_w = list_rail_width(ui)
+        if legacy_id >= 0 and not dbs.find(legacy_id): legacy_id = -1
+        filter(db)
+        command_bar_rail(app, desk, rail_w, PageCurve)
+        rail(app, look, dbs, rail_w)
+        let top = TabRowHeight + CommandBarHeight
+        let w = ui.width - rail_w
+        let h = max(ui.height - top, 1.0)
+        if legacy_id >= 0
+            with ui.open(UiNode(name: "dbolder", floating: true, offset: Vec2(rail_w, top), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(24.0, 18.0, 24.0, 18.0), gap: 8.0))
+                legacy.chosen = legacy_id
+                legacy.games(app, look, dbs, dbs.find(legacy_id), w - 48.0, w < DatabaseSideBelow)
+            return
+        let wide = w >= DbPreviewBelow
+        let list_w = wide ? w - DbPreviewWidth : w
+        with ui.open(UiNode(name: "dbgames", floating: true, offset: Vec2(rail_w, top), width: UiSize.fixed(list_w), height: UiSize.fixed(h), padding: Vec4(24.0, 18.0, wide ? 8.0 : 24.0, 18.0), gap: 10.0))
+            filters(ui, look, db)
+            games(app, look, db, list_w - (wide ? 32.0 : 48.0))
+        if wide: preview_column(app, look, db, rail_w + list_w, top, DbPreviewWidth, h)
+        if wide and chosen >= 0: keys(app)
+        if lichess_open: lichess_popup(app, look, db)
+
+    fn rail(app: *DesktopApp, look: *BoardLook, dbs: *DatabaseLibrary, rail_w: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        var n: [32]u8
+        with rail_room(ui, "dbrail", rail_w, 2.0)
+            rail_group(ui, theme, fonts, 0, "GAMES", true)
+            for i in 0..DbSources.len
+                if rail_place(ui, theme, fonts, "dbsource", i as int, DbSources[i], format(&n, "{counts[i]}"), legacy_id < 0 and source == i as int)
+                    source = i as int
+                    legacy_id = -1
+            if dbs.databases.len > 0
+                rail_group(ui, theme, fonts, 1, "OLDER IMPORTS", false)
+                var k = dbs.databases.len as int - 1
+                while k >= 0
+                    let d = dbs.databases[k]
+                    k -= 1
+                    if rail_place(ui, theme, fonts, "dbolder", d.id, d.name_text(), format(&n, "{d.count}"), legacy_id == d.id): legacy_id = d.id
+            if job.working()
+                var line: [300]u8
+                let name = job.kind == DbJobLichess ? job.what_text() : file_name_of(job.what_text())
+                ui.paragraph(format(&line, "Importing {name}: {atomic_load(&job.games)} games so far."), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(padding: Vec4(12.0, 14.0, 4.0, 0.0)))
+
+    fn filters(ui: *UiCanvas, look: *BoardLook, db: *PositionDb)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.text_field("dbsearch", &search, "Search players and events", UiNode(width: UiSize.grow()))
+            ui.dropdown("dbkind", ref kind, DbKindWords, UiNode(width: UiSize.fixed(160.0)))
+            ui.dropdown("dbband", ref band, DbBandWords, UiNode(width: UiSize.fixed(124.0)))
+        var line: [80]u8
+        ui.label(format(&line, "{shown.len} of {counts[source]} games"), UiTextStyle(face: look.fonts.text, size: 12.5, color: look.theme.muted))
+
+    fn games(app: *DesktopApp, look: *BoardLook, db: *PositionDb, width: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        if shown.len == 0
+            let empty = counts[0] == 0 ? "No games yet. Import a PGN file or games from Lichess, or finish a game or tournament here." : "No games match."
+            ui.paragraph(empty, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+            return
+        var meta: DbGame
+        var white: [..]u8
+        var black: [..]u8
+        var event: [..]u8
+        defer white.free()
+        defer black.free()
+        defer event.free()
+        var line: [400]u8
+        var day: [24]u8
+        var big: [8]u8
+        with list = row_list(ui, theme, fonts, "dbgamelist", source, shown.len as int, width, DbGamesLeast, button_width(ui, "Analyze"))
+            for k in list.first()..list.last()
+                let id = shown[k]
+                if not db.game_meta(id, &meta): continue
+                db.name_of(meta.white, &white)
+                db.name_of(meta.black, &black)
+                db.name_of(meta.event, &event)
+                let r = meta.result as GameResult
+                with list.row(k, id as int, id as i64 == chosen)
+                    if list.clicked: chosen = id as i64
+                    with list.middle()
+                        with list.line()
+                            player_tag(ui, theme, fonts, 0, str(white[0..white.len]), meta.white_elo as int, true)
+                            versus(ui, theme, fonts)
+                            player_tag(ui, theme, fonts, 1, str(black[0..black.len]), meta.black_elo as int, false)
+                        let named = event.len > 0 ? str(event[0..event.len]) : "No event"
+                        let when = meta.date > 0 ? db_day_text(meta.date, &day) : "No date"
+                        list.note(format(&line, "{named}  ·  {when}  ·  {(meta.plies as int + 1) / 2} moves  ·  {db_source_word(meta.source)}"))
+                    let decided = r == WhiteWins or r == BlackWins
+                    list.lead(r == Drawn ? format(&big, "½-½") : result_text(r), r == WhiteWins ? "WHITE" : r == BlackWins ? "BLACK" : r == Drawn ? "DRAW" : "", decided ? theme.ink : theme.muted, 15.0)
+                    with list.actions()
+                        if ui.button("Analyze")
+                            open_game = id as i64
+                            open_ply = 0
+
+    fn preview_column(app: *DesktopApp, look: *BoardLook, db: *PositionDb, x: f32, y: f32, w: f32, h: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let pad: f32 = 16.0
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        if chosen < 0
+            with ui.open(UiNode(name: "dbpreview", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(8.0, 18.0, 24.0, 18.0)))
+                ui.paragraph("Click a game to see it here.", note)
+            return
+        if preview.id != chosen: preview.load(db, chosen)
+        if preview.boards.len == 0: return
+        if preview.reach_ply != preview.ply
+            preview.reach_ply = preview.ply
+            var seen: [..]DbSeen
+            db.games_at(preview.boards[preview.ply].key, &seen)
+            preview.reach = seen.len as int
+            seen.free()
+        let size = w - pad - 24.0
+        look.sheet.prepare(&app.gpu, &app.ui_gpu, look.set, max(floor(size / 8.0 * app.scale) as int, 8), look.costume)
+        let head_h: f32 = 64.0
+        with ui.open(UiNode(name: "dbpreviewhead", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(head_h), padding: Vec4(8.0, 18.0, 24.0, 0.0), gap: 4.0))
+            var line: [300]u8
+            ui.label(format(&line, "{str(preview.white[0..preview.white.len])} vs {str(preview.black[0..preview.black.len])}"), UiTextStyle(face: fonts.strong, size: 14.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+            ui.label(format(&line, "{preview.event.len > 0 ? str(preview.event[0..preview.event.len]) : "No event"}  ·  {result_text(preview.meta.result as GameResult)}"), note, UiNode(width: UiSize.grow(), clip: true))
+        let last = preview.ply > 0 ? preview.moves[preview.ply - 1] : NoMove
+        draw_small_board(ui, look, &preview.boards[preview.ply], last, x + 8.0, y + head_h, size, false)
+        with ui.open(UiNode(name: "dbpreviewfoot", floating: true, offset: Vec2(x, y + head_h + size + 10.0), width: UiSize.fixed(w), padding: Vec4(8.0, 0.0, 24.0, 0.0), gap: 8.0))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 4.0, align: Vec2(0.0, 0.5)))
+                if ui.button("Start", false, UiNode(name: "dbfirst")): preview.ply = 0
+                if ui.button("Back", false, UiNode(name: "dbback")): preview.ply = max(preview.ply - 1, 0)
+                if ui.button("Next", false, UiNode(name: "dbnext")): preview.ply = min(preview.ply + 1, preview.moves.len as int)
+                if ui.button("End", false, UiNode(name: "dblast")): preview.ply = preview.moves.len as int
+            var line: [200]u8
+            var t: ShortText
+            if preview.ply > 0
+                let b = &preview.boards[preview.ply - 1]
+                t.add_int(b.fullmove)
+                t.add_str(b.side == White ? ". " : "... ")
+                write_san(b, preview.moves[preview.ply - 1], &t)
+            let move_text = preview.ply > 0 ? str(t.bytes[0..t.len]) : "Start"
+            ui.label(format(&line, "{move_text}  ·  move {(preview.ply + 1) / 2} of {(preview.moves.len + 1) / 2}"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+            let reach = preview.reach == 1 ? "1 game reached this position." : format(&line, "{preview.reach} games reached this position.")
+            ui.label(reach, note)
+            if ui.button("Open in analysis", true)
+                open_game = chosen
+                open_ply = preview.ply
+
+    fn keys(app: *DesktopApp)
+        let i = &app.input
+        if app.ui.focus != 0: return
+        if i.tapped(Left): preview.ply = max(preview.ply - 1, 0)
+        if i.tapped(Right): preview.ply = min(preview.ply + 1, preview.moves.len as int)
+        if i.tapped(Home): preview.ply = 0
+        if i.tapped(End): preview.ply = preview.moves.len as int
+
+    fn lichess_popup(app: *DesktopApp, look: *BoardLook, db: *PositionDb)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        with ui.modal("dblichess", ref lichess_open, 400.0)
+            ui.label("Import from Lichess", UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph("A player's games with any computer analysis Lichess has for them.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+            ui.text_field("dblichessname", &lichess_name, "Lichess username", UiNode(width: UiSize.grow()))
+            ui.dropdown("dblichessmost", ref lichess_most, DbLichessWords, UiNode(width: UiSize.grow()))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                ui.spacer()
+                if ui.button("Cancel"): lichess_open = false
+                let name = lichess_name.text()
+                if ui.button("Import", true) and name.len > 0
+                    if not job.start(db, DbJobLichess, name, DbLichessMost[lichess_most]): ui.toast("An import is already running.")
+                    lichess_open = false
+
+    fn filter(db: *PositionDb)
+        let total = db.game_count()
+        let wanted = search.text()
+        if total == filtered_total and source == filtered_source and kind == filtered_kind and band == filtered_band and str(searched[0..searched.len]) == wanted: return
+        filtered_total = total
+        filtered_source = source
+        filtered_kind = kind
+        filtered_band = band
+        searched.clear()
+        db_add(&searched, wanted)
+        shown.clear()
+        for i in 0..4
+            counts[i] = 0
+        let searching = wanted.len > 0
+        if searching: match_names(db, wanted)
+        var f = DbGameFilter(kind: kind - 1, elo_min: DbBandLeast[band])
+        db.store.guard.read()
+        var id = db.games.count - 1
+        while id >= 0
+            let g = db.games.entry(id) as *DbGame
+            let from = db_source_place(g.source)
+            counts[0] += 1
+            counts[from] += 1
+            let takes = (source == 0 or from == source) and f.takes(g)
+            if takes and (not searching or name_matches(g.white) or name_matches(g.black) or name_matches(g.event)): shown.push(id as u32)
+            id -= 1
+        db.store.guard.read_done()
+
+    fn match_names(db: *PositionDb, wanted: str)
+        matches.clear()
+        db.store.guard.read()
+        let n = db.names.count()
+        matches.resize(n + 1)
+        for id in 1..n + 1
+            let name = db.names.name(id as u32)
+            var w = UciWords(text: wanted)
+            var all = true
+            loop
+                let word = w.next()
+                if word.len == 0: break
+                if not has_folded(name, word)
+                    all = false
+                    break
+            matches[id] = all
+        db.store.guard.read_done()
+
+    fn name_matches(id: u32) -> bool
+        return id > 0 and id < matches.len and matches[id]
+
+    fn release()
+        legacy.release()
+        job.release()
+        preview.release()
+        shown.free()
+        searched.free()
+        matches.free()
+
+fn db_source_place(source: u8) -> int
+    if source == DbFromApp: return 1
+    if source == DbFromLichess or source == DbFromBroadcast: return 3
+    return 2
+
+fn db_source_word(source: u8) -> str
+    if source == DbFromApp: return "Played here"
+    if source == DbFromLichess: return "Lichess"
+    if source == DbFromBroadcast: return "Broadcast"
+    return "Imported"
+
+fn db_day_text(date: u32, buf: *[24]u8) -> str
+    let y = date / 10000
+    let m = date / 100 % 100
+    let d = date % 100
+    if m < 1 or m > 12: return format(buf, "{y}")
+    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    if d < 1: return format(buf, "{months[m - 1]} {y}")
+    return format(buf, "{d} {months[m - 1]} {y}")

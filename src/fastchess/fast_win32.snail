@@ -1,0 +1,92 @@
+extern include "fast_win32.h"
+
+extern fn sn_fc_command_tail(out: *u8, size: int) -> int
+extern fn sn_fc_own_path(out: *u8, size: int) -> int
+extern fn sn_fc_env(name: *u8, name_len: int, out: *u8, size: int) -> int
+extern fn sn_fc_start(command: *u8, command_len: int, process: **void, from_child: **void, job: **void) -> u32
+extern fn sn_fc_finish(process: *void) -> int
+extern fn sn_fc_why() -> u32
+extern fn sn_fc_break_child()
+extern fn sn_fc_stop_with(event: *void)
+extern fn sn_fc_end_child(ms: int) -> int
+extern fn sn_fc_drop_child()
+extern fn sn_fc_read(handle: *void, buffer: *u8, size: int) -> int
+extern fn sn_fc_print(text: *u8, len: int)
+extern fn sn_fc_open_add(path: *u8, len: int) -> *void
+extern fn sn_fc_open_shared(path: *u8, len: int) -> *void
+extern fn sn_fc_open_read(path: *u8, len: int) -> *void
+extern fn sn_fc_hold(path: *u8, len: int) -> *void
+extern fn sn_fc_held(path: *u8, len: int) -> int
+extern fn sn_fc_size(file: *void) -> i64
+extern fn sn_fc_read_at(file: *void, at: i64, buffer: *u8, size: int) -> int
+extern fn sn_fc_write(file: *void, text: *u8, len: int) -> int
+extern fn sn_fc_cut(file: *void) -> int
+extern fn sn_fc_close(handle: *void)
+extern fn sn_fc_remove(path: *u8, len: int) -> int
+extern fn sn_fc_move(from: *u8, from_len: int, to: *u8, to_len: int) -> int
+extern fn sn_fc_copy(from: *u8, from_len: int, to: *u8, to_len: int) -> int
+extern fn sn_fc_listen() -> *void
+extern fn sn_fc_wait(event: *void, ms: int) -> int
+extern fn sn_fc_signal(name: *u8, len: int) -> int
+extern fn sn_fc_event(name: *u8, len: int) -> *void
+extern fn sn_fc_set(event: *void) -> int
+extern fn sn_fc_launch(command: *u8, len: int, folder: *u8, folder_len: int, hidden: int) -> int
+extern fn sn_fc_pid() -> u32
+extern fn sn_fc_now_ms() -> i64
+extern fn sn_fc_folder(out: *u8, size: int) -> int
+extern fn sn_fc_make_folder(path: *u8, len: int) -> int
+extern fn sn_fc_user_path(out: *u8, size: int, kind: *u32) -> int
+extern fn sn_fc_set_user_path(text: *u8, len: int, kind: u32) -> int
+
+fn fast_print(text: str)
+    sn_fc_print(text.ptr, text.len as int)
+
+fn fast_write(file: *void, text: str) -> bool
+    return sn_fc_write(file, text.ptr, text.len as int) != 0
+
+fn fast_held(path: str) -> bool
+    return sn_fc_held(path.ptr, path.len as int) != 0
+
+fn fast_replace(from: str, to: str) -> bool
+    return sn_fc_move(from.ptr, from.len as int, to.ptr, to.len as int) != 0
+
+fn fast_copy(from: str, to: str) -> bool
+    return sn_fc_copy(from.ptr, from.len as int, to.ptr, to.len as int) != 0
+
+fn fast_signal(name: str) -> bool
+    return sn_fc_signal(name.ptr, name.len as int) != 0
+
+fn fast_make_folder(path: str) -> bool
+    return sn_fc_make_folder(path.ptr, path.len as int) != 0
+
+fn fast_read_whole(path: str, into: *[..]u8) -> bool
+    into.clear()
+    let f = sn_fc_open_read(path.ptr, path.len as int)
+    if f == null: return false
+    defer sn_fc_close(f)
+    let size = sn_fc_size(f)
+    if size < 0 or size > 268435456: return false
+    into.resize(size as int)
+    var got: i64 = 0
+    while got < size
+        let n = sn_fc_read_at(f, got, into.ptr + got, (size - got) as int)
+        if n <= 0: break
+        got += n
+    into.resize(got as int)
+    return true
+
+fn fast_save_whole(path: str, text: str) -> bool
+    var buf: [720]u8
+    let temp = format(&buf, "{path}.tmp")
+    let f = sn_fc_hold(temp.ptr, temp.len as int)
+    if f == null: return false
+    let wrote = fast_write(f, text)
+    sn_fc_close(f)
+    return wrote and fast_replace(temp, path)
+
+fn fast_add(path: str, text: str) -> bool
+    let f = sn_fc_open_add(path.ptr, path.len as int)
+    if f == null: return false
+    let wrote = fast_write(f, text)
+    sn_fc_close(f)
+    return wrote

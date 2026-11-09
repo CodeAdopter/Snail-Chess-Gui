@@ -1,0 +1,160 @@
+use engine/desktop/file_dialog
+use engine/ui/ui_widgets
+use src/engines/engine_library
+use src/engines/engine_probe
+use src/theme/theme
+use src/theme/fonts
+
+enum AddStep: u8
+    AddIdle
+    AddPicking
+    AddChoosing
+    AddProbing
+    AddFailed
+
+struct AddFromFile
+    step: AddStep
+    dialog: FileDialog
+    exe: [600]u8
+    exe_len: int
+    copy_in: int
+    beside: NameList
+    checks: [..]bool
+    probe: EngineProbe
+    id: int
+    run_path: [600]u8
+    run_len: int
+    copied: bool
+    added_id: int
+
+    fn pick(app: *DesktopApp)
+        if step != AddIdle: return
+        step = AddPicking
+        dialog.pick_file(app.window.handle, "Programs", "exe", null)
+
+    fn exe_text() -> str
+        return str(exe[0..exe_len])
+
+    fn update(app: *DesktopApp, lib: *EngineLibrary)
+        if step == AddPicking
+            if dialog.cancelled(): step = AddIdle
+            let path = dialog.take(exe[0..599])
+            if path.len > 0
+                exe_len = path.len as int
+                show_choice(app)
+        elif step == AddProbing
+            if not probe.update(app): return
+            if probe.state == ProbeDone: finish(app, lib)
+            else
+                drop_copy(lib.data)
+                step = AddFailed
+            app.redraw()
+
+    fn show_choice(app: *DesktopApp)
+        files_in(folder_of(exe_text()), &beside)
+        checks.clear()
+        for i in 0..beside.count()
+            checks.push(false)
+        copy_in = 0
+        step = AddChoosing
+        app.redraw()
+
+    fn take(app: *DesktopApp, path: str)
+        exe_len = keep_path(path, &exe)
+        show_choice(app)
+
+    fn begin(ui: *UiCanvas, lib: *EngineLibrary)
+        id = lib.reserve_id()
+        copied = copy_in == 1
+        var buf: [600]u8
+        if copied
+            var inside: [600]u8
+            let at = copy_engine_in(lib.data, id, exe_text(), &beside, checks[0..checks.len], &inside)
+            if at.len == 0
+                ui.toast("Could not copy the engine files to the data folder.")
+                return
+            run_len = keep_path(at, &run_path)
+        else: run_len = keep_path(exe_text(), &run_path)
+        let run = copied ? lib.data.path(str(run_path[0..run_len]), &buf) : str(run_path[0..run_len])
+        probe.start(run, folder_of(run))
+        step = probe.state == ProbeFailed ? AddFailed : AddProbing
+        if step == AddFailed: drop_copy(lib.data)
+
+    fn finish(app: *DesktopApp, lib: *EngineLibrary)
+        let e = lib.add(FromFile, id)
+        e.copied = copied
+        e.path = e.keep(str(run_path[0..run_len]))
+        e.learn(&probe.engine)
+        lib.save()
+        added_id = id
+        var line: [120]u8
+        app.ui.toast(format(&line, "{e.display_name()} was added"))
+        step = AddIdle
+
+    fn drop_copy(data: *DataFolder)
+        if copied: remove_engine_folder(data, id)
+        copied = false
+
+    fn cancel(lib: *EngineLibrary)
+        if step == AddProbing
+            probe.cancel()
+            drop_copy(lib.data)
+        step = AddIdle
+
+    fn draw(app: *DesktopApp, lib: *EngineLibrary, theme: *GuiTheme, fonts: *GuiFonts)
+        if step != AddChoosing and step != AddProbing and step != AddFailed: return
+        let ui = &app.ui
+        var showing = true
+        var line: [700]u8
+        let title = UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink)
+        let body = UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink)
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let name = file_name_of(exe_text())
+        with ui.modal("addengine", ref showing, 480.0)
+            match step
+                AddChoosing
+                    ui.label(format(&line, "Add {name}"), title)
+                    ui.paragraph(exe_text(), note)
+                    ui.radio("Use original location", ref copy_in, 0)
+                    ui.radio("Copy to library", ref copy_in, 1)
+                    if copy_in == 1 and beside.count() > 1
+                        ui.label("Also copy supporting files, such as neural networks", note)
+                        with ui.scroll_area("beside", gap: 2.0, node: UiNode(width: UiSize.grow(), height: UiSize.fit(0.0, 200.0)))
+                            for i in 0..beside.count()
+                                let file = beside.name(i as int)
+                                if file == name: continue
+                                ui.checkbox(file, ref checks[i], UiNode(key: i as int))
+                    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                        ui.spacer()
+                        if ui.button("Cancel"): showing = false
+                        if ui.button("Add", true): begin(ui, lib)
+                AddProbing
+                    ui.label(format(&line, "Detecting engine: {name}"), title)
+                    ui.paragraph("Checking UCI support and engine readiness. Each check has a 10-second timeout.", note)
+                    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                        ui.spacer()
+                        if ui.button("Cancel"): showing = false
+                AddFailed
+                    ui.label(format(&line, "{name} could not be added"), title)
+                    ui.paragraph(probe.engine.failure_text(), body)
+                    let out = probe.output_text()
+                    if out.len == 0: ui.paragraph("The engine produced no output.", note)
+                    else
+                        ui.label("Engine output", note)
+                        with ui.scroll_area("printed", node: UiNode(width: UiSize.grow(), height: UiSize.fit(0.0, 220.0), padding: Vec4.splat(8.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(5.0))))
+                            ui.paragraph(out, UiTextStyle(face: fonts.mono, size: 11.5, color: theme.ink))
+                    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                        ui.spacer()
+                        if ui.button("Close", true): showing = false
+        if not showing: cancel(lib)
+
+    fn release()
+        probe.release()
+        beside.free_all()
+        checks.free()
+
+fn keep_path(s: str, into: *[600]u8) -> int
+    let n = min(s.len, 599) as int
+    for k in 0..n
+        into[k] = s[k]
+    return n

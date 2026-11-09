@@ -1,0 +1,131 @@
+use engine/render/renderer
+use src/board3d/room_shapes
+use src/board3d/scene_lens
+
+struct RoomLook
+    materials: [RoomParts]int
+    book: int
+    log: int
+    flame: int
+    halo: int
+    lens: SceneLens
+    flicker: f32
+
+    fn init(r: *Renderer)
+        materials[FloorPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "floor_ps"))
+        materials[WallPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "wall_ps"))
+        materials[CeilingPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "ceiling_ps"))
+        materials[BrickPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "brick_ps"))
+        materials[SlatePart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "slate_ps"))
+        materials[WalnutPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "woodwork_ps"))
+        materials[TablePart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "woodwork_ps"))
+        materials[RugPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "rug_ps"))
+        materials[ChairPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "leather_ps"))
+        materials[ChairFeetPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "woodwork_ps"))
+        materials[BrassPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "brass_ps"))
+        materials[IronPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "brass_ps"))
+        materials[ShadePart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "shade_ps"), CullNone)
+        materials[GlassPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "night_ps"))
+        materials[CurtainPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "velvet_ps"), CullNone)
+        materials[CanvasPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "painting_ps"))
+        materials[WaxPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "wax_ps"))
+        materials[CoalPart] = room_material(r, shader("shaders/room3d.hlsl", fragment: "ember_ps"))
+        book = room_material(r, shader("shaders/room3d.hlsl", fragment: "book_ps"))
+        log = room_material(r, shader("shaders/room3d.hlsl", fragment: "log_ps"))
+        flame = glow_material(r, shader("shaders/room3d.hlsl", fragment: "flame_ps"), 150)
+        halo = glow_material(r, shader("shaders/room3d.hlsl", fragment: "halo_ps"), 160)
+        let bounds = Vec4(RoomWest, RoomEast, RoomNorth, RoomSouth)
+        let heights = Vec4(RoomFloor, RoomFloor + RoomHigh, 0.0, 0.0)
+        for k in [FloorPart, WallPart, CeilingPart, RugPart]
+            r.materials[materials[k]].values[2] = bounds
+            r.materials[materials[k]].values[3] = heights
+        set(r, FloorPart, 0, srgb_with(0x8C5F3C, 2.0))
+        set(r, FloorPart, 1, Vec4(0.35, 0.8, 0.55, 0.18))
+        set(r, WallPart, 0, srgb_with(0x2C3B30, 0.0))
+        set(r, WallPart, 1, srgb_with(0x4A3222, 3.0))
+        set(r, CeilingPart, 0, srgb_with(0xCDBFA4, 0.0))
+        set(r, BrickPart, 0, Vec4(0.0, 0.0, RoomFloor + HearthHigh + 0.55, -2.45))
+        set(r, SlatePart, 0, srgb_with(0x2B2C2E, 0.0))
+        for k in [WalnutPart, ChairFeetPart]
+            set(r, k, 0, srgb_with(0x4E3424, 6.0))
+            set(r, k, 1, Vec4(0.6, 0.4, 0.5, 0.2))
+        set(r, TablePart, 0, srgb_with(0x5A3A26, 7.0))
+        set(r, TablePart, 1, Vec4(0.6, 0.35, 0.7, 0.08))
+        set(r, RugPart, 0, Vec4(3.0, 2.3, 0.0, -0.5))
+        set(r, ChairPart, 0, srgb_with(0x3E2216, 0.0))
+        set(r, ChairPart, 1, Vec4(-0.23, 0.52, 0.3, 0.0))
+        set(r, BrassPart, 0, srgb_with(0xB89048, 0.28))
+        set(r, IronPart, 0, srgb_with(0x2A2826, 0.6))
+        set(r, ShadePart, 0, srgb_with(0xD8CBB0, 0.0))
+        set(r, GlassPart, 0, Vec4.of(moon_way(), 0.0))
+        set(r, GlassPart, 1, Vec4(1.0, 0.0, 0.0, 0.0))
+        set(r, CurtainPart, 0, srgb_with(0x4E1418, 0.0))
+        set(r, WaxPart, 0, srgb_with(0xE8DCC0, 0.0))
+        r.materials[materials[WaxPart]].values[1] = Vec4(0.6, 0.36, 0.15, (RoomFloor + HearthHigh + 1.16 + 0.17 + 0.15) * Metre)
+        r.materials[flame].values[0] = Vec4(0.0, 6.0, 0.0, 0.0)
+        r.materials[halo].values[0] = Vec4(0.0, 0.12, 0.0, 0.0)
+        lens.init(r)
+
+    fn set(r: *Renderer, part: int, row: int, v: Vec4)
+        r.materials[materials[part]].values[row] = v
+
+    fn lights(r: *Renderer, shadow: int)
+        r.exposure = 1.0
+        r.lighting.sun_color = Vec4(0.0, 0.0, 0.0, 0.0)
+        let m2 = Metre * Metre
+        let key = lamp_at() * Metre
+        set_lamp(r, 0, key, 12.0 * Metre, Vec3(1.0, 0.8, 0.62) * (4.0 * m2), 1, Vec3(0.0, -1.0, 0.0), -0.5)
+        shadow_from(&r.shadows[0], key, Vec3(0.0, 0.0, 0.0), 8.5, 8.5, 70.0, shadow, 2.0, 0.012, true, -0.00008)
+        let fire = (fire_at() + Vec3(0.0, 0.2, 0.03)) * Metre
+        set_lamp(r, 1, fire, 9.0 * Metre, Vec3(1.0, 0.45, 0.16) * (2.5 * m2), 2, Vec3(0.0, 0.3, 1.0).normalized, -0.1)
+        shadow_from(&r.shadows[1], fire, Vec3(0.0, RoomFloor + 0.3, -0.4) * Metre, 2.0 * Metre, 0.9 * Metre, 6.5 * Metre, 2048, 3.0, 0.14, false)
+        let window = Vec3(RoomEast, RoomFloor + 1.5, (WindowFrom + WindowTo) * 0.5)
+        let moon = (window + moon_way() * 5.0) * Metre
+        set_lamp(r, 2, moon, 12.0 * Metre, Vec3(0.3, 0.42, 0.8) * (0.4 * 25.0 * m2), 3, moon_way() * -1.0, 0.6)
+        shadow_from(&r.shadows[2], moon, Vec3(0.0, RoomFloor, -0.2) * Metre, 3.6 * Metre, 3.6 * Metre, 11.0 * Metre, 2048, 1.5, 0.08, false)
+        set_lamp(r, 3, pendant_at() * Metre, 2.6 * Metre, Vec3(1.0, 0.82, 0.64) * (3.0 * m2), 0, Vec3(0.0, -1.0, 0.0), -0.5)
+        r.lighting.lamp_room = Vec4(4.0, 1.0, 0.03, 0.22 * Metre)
+        r.lighting.sun_through = Vec4(0.0, 0.0, 0.0, 0.0)
+        r.lighting.sky_color = Vec4(0.05, 0.042, 0.035, 0.0)
+        r.lighting.ground_color = Vec4(0.035, 0.022, 0.014, 0.0)
+
+    fn update(r: *Renderer, camera: *Camera, at: Vec3, t: f32, height: f32)
+        flicker = 0.86 + 0.08 * sin(t * 7.3) + 0.05 * sin(t * 13.1 + 1.3) + 0.04 * sin(t * 23.7 + 0.4) + 0.03 * sin(t * 41.0 + 2.2)
+        let fire = fire_at()
+        r.materials[materials[CoalPart]].values[0] = Vec4(t, fire.x, fire.y, fire.z)
+        r.materials[log].values[0] = Vec4(t, fire.x, fire.y, fire.z)
+        r.materials[flame].values[0].x = t
+        let m2 = Metre * Metre
+        r.lighting.lamp_colors[1] = Vec4.of(Vec3(1.0, 0.45, 0.16) * (2.5 * m2 * flicker), 2.0)
+        let sway = Vec3(sin(t * 5.1) * 0.012, sin(t * 3.7) * 0.01, 0.0)
+        r.lighting.lamps[1] = Vec4.of((fire + Vec3(0.0, 0.2, 0.03) + sway) * Metre, 9.0 * Metre)
+        let open = 0.85 + 0.15 * flicker
+        r.lighting.sky_color = Vec4(0.05 * open, 0.042 * open, 0.035 * open, 0.0)
+        r.lighting.ground_color = Vec4(0.035 * open, 0.022 * open, 0.014 * open, 0.0)
+        lens.focus(camera, at, height, t)
+
+fn set_lamp(r: *Renderer, k: int, at: Vec3, reach: f32, colour: Vec3, map: int, aim: Vec3, fade: f32)
+    r.lighting.lamps[k] = Vec4.of(at, reach)
+    r.lighting.lamp_colors[k] = Vec4.of(colour, map as f32)
+    r.lighting.lamp_aims[k] = Vec4.of(aim, fade)
+
+fn room_material(r: *Renderer, fragment: ShaderCode, cull: Cull = CullBack) -> int
+    var desc = MaterialDesc.three(fragment)
+    desc.vertex = shader("shaders/room3d.hlsl", vertex: "wood_vs")
+    desc.cull = cull
+    return r.add_material_desc(&desc)
+
+fn glow_material(r: *Renderer, fragment: ShaderCode, order: int) -> int
+    var desc = MaterialDesc.three(fragment)
+    desc.vertex = shader("shaders/room3d.hlsl", vertex: "wood_vs")
+    desc.cull = CullNone
+    desc.blend = Lighter
+    desc.depth = TestOnly
+    let m = r.add_material_desc(&desc)
+    r.materials[m].order = order as u8
+    r.materials[m].no_fog = true
+    return m
+
+fn srgb_with(hex: u32, w: f32) -> Vec4
+    let c = Color.hex(hex)
+    return Vec4(c.r, c.g, c.b, w)

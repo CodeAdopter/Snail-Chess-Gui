@@ -1,0 +1,57 @@
+use engine/desktop/secret
+use src/store/data_folder
+
+const GithubTokenFile = "github_token.bin"
+
+struct GithubToken
+    token: [..]u8
+    loaded: bool
+    data: *DataFolder
+
+    fn load(folder: *DataFolder)
+        data = folder
+        if loaded: return
+        loaded = true
+        var buf: [600]u8
+        let bytes = read_file(data.path(GithubTokenFile, &buf).ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len > 0 and not unprotect_secret(bytes, &token): token.clear()
+
+    fn text() -> str
+        return str(token[0..token.len])
+
+    fn saved() -> bool
+        return token.len > 0
+
+    fn save(typed: str) -> bool
+        var start = 0
+        var end = typed.len as int
+        while start < end and typed[start] <= 32
+            start += 1
+        while end > start and typed[end - 1] <= 32
+            end -= 1
+        let t = typed[start..end]
+        if not token_shaped(t): return false
+        var sealed: [..]u8
+        defer sealed.free()
+        var buf: [600]u8
+        if not protect_secret(t, &sealed) or not save_whole(data.path(GithubTokenFile, &buf), sealed[0..sealed.len]): return false
+        token.clear()
+        for k in 0..t.len
+            token.push(t[k])
+        return true
+
+    fn remove()
+        token.clear()
+        var buf: [600]u8
+        SDL_RemovePath(data.path(GithubTokenFile, &buf).ptr as cstr)
+
+    fn release()
+        token.free()
+
+fn token_shaped(t: str) -> bool
+    if t.len < 20 or t.len > 255: return false
+    for k in 0..t.len
+        let c = t[k]
+        if not (c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z' or c >= '0' and c <= '9' or c == '_'): return false
+    return true

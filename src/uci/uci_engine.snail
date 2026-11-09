@@ -1,0 +1,202 @@
+use engine/desktop/child_process
+use engine/core/text
+use src/uci/uci_text
+use src/uci/engine_log
+use engine/desktop/crash_report
+
+const EngineAnswerNs: i64 = 30000000000
+const EngineStopNs: i64 = 5000000000
+
+enum EngineState: u8
+    EngineOff
+    EngineStarting
+    EngineReadying
+    EngineIdle
+    EngineSearching
+    EngineStopping
+    EngineFailed
+
+struct EngineOption
+    name: PoolSpan
+    kind: OptionKind
+    default: PoolSpan
+    least: i64
+    most: i64
+    vars: PoolSpan
+
+var engine_priority: int
+
+struct PoolSpan
+    at: int
+    len: int
+
+struct UciEngine
+    child: *ChildProcess
+    state: EngineState
+    answered_uci: bool
+    name: [80]u8
+    name_len: int
+    author: [80]u8
+    author_len: int
+    options: [..]EngineOption
+    pool: [..]u8
+    batch: ChildLines
+    asked_ns: i64
+    failure: [200]u8
+    failure_len: int
+    log: EngineLog
+    told: *[..]u8
+    told_tag: u8
+    unlogged: bool
+
+    fn start(path: str, folder: str) -> bool
+        if child == null
+            child = new ChildProcess
+            child.urgent = uci_line_urgent
+        options.clear()
+        pool.clear()
+        name_len = 0
+        author_len = 0
+        failure_len = 0
+        answered_uci = false
+        var command: [600]u8
+        var note: [640]u8
+        if not unlogged: log.add(LogNote, format(&note, "Started {path}"), now_ns())
+        crash_note("engine start", path)
+        if not child.start(format(&command, "\"{path}\""), folder)
+            fail("Could not start the engine. Check that its executable is still available.")
+            return false
+        if engine_priority > 0: child.set_priority(engine_priority)
+        state = EngineStarting
+        asked_ns = now_ns()
+        send("uci")
+        return true
+
+    fn send(line: str) -> bool
+        if child == null or not child.running: return false
+        if not unlogged: log.add(LogSent, line, now_ns())
+        if told
+            told.push(told_tag)
+            told.push(' ')
+            push_text(told, line)
+            told.push('\n')
+        return child.send(line)
+
+    fn take()
+        child.take(&batch)
+        if unlogged: return
+        for i in 0..batch.lines.len
+            log.add(LogRead, batch.line(i as int), batch.lines[i].ns)
+
+    fn handshake(line: str) -> bool
+        var w = UciWords(text: line)
+        let first = w.next()
+        if first == "id"
+            let what = w.next()
+            let value = w.rest()
+            if what == "name": name_len = keep_text(value, name[0..80])
+            elif what == "author": author_len = keep_text(value, author[0..80])
+            return true
+        if first == "option"
+            let (o, ok) = read_option(line)
+            if ok and options.len < 400: options.push(EngineOption(keep(o.name), o.kind, keep(o.default), o.least, o.most, keep(o.vars)))
+            return true
+        if first == "uciok" and state == EngineStarting
+            answered_uci = true
+            state = EngineReadying
+            asked_ns = now_ns()
+            send("isready")
+            return true
+        if first == "readyok" and state == EngineReadying
+            state = EngineIdle
+            return true
+        return first == "uciok" or first == "readyok" or first == "copyprotection" or first == "registration"
+
+    fn ready()
+        state = EngineReadying
+        asked_ns = now_ns()
+        send("isready")
+
+    fn stop()
+        if state != EngineSearching: return
+        send("stop")
+        state = EngineStopping
+        asked_ns = now_ns()
+
+    fn check(now: i64) -> bool
+        if state == EngineOff or state == EngineFailed: return false
+        if child.has_ended() and not child.waiting()
+            var line: [120]u8
+            let step = state == EngineStarting ? " before answering uci" : state == EngineReadying ? " before answering isready" : ""
+            child.close(500)
+            fail(format(&line, "The engine stopped{step}, exit code {child.exit_code()}."))
+            return true
+        let waited = now - asked_ns
+        if state == EngineStarting and waited > EngineAnswerNs
+            fail("The engine did not answer uci within 30 seconds.")
+            return true
+        if state == EngineReadying and waited > EngineAnswerNs
+            fail("The engine did not answer isready within 30 seconds.")
+            return true
+        if state == EngineStopping and waited > EngineStopNs
+            fail("The engine did not respond to the stop command within 5 seconds.")
+            return true
+        return false
+
+    fn fail(why: str)
+        failure_len = keep_text(why, failure[0..200])
+        crash_note("engine failed", why)
+        if not unlogged: log.add(LogNote, why, now_ns())
+        if child and child.running: child.close(0)
+        state = EngineFailed
+
+    fn quit()
+        if child and child.running
+            send("quit")
+            child.close_later(300)
+            child = new ChildProcess
+            child.urgent = uci_line_urgent
+        state = EngineOff
+
+    fn release()
+        quit()
+        if child
+            child.free_all()
+            batch.free_all()
+        options.free()
+        pool.free()
+        log.release()
+
+    fn display_name() -> str
+        return name_len > 0 ? str(name[0..name_len]) : "Engine"
+
+    fn failure_text() -> str
+        return str(failure[0..failure_len])
+
+    fn option(want: str) -> int
+        for i in 0..options.len
+            if pool_text(options[i].name) == want: return i as int
+        return -1
+
+    fn pool_text(s: PoolSpan) -> str
+        return str(pool[s.at..s.at + s.len])
+
+    fn keep(s: str) -> PoolSpan
+        let at = pool.len as int
+        for k in 0..s.len
+            pool.push(s[k])
+        return PoolSpan(at, s.len as int)
+
+    fn set_option(want: str, value: str)
+        if option(want) < 0: return
+        var line: [200]u8
+        send(format(&line, "setoption name {want} value {value}"))
+
+fn uci_line_urgent(line: str) -> bool
+    return not (line.len >= 4 and line[0] == 'i' and line[1] == 'n' and line[2] == 'f' and line[3] == 'o')
+
+fn keep_text(s: str, into: []u8) -> int
+    let n = min(s.len, into.len) as int
+    for i in 0..n
+        into[i] = s[i]
+    return n

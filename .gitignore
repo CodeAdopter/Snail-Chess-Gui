@@ -1,0 +1,5 @@
+build/
+__pycache__/
+tests/
+/None/
+/tools/

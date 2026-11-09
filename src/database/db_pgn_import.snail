@@ -1,0 +1,174 @@
+use src/database/db_games
+use src/chess/notation
+use src/game/pgn_lexer
+
+const DbImportCommitEvery = 2000
+
+struct DbPgnImport
+    db: *PositionDb
+    source: u8
+    all_engines: bool
+    eval_name: str = "Lichess analysis"
+    keep_evals: bool = true
+    eval_engine: u16
+    games: int
+    moves: int
+    evals: int
+    broken: int
+    game: DbGameInput
+    board: Board
+    in_game: bool
+    moves_started: bool
+    stopped: bool
+    depth: int
+    pending: [..]u8
+
+    fn run(text: str)
+        var lex = PgnLexer(text: text, at: 0)
+        loop
+            let t = lex.next()
+            if t == PgnEnd: break
+            if t == PgnTag
+                if moves_started: finish()
+                if not in_game: begin()
+                db_add(&game.tags, lex.tag_name)
+                game.tags.push('\t')
+                db_add_tag_value(&game.tags, lex.token)
+                game.tags.push('\n')
+            elif t == PgnSymbol
+                if not in_game: begin()
+                if not moves_started: start_moves()
+                if depth > 0 or stopped: continue
+                let (m, ok) = parse_move(&board, lex.token)
+                if not ok
+                    stopped = true
+                    broken += 1
+                    continue
+                game.moves.push(db_move(m))
+                board.play(m)
+                game.keys.push(board.key)
+            elif t == PgnComment
+                if depth == 0 and moves_started and not stopped and game.moves.len > 0: read_eval(lex.token)
+            elif t == PgnOpen
+                depth += 1
+            elif t == PgnClose
+                depth = max(depth - 1, 0)
+            elif t == PgnResult
+                if in_game: finish()
+        if in_game: finish()
+
+    fn feed(chunk: str)
+        db_add(&pending, chunk)
+        var cut = pending.len - 1
+        while cut > 0 and not (pending[cut] == '[' and pending[cut - 1] == '\n' and db_game_starts(&pending, cut)): cut -= 1
+        if cut <= 0: return
+        run(str(pending[0..cut]))
+        let rest = pending.len - cut
+        db_memmove(pending.ptr, &pending[cut], rest as u64)
+        pending.resize(rest)
+
+    fn feed_done()
+        if pending.len > 0: run(str(pending[0..pending.len]))
+        pending.clear()
+        db.commit()
+
+    fn begin()
+        game.clear()
+        game.source = source
+        in_game = true
+        moves_started = false
+        stopped = false
+        depth = 0
+
+    fn start_moves()
+        moves_started = true
+        let fen = db_tag(str(game.tags[0..game.tags.len]), "FEN")
+        if fen.len > 0 and board.load_fen(fen)
+            game.flags |= DbFromFen
+        else
+            board.load_fen(StartFen)
+        game.keys.push(board.key)
+
+    fn finish()
+        if not moves_started: start_moves()
+        let tags = str(game.tags[0..game.tags.len])
+        game.white = db_tag(tags, "White")
+        game.black = db_tag(tags, "Black")
+        game.event = db_tag(tags, "Event")
+        game.white_elo = parse_int(db_tag(tags, "WhiteElo")) as int
+        game.black_elo = parse_int(db_tag(tags, "BlackElo")) as int
+        game.date = db_date(db_tag(tags, "Date"))
+        game.result = db_result(db_tag(tags, "Result"))
+        if all_engines or db_engine_side(db, tags, game.white, "WhiteTitle", "WhiteType"): game.flags |= DbWhiteEngine
+        if all_engines or db_engine_side(db, tags, game.black, "BlackTitle", "BlackType"): game.flags |= DbBlackEngine
+        db.add_game(&game)
+        games += 1
+        moves += game.moves.len
+        in_game = false
+        moves_started = false
+        if games % DbImportCommitEvery == 0: db.commit()
+
+    fn read_eval(comment: str)
+        if not keep_evals: return
+        var at = db_find(comment, "[%eval ")
+        if at < 0: return
+        at += 7
+        var end = at
+        while end < comment.len and comment[end] != ']' and comment[end] != ' ': end += 1
+        let value = comment[at..end]
+        if value.len == 0: return
+        var score = 0
+        if value[0] == '#'
+            var m = parse_int(value[1..value.len]) as int
+            if board.side == Black: m = -m
+            score = m > 0 ? DbMateScore - m : -DbMateScore - m
+        else
+            score = round(parse_float(value) * 100.0) as int
+            if board.side == Black: score = -score
+        if eval_engine == 0: eval_engine = db.engine(eval_name)
+        let e = DbEval(engine: eval_engine, multipv: 1, score: score, stamp: (sn_db_unix_ms() / 1000) as u32)
+        db.put_eval(&board, e)
+        evals += 1
+
+    fn release()
+        game.release()
+        pending.free()
+
+fn db_game_starts(pending: *[..]u8, at: int) -> bool
+    if at + 7 <= pending.len and str(pending[at..at + 7]) == "[Event ": return true
+    return at >= 2 and pending[at - 2] == '\n'
+
+fn db_engine_side(db: *PositionDb, tags: str, name: str, title_tag: str, type_tag: str) -> bool
+    if db_tag(tags, title_tag) == "BOT": return true
+    if db_tag(tags, type_tag) == "program": return true
+    return db.is_engine(name)
+
+fn db_find(s: str, part: str) -> int
+    if part.len > s.len: return -1
+    for i in 0..s.len - part.len + 1
+        if s[i..i + part.len] == part: return i
+    return -1
+
+fn db_date(s: str) -> u32
+    if s.len < 10: return 0
+    let y = parse_int(s[0..4]) as u32
+    let m = parse_int(s[5..7]) as u32
+    let d = parse_int(s[8..10]) as u32
+    return y * 10000 + m * 100 + d
+
+fn db_result(s: str) -> u8
+    if s == "1-0": return 1
+    if s == "0-1": return 2
+    if s == "1/2-1/2": return 3
+    return 0
+
+fn db_add_tag_value(out: *[..]u8, value: str)
+    var i = 0
+    while i < value.len
+        var c = value[i]
+        if c == '\\' and i + 1 < value.len and (value[i + 1] == '"' or value[i + 1] == '\\')
+            i += 1
+            c = value[i]
+        if c == '\n' or c == '\r': c = ' '
+        out.push(c)
+        i += 1

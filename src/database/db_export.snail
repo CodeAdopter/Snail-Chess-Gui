@@ -1,0 +1,198 @@
+use src/database/db_games
+use src/chess/notation
+use src/database/db_logs
+
+const DbAnyKind = -1
+const DbHumansOnly = 0
+const DbHumanEngine = 1
+const DbEnginesOnly = 2
+
+struct DbGameFilter
+    kind: int = DbAnyKind
+    player: u32
+    elo_min: int
+    elo_max: int = 65535
+    date_min: u32
+    date_max: u32 = 99999999
+    source: int = -1
+
+    fn takes(g: *DbGame) -> bool
+        var engines = 0
+        if g.flags & DbWhiteEngine: engines += 1
+        if g.flags & DbBlackEngine: engines += 1
+        if kind == DbHumansOnly and engines != 0: return false
+        if kind == DbHumanEngine and engines != 1: return false
+        if kind == DbEnginesOnly and engines != 2: return false
+        if player != 0 and g.white != player and g.black != player: return false
+        if elo_min > 0 or elo_max < 65535
+            if g.white_elo < elo_min or g.white_elo > elo_max: return false
+            if g.black_elo < elo_min or g.black_elo > elo_max: return false
+        if g.date < date_min or g.date > date_max: return false
+        if source >= 0 and g.source != source: return false
+        return true
+
+struct DbOut
+    file: DbFile
+    text: [..]u8
+    ok: bool
+
+    fn open(path: str) -> bool
+        ok = file.open(path, DbCreate)
+        return ok
+
+    fn spill_if_full()
+        if text.len >= 1048576: spill()
+
+    fn spill()
+        if ok: ok = file.append(text.ptr, text.len as i64)
+        text.clear()
+
+    fn close() -> bool
+        spill()
+        file.close()
+        text.free()
+        return ok
+
+fn db_export_games(db: *PositionDb, path: str, filter: *DbGameFilter) -> int
+    var out: DbOut
+    if not out.open(path): return -1
+    var meta: DbGame
+    var tags: [..]u8
+    var moves: [..]u16
+    defer tags.free()
+    defer moves.free()
+    var written = 0
+    let n = db.game_count()
+    for id in 0..n
+        if not db.game_meta(id as u32, &meta) or not filter.takes(&meta): continue
+        if not db.read_game(id as u32, &meta, &tags, &moves): continue
+        db_write_pgn(&out.text, str(tags[0..tags.len]), &moves, meta.result)
+        written += 1
+        out.spill_if_full()
+    if not out.close(): return -1
+    return written
+
+fn db_write_pgn(out: *[..]u8, tags: str, moves: *[..]u16, result: u8)
+    var at = 0
+    while at < tags.len
+        var end = at
+        while end < tags.len and tags[end] != '\n': end += 1
+        var tab = at
+        while tab < end and tags[tab] != '\t': tab += 1
+        if tab < end
+            out.push('[')
+            db_add(out, tags[at..tab])
+            db_add(out, " \"")
+            for i in tab + 1..end
+                let c = tags[i]
+                if c == '"' or c == '\\': out.push('\\')
+                out.push(c)
+            db_add(out, "\"]\n")
+        at = end + 1
+    out.push('\n')
+    var board: Board
+    let fen = db_tag(tags, "FEN")
+    if fen.len == 0 or not board.load_fen(fen): board.load_fen(StartFen)
+    var line_start = out.len
+    var san: ShortText
+    for i in 0..moves.len
+        let (m, ok) = db_find_move(&board, moves[i])
+        if not ok: break
+        if out.len - line_start > 72
+            out.push('\n')
+            line_start = out.len
+        elif out.len > line_start
+            out.push(' ')
+        if board.side == White or i == 0
+            db_add_int(out, board.fullmove)
+            db_add(out, board.side == White ? "." : "...")
+            out.push(' ')
+        san.clear()
+        write_san(&board, m, &san)
+        db_add(out, san.text())
+        board.play(m)
+    if out.len > line_start: out.push(' ')
+    db_add(out, db_result_text(result))
+    db_add(out, "\n\n")
+
+fn db_result_text(r: u8) -> str
+    if r == 1: return "1-0"
+    if r == 2: return "0-1"
+    if r == 3: return "1/2-1/2"
+    return "*"
+
+fn db_export_evals(db: *PositionDb, path: str, engine: u16) -> int
+    var out: DbOut
+    if not out.open(path): return -1
+    var name: [..]u8
+    var pos: DbPos
+    var written = 0
+    db.store.each(db.evals, |r| written += db_eval_line(db, &out, r as *DbEval, engine, &pos, &name))
+    name.free()
+    if not out.close(): return -1
+    return written
+
+fn db_eval_line(db: *PositionDb, out: *DbOut, e: *DbEval, engine: u16, pos: *DbPos, name: *[..]u8) -> int
+    if engine != 0 and e.engine != engine: return 0
+    if not db.position_of(e.key, pos): return 0
+    let t = &out.text
+    db_add(t, "{{\"fen\":\"")
+    db_add_fen(t, pos)
+    db_add(t, "\",\"engine\":\"")
+    db.engine_name(e.engine, name)
+    db_add(t, str(name[0..name.len]))
+    db_add(t, "\",\"multipv\":")
+    db_add_int(t, e.multipv)
+    db_add(t, ",\"depth\":")
+    db_add_int(t, e.depth)
+    if e.score >= DbMateScore - 1000
+        db_add(t, ",\"mate\":")
+        db_add_int(t, DbMateScore - e.score)
+    elif e.score <= -DbMateScore + 1000
+        db_add(t, ",\"mate\":")
+        db_add_int(t, -DbMateScore - e.score)
+    else
+        db_add(t, ",\"cp\":")
+        db_add_int(t, e.score)
+    if e.flags & DbHasWdl
+        db_add(t, ",\"wdl\":[")
+        db_add_int(t, e.wdl & 1023)
+        t.push(',')
+        db_add_int(t, e.wdl >> 10 & 1023)
+        t.push(',')
+        db_add_int(t, e.wdl >> 20 & 1023)
+        t.push(']')
+    db_add(t, ",\"nodes\":")
+    db_add_int(t, e.nodes as i64)
+    db_add(t, ",\"pv\":\"")
+    for i in 0..e.pv_len
+        if i > 0: t.push(' ')
+        db_add_uci(t, e.pv[i])
+    db_add(t, "\"}\n")
+    out.spill_if_full()
+    return 1
+
+fn db_export_logs(db: *PositionDb, path: str, engine: u16) -> int
+    var out: DbOut
+    if not out.open(path): return -1
+    var name: [..]u8
+    defer name.free()
+    var written = 0
+    db.each_log(|ms, who, game, way, text| written += db_log_line(db, &out, ms, who, game, way, text, engine, &name))
+    if not out.close(): return -1
+    return written
+
+fn db_log_line(db: *PositionDb, out: *DbOut, ms: i64, who: u16, game: u32, way: u8, text: str, engine: u16, name: *[..]u8) -> int
+    if engine != 0 and who != engine: return 0
+    let t = &out.text
+    db_add_int(t, ms)
+    t.push('\t')
+    db.engine_name(who, name)
+    db_add(t, str(name[0..name.len]))
+    t.push('\t')
+    db_add_int(t, game)
+    db_add(t, way == DbToEngine ? "\t<\t" : "\t>\t")
+    db_add(t, text)
+    t.push('\n')
+    out.spill_if_full()
+    return 1

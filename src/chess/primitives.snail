@@ -1,0 +1,80 @@
+enum Side: u8
+    White
+    Black
+
+    @inline
+    fn other() -> Side
+        return (self ^ 1) as Side
+
+enum Kind: u8
+    NoKind
+    Pawn
+    Knight
+    Bishop
+    Rook
+    Queen
+    King
+
+type Piece = u8
+    @inline
+    static fn of(side: Side, kind: Kind) -> Piece
+        return (kind << 1 | side) as Piece
+
+    @inline
+    fn kind() -> Kind
+        return (self >> 1) as Kind
+
+    @inline
+    fn side() -> Side
+        return (self & 1) as Side
+
+const NoPiece: Piece = 0
+const PieceLimit = 14
+
+enum MoveKind: u8
+    Quiet = 0
+    DoublePush = 1
+    CastleKingside = 2
+    CastleQueenside = 3
+    Capture = 4
+    EnPassant = 5
+    PromoteKnight = 8
+    PromoteBishop = 9
+    PromoteRook = 10
+    PromoteQueen = 11
+    CapturePromoteKnight = 12
+    CapturePromoteBishop = 13
+    CapturePromoteRook = 14
+    CapturePromoteQueen = 15
+
+const CaptureBit = 1 << 14
+const PromotionBit = 1 << 15
+
+const MaxMoves = 256
+
+packed Move: u16
+    from: Square : 6
+    to: Square : 6
+    kind: MoveKind : 4
+
+    @inline
+    fn code() -> u16
+        return self as u16
+
+    @inline
+    fn is_capture() -> bool
+        return self as u16 & CaptureBit != 0
+
+    @inline
+    fn is_promotion() -> bool
+        return self as u16 & PromotionBit != 0
+
+    @inline
+    fn is_castle() -> bool
+        return self as u16 >> 13 == 1
+
+    @inline
+    fn promotion() -> Kind
+        return (Knight + (self as u16 >> 12 & 3)) as Kind
+
+const NoMove = 0 as Move

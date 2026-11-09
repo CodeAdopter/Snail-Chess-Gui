@@ -1,0 +1,3 @@
+use src/pieces/piece_art
+
+const BlindfoldArt = PieceArt(name: "Blindfold", size: 100.0)

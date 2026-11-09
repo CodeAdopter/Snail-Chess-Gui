@@ -1,0 +1,90 @@
+use src/uci/engine_analysis
+use src/views/board_view
+
+const PvMovesShown = 24
+
+struct PvWord
+    line: int
+    ply: int
+    at: int
+    len: int
+
+struct PvLines
+    words: [..]PvWord
+    text: [..]u8
+    hover_line: int = -1
+    hover_ply: int
+    hover_at: Vec2
+
+    fn make(board: *Board, lines: []PvLine) -> int
+        words.clear()
+        text.clear()
+        var made = 0
+        for line in 0..lines.len
+            let l = &lines[line]
+            if not l.filled: break
+            made = line as int + 1
+            var b = *board
+            for ply in 0..min(l.count, PvMovesShown)
+                var t: ShortText
+                if b.side == White: t.add_int(b.fullmove)
+                if b.side == White: t.add_str(". ")
+                elif ply == 0
+                    t.add_int(b.fullmove)
+                    t.add_str("... ")
+                write_san(&b, l.moves[ply], &t)
+                let at = text.len as int
+                for k in 0..t.len
+                    text.push(t.bytes[k])
+                words.push(PvWord(line as int, ply as int, at, t.len))
+                b.play(l.moves[ply])
+        return made
+
+    fn clear()
+        words.clear()
+        text.clear()
+
+    fn begin()
+        hover_line = -1
+
+    fn moves(app: *DesktopApp, look: *BoardLook, line: int, most: int = PvMovesShown) -> int
+        let ui = &app.ui
+        let theme = look.theme
+        var ply = -1
+        let move_style = UiTextStyle(face: look.fonts.text, size: 12.5, color: theme.ink)
+        for wd in words
+            if wd.line != line or wd.ply >= most: continue
+            let o = ui.open(UiNode(key: wd.ply, name: "w", padding: Vec4(3.0, 2.0, 3.0, 2.0), hit: true))
+            let h = ui.interact(o.id, false)
+            let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 22.0)
+            ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.12 * lit)), radius: Vec4.splat(4.0))
+            ui.label(str(text[wd.at..wd.at + wd.len]), move_style)
+            ui.close()
+            if h.hovered
+                app.cursor = SDL_SYSTEM_CURSOR_POINTER
+                hover_line = line
+                hover_ply = wd.ply
+                hover_at = Vec2(app.pointer.mouse.x, app.pointer.mouse.y)
+            if h.clicked: ply = wd.ply
+        return ply
+
+    fn hover_board(app: *DesktopApp, look: *BoardLook, board: *Board, lines: []PvLine, flipped: bool)
+        if hover_line < 0 or hover_line >= lines.len: return
+        let ui = &app.ui
+        let l = &lines[hover_line]
+        var b = *board
+        for k in 0..hover_ply + 1
+            if k < l.count: b.play(l.moves[k])
+        let size: f32 = 200.0
+        let x = clamp(hover_at.x - size * 0.5, 4.0, max(ui.width - size - 4.0, 4.0))
+        var y = hover_at.y + 18.0
+        if y + size > ui.height - 4.0: y = hover_at.y - 18.0 - size
+        let keep = ui.layer
+        ui.layer = 7
+        ui.box(x - 3.0, y - 3.0, size + 6.0, size + 6.0, UiBox(fill: UiFill.solid(look.theme.surface), radius: Vec4.splat(6.0), shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.3), 0.0, 6.0, 18.0, 0.0, false)))
+        draw_small_board(ui, look, &b, l.moves[hover_ply], x, y, size, flipped)
+        ui.layer = keep
+
+    fn release()
+        words.free()
+        text.free()

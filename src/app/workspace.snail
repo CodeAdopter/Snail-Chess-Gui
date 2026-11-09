@@ -1,0 +1,252 @@
+use engine/desktop/splitter
+use src/app/tabs
+use src/views/sacrifice_mark
+use src/views/eval_graph
+use src/views/opening_row
+
+enum ReviewAsk: u8
+    NoReviewAsk
+    ReviewStart
+    ReviewStop
+
+const WorkspaceMargin: f32 = 12.0
+const WorkspaceGap: f32 = 12.0
+const PanelLeast: f32 = 320.0
+const EvalsUnlimited: f32 = 100000.0
+
+struct Workspace
+    column: Splitter
+    analysis: Splitter
+    graph: Splitter
+    evals: Splitter
+    chat: Splitter
+    evals_most: f32 = EvalsUnlimited
+    shift: f32 = 0.5
+    shift_grab: f32
+    ready: bool
+    wheel_left: f32
+    moves_room: Vec4
+    eval_graph: EvalGraph
+    review_engine: int
+    review_picker: EnginePicker
+    review_ask: ReviewAsk
+    review_picked: int
+    report: GameReport
+
+    fn draw(app: *DesktopApp, look: *DesktopLook, theme: *GuiTheme, fonts: *GuiFonts, tab: *GuiTab, board_look: *BoardLook, choices: *EngineChoices, database: bool)
+        let ui = &app.ui
+        let (ax, ay, aw, ah) = work_area(ui)
+        let col_w = board_column(app, look, ax, ay, aw, ah)
+        let (px, py, pw, ph) = side_room(ui, ax, col_w)
+
+        let spare_part: f32 = tab.editing ? 0.11 : 0.0
+        let frame = backdrop_frame(board_look, min(col_w, ah))
+        let fit = board_place(0.0, 0.0, max(min(col_w - frame * 2.0, (ah - frame * 2.0) / (1.0 + spare_part * 2.0)), 1.0), app.scale)
+        let size = fit.size
+        let spare = size * spare_part
+        let slack = col_w - size
+        let board_x = ax + frame + max(slack - frame * 2.0, 0.0) * shift
+        if board_look.scene: tab.board.room = board_room(app, ax, col_w, TabRowHeight + CommandBarHeight)
+        else: draw_slack(app, ax, ay, col_w, size, slack, board_x)
+        let place = board_place(board_x, ay + frame + spare, size, app.scale)
+        draw_backdrop_behind(app, board_look, ax, col_w, place)
+        board_look.sheet.prepare(&app.gpu, &app.ui_gpu, board_look.set, place.cell_px, board_look.costume)
+        let game = tab.game
+        if tab.editing
+            tab.editor.draw_board(app, board_look, &tab.board, place, spare, tab.flipped)
+            if tab.editor.draw_panel(app, board_look, px, py, pw, ph, &tab.flipped)
+                let (b, ok) = tab.editor.board()
+                if ok
+                    game.reset(&b)
+                    tab.editing = false
+            return
+        wheel_moves(app, game, tab.moves.area_id, ax, ay, col_w, ah, board_look.scene == null)
+        let a = tab.analysis
+        engine_arrows(tab, board_look)
+        if board_look.effects and board_look.effects.wants_story(): tab.board.story.follow(game)
+        if board_look.effects and board_look.effects.on(SacrificeMark)
+            var line: SacrificeLine
+            sacrifice_line_of(&line, game)
+            if a and a.on and a.lines_fresh() and line.count == line.shown + 1 and a.lines[0].depth >= SacrificeDepth
+                let l = &a.lines[0]
+                line.add_line(l.moves[0..l.count], white_view(l.kind, l.score, a.searching.side))
+            tab.board.sacrifice = find_sacrifice(&line)
+        tab.board.by_hand = tab.kind == Analysis
+        tab.board.hand_waits = false
+        let made = tab.board.draw(app, board_look, game.board(), game.last_move(), place, tab.flipped, tab.kind == Analysis)
+        if made != NoMove: game.play(made)
+
+        report.update(game)
+        let card_h = report.judged > 0 ? ReviewCardHeight : 0.0
+        let moves_least = 120.0 + card_h + OpeningRowHeight
+        graph.least = 80.0
+        graph.reset = 150.0
+        let a_want = a ? tab.panel.height(ui, a, choices) : 150.0
+        let a_h = min(a_want, max(ph - graph.least - moves_least - WorkspaceGap * 2.0, 96.0))
+        var d_h: f32 = 0.0
+        var d_want: f32 = 0.0
+        var d_room: f32 = 0.0
+        if database and tab.kind == Analysis
+            tab.database.read(game.board())
+            d_want = tab.database.height(ui)
+            d_room = max(ph - a_h - graph.least - moves_least - WorkspaceGap * 3.0, 0.0)
+            d_h = min(min(d_want, max(evals_most, tab.database.least_height())), d_room)
+        let d_gap = d_h > 0.0 ? WorkspaceGap : 0.0
+        graph.most = ph - a_h - d_h - d_gap - moves_least - WorkspaceGap * 2.0
+        ui.rect(px, py + a_h + WorkspaceGap * 0.5 - 0.5, pw, 1.0, look.line, 0.5)
+        graph.draw(app, look, "graph", false, px, py + ph - graph.pos - WorkspaceGap * 0.5, pw, py + ph, true, lined: true)
+        let g_h = clamp(graph.pos, graph.least, max(graph.least, graph.most))
+        let d_y = py + a_h + WorkspaceGap * 0.5
+        let o_y = d_y + d_h + d_gap
+        let m_y = o_y + OpeningRowHeight
+        let m_h = ph - a_h - d_h - d_gap - g_h - WorkspaceGap * 1.5 - OpeningRowHeight
+        if a
+            let (line, ply) = tab.panel.draw(app, board_look, a, choices, px, py, pw, a_h, tab.flipped)
+            if line >= 0 and a.lines_fresh()
+                let l = a.lines[line]
+                for k in 0..ply + 1
+                    game.play(l.moves[k])
+        else: panel(ui, theme, fonts, px, py, pw, a_h, "Engine analysis", "Open an analysis tab to view engine lines.")
+        if d_h > 0.0
+            let (line, ply) = tab.database.draw(app, board_look, px, d_y, pw, d_h, tab.flipped)
+            if line >= 0
+                let l = tab.database.lines[line]
+                for k in 0..ply + 1
+                    game.play(l.moves[k])
+            evals.least = min(tab.database.least_height(), d_h)
+            evals.most = min(d_want, d_room)
+            evals.reset = d_want
+            evals.pos = d_h
+            if evals.draw(app, look, "evals", false, px, d_y + d_h + d_gap * 0.5, pw, d_y, lined: true): evals_most = evals.pos >= d_want - 0.5 ? EvalsUnlimited : evals.pos
+        draw_opening_row(ui, theme, fonts, game, px, o_y, pw, OpeningRowHeight)
+        ui.rect(px, m_y - 0.5, pw, 1.0, look.line, 0.5)
+        tab.moves.draw(app, look, theme, fonts, game, px, m_y, pw, m_h - card_h, &report)
+        if tab.moves.clicked: tab.board.free.unsync()
+        moves_room = Vec4(px, m_y, pw, m_h - card_h)
+        if card_h > 0.0
+            ui.rect(px, m_y + m_h - card_h - 0.5, pw, 1.0, look.line, 0.5)
+            draw_review_card(app, theme, fonts, game, &report, px, m_y + m_h - card_h, pw, card_h)
+        draw_eval(app, board_look, game, px, py + ph - g_h, pw, g_h, "Review the game to build an evaluation graph, or turn on the engine and step through the moves.", tab.review, choices.lib)
+
+    fn engine_arrows(tab: *GuiTab, board_look: *BoardLook)
+        let a = tab.analysis
+        if not a or not a.on or not a.lines_fresh() or not board_look.arrows: return
+        let c = board_look.arrow_colors[tab.game.board().side == White ? WhiteMove as int : BlackMove as int]
+        for i in 0..MaxAnalysisLines
+            let l = &a.lines[i]
+            if not l.filled: break
+            tab.board.arrow(l.moves[0].from, l.moves[0].to, c.with_alpha(i == 0 ? c.a : c.a * 0.5), i == 0 ? board_look.engine_width : board_look.engine_width * 0.67)
+
+    fn draw_eval(app: *DesktopApp, look: *BoardLook, game: *Game, x: f32, y: f32, w: f32, h: f32, empty: str, review: *GameReview, lib: *EngineLibrary)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        if w < 1.0 or h < 1.0: return
+        ui.clip_to(x, y, w, h)
+        with ui.open(UiNode(name: "evalhead", floating: true, offset: Vec2(x + 14.0, y + 4.0), width: UiSize.fixed(max(w - 24.0, 1.0)), height: UiSize.fixed(30.0), flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5), clip: true))
+            ui.label("Evaluation", UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink))
+            ui.spacer()
+            if lib
+                var line: [64]u8
+                if review and review.running
+                    let (done, total) = review.done()
+                    ui.label(format(&line, "Reviewing moves: {done} of {total}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+                    if ui.button("Stop"): review_ask = ReviewStop
+                else
+                    let entry = lib.find(review_engine)
+                    let other = review and review.by_len > 0 and (not entry or review.by_text() != entry.display_name())
+                    if other
+                        var by: [128]u8
+                        ui.label(format(&by, "Reviewed by {review.by_text()}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(clip: true))
+                    if engine_choice_button(ui, look, "reviewengine", 0, entry ? entry.display_name() : "No engine", "", review_picker.shown, UiNode(width: UiSize.fixed(min(170.0, w * 0.36)), height: UiSize.fixed(30.0))): review_picker.open()
+                    if entry and game.nodes[0].first != NoNode and ui.button(other or review and review.complete ? "Review again" : "Review the game"): review_ask = ReviewStart
+        let clicked = eval_graph.draw(app, theme, fonts, game, x + 10.0, y + 40.0, w - 20.0, h - 50.0, empty)
+        ui.unclip()
+        if clicked >= 0: game.go(clicked)
+        if lib and review_picker.draw(ui, look, lib, review_engine, -1): review_picked = review_picker.picked_engine
+
+    fn release(gpu: *Gpu)
+        eval_graph.release(gpu)
+        report.release()
+        review_picker.release()
+
+    fn wheel_moves(app: *DesktopApp, game: *Game, moves_area: u32, ax: f32, ay: f32, col_w: f32, ah: f32, board_walks: bool)
+        let ui = &app.ui
+        let m = &app.pointer.mouse
+        if m.wheel == 0.0: return
+        let hits = &ui.last_scroll_hits
+        let on_board = board_walks and hits.len == 0 and m.x >= ax and m.x < ax + col_w and m.y >= ay and m.y < ay + ah
+        let r = moves_room
+        let on_moves = hits.len > 0 and hits[hits.len - 1] == moves_area and m.x >= r.x and m.x < r.x + r.z and m.y >= r.y and m.y < r.y + r.w
+        if not on_board and not on_moves: return
+        ui.wheel = 0.0
+        wheel_left += m.wheel
+        while wheel_left >= 1.0
+            game.back()
+            wheel_left -= 1.0
+        while wheel_left <= -1.0
+            game.forward()
+            wheel_left += 1.0
+
+    fn board_column(app: *DesktopApp, look: *DesktopLook, ax: f32, ay: f32, aw: f32, ah: f32) -> f32
+        column.least = 240.0
+        column.most = aw - PanelLeast - WorkspaceGap
+        column.reset = min(ah, aw * 0.58)
+        if not ready
+            column.pos = column.reset
+            analysis.pos = 150.0
+            graph.pos = 150.0
+            ready = true
+        let col_w = clamp(column.pos, column.least, max(column.least, column.most))
+        let x = side_x(ax, col_w)
+        command_bar_side(app, look, x, PageCurve)
+        let top = TabRowHeight + CommandBarHeight + PageCurve
+        if column.draw(app, look, "column", true, x - 0.5, top, max(app.ui.height - top, 1.0), ax): app.redraw()
+        return col_w
+
+    fn draw_slack(app: *DesktopApp, ax: f32, ay: f32, col_w: f32, size: f32, slack: f32, board_x: f32)
+        if slack < 2.0: return
+        let ui = &app.ui
+        let left = board_x - ax
+        let right = ax + col_w - (board_x + size)
+        var held = false
+        for (name, x, w) in [("slackleft", ax, left), ("slackright", board_x + size, right)]
+            if w < 1.0: continue
+            let o = ui.open(UiNode(name: name, floating: true, offset: Vec2(x, ay), width: UiSize.fixed(w), height: UiSize.fixed(size), hit: true))
+            let h = ui.interact(o.id, false)
+            ui.close()
+            if h.hovered or h.held: app.cursor = SDL_SYSTEM_CURSOR_EW_RESIZE
+            if h.pressed: shift_grab = app.pointer.mouse.x - board_x
+            if h.held: held = true
+            if h.hovered and app.double_click: shift = 0.5
+        if held: shift = clamp((app.pointer.mouse.x - shift_grab - ax) / slack, 0.0, 1.0)
+
+fn backdrop_frame(look: *BoardLook, room: f32) -> f32
+    return look.backdrop == ThemeBackdrop ? 0.0 : floor(room * 0.06)
+
+fn draw_backdrop_behind(app: *DesktopApp, look: *BoardLook, ax: f32, col_w: f32, place: BoardPlace)
+    if not look.surfaces or look.backdrop == ThemeBackdrop or look.scene: return
+    let top = TabRowHeight + CommandBarHeight
+    look.surfaces.draw_backdrop(&app.ui, look.backdrop, 0.0, top, side_x(ax, col_w) - 1.0, max(app.ui.height - top, 1.0), now_ns(), Vec4(place.x, place.y, place.size, 0.0), Vec4(0.0, PageCurve - 1.0, 0.0, 0.0))
+
+fn board_room(app: *DesktopApp, ax: f32, col_w: f32, top: f32) -> Vec4
+    return Vec4(0.0, top, side_x(ax, col_w), max(app.ui.height - top, 1.0))
+
+fn work_area(ui: *UiCanvas) -> (f32, f32, f32, f32)
+    let top = TabRowHeight + CommandBarHeight
+    return WorkspaceMargin, top + WorkspaceMargin, max(ui.width - WorkspaceMargin * 2.0, 1.0), max(ui.height - top - WorkspaceMargin * 2.0, 1.0)
+
+fn side_room(ui: *UiCanvas, ax: f32, col_w: f32) -> (f32, f32, f32, f32)
+    let x = side_x(ax, col_w)
+    let top = TabRowHeight + CommandBarHeight
+    return x, top, max(ui.width - x, 1.0), max(ui.height - top, 1.0)
+
+fn side_x(ax: f32, col_w: f32) -> f32
+    return floor(ax + col_w + WorkspaceGap)
+
+fn panel(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, x: f32, y: f32, w: f32, h: f32, title: str, note: str)
+    if w < 1.0 or h < 1.0: return
+    ui.clip_to(x, y, w, h)
+    ui.text(x + 14.0, y + 11.0, title, UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink))
+    ui.text_box(x + 14.0, y + 34.0, max(w - 28.0, 1.0), max(h - 44.0, 1.0), note, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+    ui.unclip()

@@ -1,0 +1,248 @@
+use engine/ui/ui_edit
+use src/views/filter_pop
+use src/views/wrap_rows
+use src/tabs/event_cards
+
+const HistoryKinds = ["Everything", "Tournaments", "Matches", "Games"]
+const HistoryOutcomes = ["Any outcome", "Won", "Drawn", "Lost", "Unfinished"]
+const HistoryDates = ["Any time", "Today", "The past week", "The past month", "The past year"]
+const HistorySpans = [0, 0, 6, 30, 365]
+const HistorySearchWide: f32 = 260.0
+const HistoryLeast: f32 = 620.0
+const HistoryAll = 0
+const HistoryEvents = 1
+const HistoryGames = 2
+
+struct HistoryRow
+    event: int = -1
+    game: int = -1
+    day: int
+
+struct HistoryView
+    search: UiEditText
+    kind: int
+    outcome: int
+    date: int
+    engine: int
+    book: int
+    only: int
+    speed: int = -1
+    rows: [..]HistoryRow
+    shown: [..]int
+    picked: [..]int
+    cards: GameCards
+    event_cards: EventCards
+    engines: [..]str
+    books: [..]str
+    made_for: u64
+    open_event: int = -1
+    resume_event: int = -1
+    analyse_at: int = -1
+
+    fn draw(ui: *UiCanvas, look: *BoardLook, events: []*EventRunner, played: *PlayedIndex, width: f32)
+        let theme = look.theme
+        let fonts = look.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let stamp = played.version * 1000 + events.len as u64 + (only * 10 + speed + 1) as u64 * 1000000000
+        if stamp != made_for
+            made_for = stamp
+            gather(events, played)
+        var need: f32 = HistorySearchWide + 8.0 * 3.0 + 140.0 * 2.0 + 190.0
+        if only == HistoryAll: need += 148.0
+        if only != HistoryGames: need += 178.0
+        let fits = width >= need
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.text_field("historysearch", &search, "Search names, engines and books", UiNode(width: fits ? UiSize.fixed(HistorySearchWide) : UiSize.grow()))
+            if fits
+                if only == HistoryAll: ui.dropdown("historykind", ref kind, HistoryKinds, UiNode(width: UiSize.fixed(140.0)))
+                ui.dropdown("historyoutcome", ref outcome, HistoryOutcomes, UiNode(width: UiSize.fixed(140.0)))
+                ui.dropdown("historydate", ref date, HistoryDates, UiNode(width: UiSize.fixed(140.0)))
+                ui.dropdown("historyengine", ref engine, engines[0..engines.len], UiNode(width: UiSize.fixed(190.0)))
+                if only != HistoryGames: ui.dropdown("historybook", ref book, books[0..books.len], UiNode(width: UiSize.fixed(170.0)))
+            else
+                let set = (kind > 0 ? 1 : 0) + (outcome > 0 ? 1 : 0) + (date > 0 ? 1 : 0) + (engine > 0 ? 1 : 0) + (book > 0 ? 1 : 0)
+                with f = filter_pop(ui, theme, fonts, "historyfilters", set)
+                    if only == HistoryAll: f.pick("historykind", "KIND", ref kind, HistoryKinds)
+                    f.pick("historyoutcome", "OUTCOME", ref outcome, HistoryOutcomes)
+                    f.pick("historydate", "WHEN", ref date, HistoryDates)
+                    f.pick("historyengine", "ENGINE", ref engine, engines[0..engines.len])
+                    if only != HistoryGames: f.pick("historybook", "BOOK", ref book, books[0..books.len])
+        filter(events, played)
+        if rows.len == 0: ui.paragraph(only == HistoryEvents ? "No tournaments or matches yet." : only == HistoryGames ? "No games against engines yet." : "No games or tournaments yet. Your history will appear here as you play.", note)
+        elif shown.len == 0: ui.paragraph("No matching results.", note)
+        if shown.len == 0: return
+        if only == HistoryGames
+            picked.clear()
+            for k in shown
+                picked.push(rows[k].game)
+            cards.draw(ui, look, played, picked[0..picked.len], width, speed + 1)
+            if cards.opened >= 0: analyse_at = cards.opened
+            cards.opened = -1
+            return
+        if only == HistoryEvents
+            picked.clear()
+            for k in shown
+                picked.push(rows[k].event)
+            event_cards.draw(ui, look, events, picked[0..picked.len], width, 1)
+            if event_cards.open >= 0: open_event = event_cards.open
+            if event_cards.resume >= 0: resume_event = event_cards.resume
+            event_cards.open = -1
+            event_cards.resume = -1
+            return
+        let acts = only == HistoryGames ? button_width(ui, "Analyze") : button_width(ui, "Resume") + 6.0 + button_width(ui, "Open")
+        with list = row_list(ui, theme, fonts, "historyrows", only * 10 + speed + 1, shown.len as int, width, HistoryLeast, acts)
+            for k in list.first()..list.last()
+                let r = rows[shown[k]]
+                with list.row(k, shown[k])
+                    if r.event >= 0: event_row(&list, events[r.event], r.event, r.day)
+                    else: game_row(&list, played, r.game)
+
+    fn event_row(list: *RowList, e: *EventRunner, i: int, day: int)
+        let ui = list.ui
+        let theme = list.theme
+        let c = &e.config
+        let match_kind = c.format == HeadToHead
+        let s = &e.standings
+        var line: [300]u8
+        var when: [24]u8
+        var big: [24]u8
+        with list.middle()
+            with list.line()
+                ui.label(c.name_text(), UiTextStyle(face: list.fonts.strong, size: 13.5, color: theme.ink))
+                ui.label(match_kind ? "Match" : "Tournament", UiTextStyle(face: list.fonts.text, size: 12.0, color: theme.muted), UiNode(padding: Vec4(4.0, 0.0, 0.0, 0.0)))
+            let book = c.book == NoEventBook ? "no book" : c.book_name_text()
+            if match_kind and s.tallies.len == 2: list.note(format(&line, "{c.entrants[0].name_text()} {s.tallies[0].points():.1} – {s.tallies[1].points():.1} {c.entrants[1].name_text()}  ·  {book}  ·  {day_short(day, &when)}"))
+            elif e.finished_games() > 0 and s.order.len > 0
+                let t = &s.tallies[s.order[0]]
+                list.note(format(&line, "{c.entrants.len} engines  ·  {book}  ·  leader {c.entrants[s.order[0]].name_text()} {t.points():.1}/{t.games()}  ·  {day_short(day, &when)}"))
+            else: list.note(format(&line, "{c.entrants.len} engines  ·  {book}  ·  {day_short(day, &when)}"))
+        let color = e.state == EventRunning or e.state == EventPausing ? theme.accent : e.state == EventPaused ? theme.warn : e.state == EventFinished ? theme.gain() : theme.muted
+        let count = format(&big, "{e.finished_games()}/{e.schedule.len}")
+        list.lead(count, state_word(e.state), color, count.len > 5 ? 14.0 : 17.0)
+        with list.actions()
+            if e.state == EventPaused and ui.button("Resume"): resume_event = i
+            if ui.button("Open"): open_event = i
+
+    fn game_row(list: *RowList, played: *PlayedIndex, i: int)
+        let ui = list.ui
+        let theme = list.theme
+        let fonts = list.fonts
+        let g = &played.games[i]
+        var line: [300]u8
+        var clock: [24]u8
+        var when: [24]u8
+        var big: [16]u8
+        let o = played.outcome(g)
+        let said = o == 1 ? "Won" : o == 0 ? "Drawn" : o == -1 ? "Lost" : "Unfinished"
+        with list.middle()
+            with list.line()
+                player_tag(ui, theme, fonts, 0, played.text(g.white), g.white_elo, true)
+                versus(ui, theme, fonts)
+                player_tag(ui, theme, fonts, 1, played.text(g.black), g.black_elo, false)
+            let shown_clock = g.speed == SpeedInfinite ? "∞" : clock_of_pgn(played.text(g.clock), &clock)
+            list.note(format(&line, "{SpeedNames[g.speed]} {shown_clock}  ·  {g.rated ? "Rated" : "Casual"}  ·  {g.plies / 2 + g.plies % 2} moves  ·  {o == 2 ? said : result_text(g.result)}  ·  {day_short(g.day, &when)}"))
+        let c = o == 1 ? theme.gain() : o == -1 ? theme.loss() : theme.muted
+        if g.changed
+            let cc = g.change > 0 ? theme.gain() : g.change < 0 ? theme.loss() : theme.muted
+            list.lead(format(&big, "{g.change > 0 ? "+" : ""}{g.change}"), o == 1 ? "WON" : o == 0 ? "DRAWN" : o == -1 ? "LOST" : "", cc)
+        elif o == 2: list.lead("–", "", c)
+        else: list.lead(said, "CASUAL", c, 15.0)
+        with list.actions()
+            if ui.button("Analyze"): analyse_at = g.at
+
+    fn gather(events: []*EventRunner, played: *PlayedIndex)
+        rows.clear()
+        for i in 0..events.len
+            rows.push(HistoryRow(event: i as int, day: day_of_seconds(events[i].begun)))
+        for i in 0..played.games.len
+            rows.push(HistoryRow(game: i as int, day: played.games[i].day))
+        for i in 1..rows.len
+            var k = i as int
+            while k > 0 and rows[k].day > rows[k - 1].day
+                let held = rows[k]
+                rows[k] = rows[k - 1]
+                rows[k - 1] = held
+                k -= 1
+        engines.clear()
+        books.clear()
+        engines.push("Any engine")
+        books.push("Any book")
+        for e in events
+            for n in e.config.entrants
+                add_name(&engines, n.name_text())
+            if e.config.book != NoEventBook: add_name(&books, e.config.book_name_text())
+        for g in played.games
+            if g.person != 0: add_name(&engines, played.text(g.white))
+            if g.person != 1: add_name(&engines, played.text(g.black))
+        engine = clamp(engine, 0, engines.len as int - 1)
+        book = clamp(book, 0, books.len as int - 1)
+
+    fn filter(events: []*EventRunner, played: *PlayedIndex)
+        shown.clear()
+        let wanted = search.text()
+        let today = days_of(day_of_seconds(unix_seconds()))
+        let picked_engine = engine > 0 ? engines[engine] : ""
+        let picked_book = book > 0 ? books[book] : ""
+        for i in 0..rows.len
+            let r = rows[i]
+            if date > 0 and (r.day == 0 or today - days_of(r.day) > HistorySpans[date]): continue
+            if r.event >= 0
+                if only == HistoryGames: continue
+                let e = events[r.event]
+                let c = &e.config
+                let match_kind = c.format == HeadToHead
+                if kind == 3 or kind == 1 and match_kind or kind == 2 and not match_kind: continue
+                let ended = e.state == EventFinished or e.state == EventStopped
+                if outcome > 0 and (outcome < 4 or ended): continue
+                if picked_book.len > 0 and (c.book == NoEventBook or c.book_name_text() != picked_book): continue
+                var engine_found = picked_engine.len == 0
+                var text_found = wanted.len == 0 or has_folded(c.name_text(), wanted) or c.book != NoEventBook and has_folded(c.book_name_text(), wanted)
+                for n in c.entrants
+                    if n.name_text() == picked_engine: engine_found = true
+                    if wanted.len > 0 and has_folded(n.name_text(), wanted): text_found = true
+                if engine_found and text_found: shown.push(i as int)
+                continue
+            if only == HistoryEvents: continue
+            if only == HistoryAll and (kind == 1 or kind == 2) or only != HistoryGames and picked_book.len > 0: continue
+            let g = &played.games[r.game]
+            if speed >= 0 and g.speed != speed: continue
+            let o = played.outcome(g)
+            if outcome == 1 and o != 1 or outcome == 2 and o != 0 or outcome == 3 and o != -1 or outcome == 4 and g.result != Unfinished: continue
+            let white = played.text(g.white)
+            let black = played.text(g.black)
+            if picked_engine.len > 0 and white != picked_engine and black != picked_engine: continue
+            if wanted.len > 0 and not has_folded(white, wanted) and not has_folded(black, wanted) and not has_folded(played.text(g.event), wanted): continue
+            shown.push(i as int)
+
+    fn release()
+        rows.free()
+        shown.free()
+        picked.free()
+        cards.release()
+        event_cards.release()
+        engines.free()
+        books.free()
+
+fn add_name(names: *[..]str, name: str)
+    if name.len == 0: return
+    for n in names
+        if n == name: return
+    names.push(name)
+
+fn day_text(day: int, buf: *[16]u8) -> str
+    if day <= 0: return format(buf, "–")
+    return format(buf, "{day / 10000}-{day / 100 % 100:02}-{day % 100:02}")
+
+const MonthShort = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+fn day_short(day: int, buf: *[24]u8) -> str
+    if day <= 0: return format(buf, "–")
+    return format(buf, "{day % 100} {MonthShort[clamp(day / 100 % 100 - 1, 0, 11)]} {day / 10000}")
+
+fn state_word(s: EventState) -> str
+    match s
+        EventRunning: return "RUNNING"
+        EventPausing: return "PAUSING"
+        EventPaused: return "PAUSED"
+        EventStopped: return "STOPPED"
+    return "FINISHED"

@@ -1,0 +1,64 @@
+use engine/mesh/mesh
+use engine/sdf/simplify
+
+const PaperFolds = [0, 260, 620, 420, 380, 640, 560]
+
+fn fold_paper(m: *Mesh, target: int)
+    var s: SdfMesh
+    weld(m, &s)
+    if s.triangles() > target: simplify(&s, target)
+    m.clear()
+    var i = 0
+    while i < s.indices.len
+        let a = s.positions[s.indices[i]]
+        let b = s.positions[s.indices[i + 1]]
+        let c = s.positions[s.indices[i + 2]]
+        let n = (b - a).cross(c - a)
+        if n.length() > 1.0e-9
+            let f = n.normalized()
+            let k = m.vertex(a, f, Vec2(1.0, 0.0))
+            m.vertex(b, f, Vec2(0.0, 1.0))
+            m.vertex(c, f, Vec2(0.0, 0.0))
+            m.triangle(k, k + 1, k + 2)
+        i += 3
+    s.free_all()
+
+fn weld(m: *Mesh, out: *SdfMesh)
+    var size = 1024
+    while size < m.vertex_count * 2: size *= 2
+    let slots = alloc[int](size)
+    for k in 0..size: slots[k] = -1
+    let joined = alloc[u32](m.vertex_count)
+    for v in 0..m.vertex_count
+        let p = m.vertices[v].position
+        var h = weld_hash(p) & (size - 1)
+        var found = -1
+        while slots[h] >= 0
+            if weld_hash(out.positions[slots[h]]) == weld_hash(p) and (out.positions[slots[h]] - p).length() < 2.0e-5
+                found = slots[h]
+                break
+            h = (h + 1) & (size - 1)
+        if found < 0
+            found = out.positions.len
+            slots[h] = found
+            out.positions.push(p)
+            out.normals.push(m.vertices[v].normal)
+        joined[v] = found as u32
+    var i = 0
+    while i < m.index_count
+        let a = joined[m.indices[i]]
+        let b = joined[m.indices[i + 1]]
+        let c = joined[m.indices[i + 2]]
+        if a != b and b != c and a != c
+            out.indices.push(a)
+            out.indices.push(b)
+            out.indices.push(c)
+        i += 3
+    free(slots)
+    free(joined)
+
+fn weld_hash(p: Vec3) -> int
+    let x = floor(p.x * 50000.0 + 0.5) as i64 as u64
+    let y = floor(p.y * 50000.0 + 0.5) as i64 as u64
+    let z = floor(p.z * 50000.0 + 0.5) as i64 as u64
+    return ((x * 73856093 ^ y * 19349663 ^ z * 83492791) & 0x3FFFFFFF) as int

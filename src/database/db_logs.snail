@@ -1,0 +1,18 @@
+use src/database/position_store
+
+const DbToEngine: u8 = 0
+const DbFromEngine: u8 = 1
+
+extend PositionDb
+    fn log_line(engine: u16, game: u32, way: u8, text: str)
+        var e = DbLogEntry(game: game, ms: sn_db_unix_ms(), engine: engine, way: way)
+        store.append(logs, &e as *u8, text.ptr, text.len as int)
+
+    fn each_log(visit: fn(i64, u16, u32, u8, str))
+        var e: DbLogEntry
+        var text: [..]u8
+        defer text.free()
+        let n = store.entries(logs)
+        for i in 0..n
+            if not store.read_entry(logs, i as u32, &e as *u8, &text): break
+            visit(e.ms, e.engine, e.game, e.way, str(text[0..text.len]))

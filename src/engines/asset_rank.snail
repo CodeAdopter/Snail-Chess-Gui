@@ -1,0 +1,108 @@
+use engine/desktop/cpu_features
+use src/engines/folded_text
+
+enum AssetBuild: u8
+    BuildUnnamed
+    Build32
+    BuildPlain
+    BuildSse41
+    BuildPopcnt
+    BuildAvx2
+    BuildBmi2
+    BuildAvxVnni
+    BuildAvx512
+    BuildVnni512
+    BuildIcl
+    BuildUniversal
+
+enum AssetKind: u8
+    AssetOther
+    AssetMaybe
+    AssetWindows
+
+fn asset_kind(name: str) -> AssetKind
+    if not ends_folded(name, ".zip") and not ends_folded(name, ".7z") and not ends_folded(name, ".rar") and not ends_folded(name, ".exe") and not tar_name(name): return AssetOther
+    let others = ["linux", "ubuntu", "debian", "fedora", "alpine", "musl", "macos", "osx", "darwin", "apple", "android", "freebsd", "openbsd", "netbsd", "arm64", "armv", "aarch64", "riscv", "ppc", "source", "src."]
+    for w in others
+        if has_folded(name, w): return AssetOther
+    if has_word(name, "arm") or has_word(name, "mac") or has_word(name, "ios") or has_word(name, "src"): return AssetOther
+    let windows = ["windows", "win64", "win32", "mingw", "msvc", ".exe"]
+    for w in windows
+        if has_folded(name, w): return AssetWindows
+    if has_word(name, "win") or has_word(name, "w64"): return AssetWindows
+    return tar_name(name) ? AssetOther : AssetMaybe
+
+fn tar_name(name: str) -> bool
+    return ends_folded(name, ".tar") or ends_folded(name, ".tar.gz") or ends_folded(name, ".tgz") or ends_folded(name, ".tar.xz") or ends_folded(name, ".tar.bz2") or ends_folded(name, ".tar.zst")
+
+fn asset_build(name: str) -> AssetBuild
+    if has_folded(name, "universal"): return BuildUniversal
+    if has_folded(name, "avx512icl") or has_word(name, "icl"): return BuildIcl
+    if has_folded(name, "vnni512") or has_folded(name, "avx512vnni") or has_folded(name, "avx512-vnni") or has_folded(name, "avx512_vnni"): return BuildVnni512
+    if has_folded(name, "avx512") or level(name, "v4"): return BuildAvx512
+    if has_folded(name, "vnni"): return BuildAvxVnni
+    if has_folded(name, "bmi2") or has_folded(name, "pext") or level(name, "v3"): return BuildBmi2
+    if has_folded(name, "avx2"): return BuildAvx2
+    if has_folded(name, "popcnt") or has_folded(name, "modern") or has_folded(name, "sse42") or has_folded(name, "sse4.2") or level(name, "v2"): return BuildPopcnt
+    if has_folded(name, "sse41") or has_folded(name, "sse4.1") or has_folded(name, "sse4"): return BuildSse41
+    let plain = ["x86-64", "x86_64", "x64", "amd64", "win64", "64bit", "64-bit"]
+    for w in plain
+        if has_folded(name, w): return BuildPlain
+    let narrow = ["32bit", "32-bit", "win32", "i686", "i386", "x86"]
+    for w in narrow
+        if has_folded(name, w): return Build32
+    return BuildUnnamed
+
+fn level(name: str, v: str) -> bool
+    var buf: [8]u8
+    return has_folded(name, format(&buf, "64-{v}")) or has_folded(name, format(&buf, "64_{v}")) or has_folded(name, format(&buf, "64{v}"))
+
+fn build_runs(b: AssetBuild, cpu: *CpuFeatures) -> bool
+    match b
+        BuildSse41: return cpu.sse41
+        BuildPopcnt: return cpu.popcnt
+        BuildAvx2: return cpu.avx2
+        BuildBmi2: return cpu.bmi2
+        BuildAvxVnni: return cpu.avxvnni
+        BuildAvx512: return cpu.avx512
+        BuildVnni512: return cpu.vnni512
+        BuildIcl: return cpu.icl
+        BuildUnnamed, Build32, BuildPlain, BuildUniversal: return true
+
+fn build_score(b: AssetBuild, cpu: *CpuFeatures) -> int
+    if not build_runs(b, cpu): return -1
+    if b == BuildUnnamed: return 1
+    if b == Build32: return 0
+    if cpu.slow_pext and b == BuildBmi2: return BuildAvx2 as int * 2 - 1
+    return b as int * 2
+
+fn build_word(b: AssetBuild) -> str
+    match b
+        BuildUniversal: return "Universal (automatically selects CPU support)"
+        BuildIcl: return "AVX-512 for Ice Lake and later"
+        BuildVnni512: return "AVX-512 with VNNI"
+        BuildAvx512: return "AVX-512"
+        BuildAvxVnni: return "AVX-VNNI"
+        BuildBmi2: return "BMI2"
+        BuildAvx2: return "AVX2"
+        BuildPopcnt: return "POPCNT"
+        BuildSse41: return "SSE4.1"
+        BuildPlain: return "x86-64"
+        Build32: return "32-bit"
+        BuildUnnamed: return "Unspecified"
+
+fn has_word(name: str, word: str) -> bool
+    var from = 0
+    while from + word.len <= name.len
+        let at = find_folded(name[from..name.len], word)
+        if at < 0: return false
+        let start = from + at
+        let end = start + word.len
+        let before = start == 0 or not letter_or_digit(name[start - 1])
+        let after = end == name.len or not letter_or_digit(name[end])
+        if before and after: return true
+        from = start + 1
+    return false
+
+fn letter_or_digit(c: u8) -> bool
+    return c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z' or c >= '0' and c <= '9'

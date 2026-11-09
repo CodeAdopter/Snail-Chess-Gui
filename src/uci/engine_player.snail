@@ -1,0 +1,205 @@
+use engine/desktop/desktop_app
+use src/uci/engine_told
+
+const PlayerTakeHz = 4
+const PlayerLines = 10
+
+struct PlayerLine
+    move: Move
+    kind: ScoreKind
+    score: int
+
+struct SearchNote
+    depth: int
+    seldepth: int
+    nodes: i64
+    nps: i64
+    time_ms: i64
+    kind: ScoreKind
+    score: int
+    hashfull: int = -1
+    tbhits: i64
+
+    fn take(info: *UciInfo)
+        if info.has_depth
+            depth = info.depth
+            seldepth = info.seldepth
+        if info.nodes > 0: nodes = info.nodes
+        if info.nps > 0: nps = info.nps
+        if info.time_ms > 0: time_ms = info.time_ms
+        if info.kind != NoScore
+            kind = info.kind
+            score = info.score
+        if info.hashfull >= 0: hashfull = info.hashfull
+        if info.tbhits > 0: tbhits = info.tbhits
+
+struct EnginePlayer
+    engine: UciEngine
+    on: bool
+    wanted: EngineProfile
+    sent: EngineProfile
+    new_game_due: bool
+    asking: bool
+    position: [..]u8
+    go: [..]u8
+    board: Board
+    go_ns: i64
+    go_cpu_ms: f64
+    best_cpu_ms: f64
+    dropping: bool
+    has_best: bool
+    best: Move
+    best_ns: i64
+    best_word: [16]u8
+    best_word_len: int
+    illegal: bool
+    score_kind: ScoreKind
+    score: int
+    heard: SearchNote
+    pv: [MaxPvMoves]Move
+    pv_count: int
+    lines: [PlayerLines]PlayerLine
+    line_count: int
+    multipv_owned: bool
+    last_take_ns: i64
+    version: u64
+
+    fn update(app: *DesktopApp, engine_path: str, engine_folder: str)
+        let e = &engine
+        if e.state == EngineFailed and not on: e.state = EngineOff
+        if e.state == EngineOff and on
+            sent.clear_values()
+            new_game_due = true
+            dropping = false
+            e.unlogged = true
+            e.start(engine_path, engine_folder)
+        if e.state == EngineOff or e.state == EngineFailed: return
+        let now = now_ns()
+        let gap = 1000000000 / PlayerTakeHz as i64
+        if e.child.waiting()
+            let due = (last_take_ns / gap + 1) * gap
+            if e.state != EngineSearching or e.child.pressing() or now >= due: take_now()
+            else: app.wake_in((due - now) as f64 / 1.0e9)
+        if e.check(now)
+            version += 1
+            return
+        if e.state == EngineIdle
+            if new_game_due
+                tell_values(e, &wanted, &sent, [multipv_owned ? "" : "MultiPV"])
+                e.send("ucinewgame")
+                new_game_due = false
+                e.ready()
+            elif asking: send_ask()
+        if e.state == EngineStarting or e.state == EngineReadying or e.state == EngineStopping: app.wake_in(0.25)
+
+    fn take_now()
+        let e = &engine
+        if not e.child or not e.child.waiting(): return
+        last_take_ns = now_ns()
+        e.take()
+        var latest = -1
+        for i in 0..e.batch.lines.len
+            let line = e.batch.line(i as int)
+            if line.len >= 4 and line[0..4] == "info"
+                if e.state != EngineSearching or dropping: continue
+                let info = read_info(line)
+                if multipv_owned and info.multipv >= 1 and info.multipv <= PlayerLines and info.pv.len > 0: take_line(&info)
+                if info.multipv != 1: continue
+                if info.pv.len > 0: latest = i as int
+                heard.take(&info)
+                if info.kind != NoScore
+                    score_kind = info.kind
+                    score = info.score
+                version += 1
+            elif line.len >= 8 and line[0..8] == "bestmove"
+                if e.state != EngineSearching and e.state != EngineStopping: continue
+                e.state = EngineIdle
+                if dropping
+                    dropping = false
+                    continue
+                take_best(line, e.batch.lines[i].ns)
+            else: e.handshake(line)
+        if latest >= 0 and e.state == EngineSearching and not dropping: read_pv(read_info(e.batch.line(latest)).pv)
+
+    fn take_line(info: *UciInfo)
+        var w = UciWords(text: info.pv)
+        let (m, legal) = parse_move(&board, w.next())
+        if not legal: return
+        lines[info.multipv - 1] = PlayerLine(m, info.kind, info.score)
+        line_count = max(line_count, info.multipv)
+
+    fn read_pv(text: str)
+        pv_count = 0
+        var b = board
+        var w = UciWords(text: text)
+        while pv_count < MaxPvMoves
+            let word = w.next()
+            if word.len == 0: break
+            let (m, legal) = parse_move(&b, word)
+            if not legal: break
+            pv[pv_count] = m
+            pv_count += 1
+            b.play(m)
+        version += 1
+
+    fn take_best(line: str, ns: i64)
+        var w = UciWords(text: line)
+        w.next()
+        let word = w.next()
+        best_word_len = keep_text(word, best_word[0..16])
+        let (m, legal) = parse_move(&board, word)
+        best = m
+        illegal = not legal
+        best_ns = ns
+        best_cpu_ms = engine.child.cpu_ms()
+        has_best = true
+        version += 1
+
+    fn best_text() -> str
+        return str(best_word[0..best_word_len])
+
+    fn ask(game: *Game, node: int, go_text: str)
+        write_position(game, node, &position)
+        go.clear()
+        push_text(&go, go_text)
+        board = game.nodes[node].board
+        pv_count = 0
+        line_count = 0
+        version += 1
+        asking = true
+        has_best = false
+        if engine.state == EngineIdle and not new_game_due: send_ask()
+
+    fn send_ask()
+        let e = &engine
+        asking = false
+        e.send(str(position[0..position.len]))
+        heard = SearchNote()
+        pv_count = 0
+        line_count = 0
+        go_cpu_ms = e.child.cpu_ms()
+        go_ns = now_ns()
+        e.send(str(go[0..go.len]))
+        e.state = EngineSearching
+
+    fn cancel()
+        asking = false
+        has_best = false
+        if engine.state == EngineSearching
+            engine.stop()
+            dropping = true
+
+    fn new_game()
+        cancel()
+        new_game_due = true
+        score_kind = NoScore
+
+    fn thinking() -> bool
+        return asking or engine.state == EngineSearching and not dropping
+
+    fn release()
+        engine.release()
+        wanted.release()
+        sent.release()
+        position.free()
+        go.free()

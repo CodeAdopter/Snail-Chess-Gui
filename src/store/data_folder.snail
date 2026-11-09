@@ -1,0 +1,109 @@
+use engine/platform/args
+use engine/platform/files
+use engine/core/text
+
+struct DataFolder
+    root: [520]u8
+    root_len: int
+
+    fn open() -> bool
+        var buf: [600]u8
+        let base = str(SDL_GetBasePath())
+        let asked = arg_word("--data")
+        let local = SDL_getenv("LOCALAPPDATA")
+        if asked.len > 0: set_root(asked)
+        elif file_exists(format(&buf, "{base}portable").ptr as cstr): set_root(base)
+        elif local: set_root(format(&buf, "{str(local)}\\Snail Chess GUI"))
+        else: set_root(base)
+        return make_folder("") and make_folder("engines")
+
+    fn set_root(s: str)
+        root_len = min(s.len, 510) as int
+        for i in 0..root_len
+            root[i] = s[i] == '/' ? '\\' : s[i]
+        if root_len > 0 and root[root_len - 1] != '\\'
+            root[root_len] = '\\'
+            root_len += 1
+
+    fn root_text() -> str
+        return str(root[0..root_len])
+
+    fn path(inside: str, buf: *[600]u8) -> str
+        return format(buf, "{root_text()}{inside}")
+
+    fn make_folder(inside: str) -> bool
+        var buf: [600]u8
+        return SDL_CreateDirectory(path(inside, &buf).ptr as cstr)
+
+fn save_whole(path: str, data: []u8) -> bool
+    var temp: [620]u8
+    var name: [620]u8
+    let t = format(&temp, "{path}.tmp")
+    let n = format(&name, "{path}")
+    if not write_file(t.ptr as cstr, data): return false
+    return SDL_RenamePath(t.ptr as cstr, n.ptr as cstr)
+
+struct BackgroundSave
+    path: [600]u8
+    path_len: int
+    text: [..]u8
+    next: [..]u8
+    has_next: bool
+    busy: int
+    thread: u64
+
+    fn save(at: str, data: []u8)
+        path_len = min(at.len, 599) as int
+        for i in 0..path_len
+            path[i] = at[i]
+        next.clear()
+        for b in data
+            next.push(b)
+        has_next = true
+        pump()
+
+    fn pump()
+        if thread != 0 and atomic_load(&busy) == 0
+            join(thread)
+            thread = 0
+        if thread != 0 or not has_next: return
+        let held = text
+        text = next
+        next = held
+        has_next = false
+        atomic_store(&busy, 1)
+        thread = spawn(background_save_run, self)
+
+    fn finish()
+        if thread != 0
+            join(thread)
+            thread = 0
+        if has_next
+            has_next = false
+            save_whole(str(path[0..path_len]), next[0..next.len])
+
+    fn release()
+        finish()
+        text.free()
+        next.free()
+
+fn background_save_run(s: *BackgroundSave)
+    save_whole(str(s.path[0..s.path_len]), s.text[0..s.text.len])
+    atomic_store(&s.busy, 0)
+
+fn add_line(path: str, line: str) -> bool
+    var text: [..]u8
+    defer text.free()
+    push_text(&text, line)
+    text.push('\n')
+    let io = SDL_IOFromFile(path.ptr as cstr, "ab")
+    if not io: return false
+    let wrote = SDL_WriteIO(io, &text[0], text.len as u64)
+    let closed = SDL_CloseIO(io)
+    return wrote == text.len as u64 and closed
+
+fn file_name_of(path: str) -> str
+    var at = path.len as int
+    while at > 0 and path[at - 1] != '\\' and path[at - 1] != '/'
+        at -= 1
+    return path[at..path.len]

@@ -1,0 +1,319 @@
+use src/tournament/game_slot
+use src/tournament/standings
+use src/tournament/event_logs
+use src/game/pgn_write
+use src/books/book_maker
+
+const MostStarting = 8
+const EarlyRetries: u8 = 2
+
+enum EventState: u8
+    EventPaused
+    EventRunning
+    EventPausing
+    EventStopped
+    EventFinished
+
+struct EventRunner
+    id: int
+    config: EventConfig
+    schedule: [..]ScheduledGame
+    records: [..]GameRecord
+    retries: [..]u8
+    slots: [..]*GameSlot
+    state: EventState
+    folder: [600]u8
+    folder_len: int
+    start_board: Board
+    openings: EventOpenings
+    book_maker: *BookMaker
+    begun: i64
+    standings: Standings
+    kept: int
+    version: u64
+    faults: [..]EventFault
+    machines: [..]u8
+
+    fn folder_text() -> str
+        return str(folder[0..folder_len])
+
+    fn file(name: str, buf: *[640]u8) -> str
+        return format(buf, "{folder_text()}\\{name}")
+
+    fn create(data: *DataFolder, book: str) -> bool
+        id = next_event_id(data)
+        if not place(data): return false
+        lay_out()
+        rank()
+        var out: [..]u8
+        defer out.free()
+        var path: [640]u8
+        if config.book != NoEventBook
+            draw_openings(book, config.seed, openings_needed(&config), &out)
+            if not save_whole(file("openings.txt", &path), out[0..out.len]): return false
+            openings.read(str(out[0..out.len]))
+            out.clear()
+        config.write(&out)
+        if not save_whole(file("event.json", &path), out[0..out.len]): return false
+        var line: [48]u8
+        begun = unix_seconds()
+        if not journal_add(file("journal.log", &path), format(&line, "begun {begun}")): return false
+        note_machine()
+        state = EventRunning
+        return true
+
+    fn note_machine()
+        var path: [640]u8
+        var line: [160]u8
+        journal_add(file("journal.log", &path), machine_line(&line))
+        let journal = read_file(file("journal.log", &path).ptr as cstr)
+        defer free_file(journal)
+        read_machines(str(journal), &machines)
+
+    fn open(data: *DataFolder, event_id: int) -> bool
+        id = event_id
+        if not place(data): return false
+        var path: [640]u8
+        let bytes = read_file(file("event.json", &path).ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len == 0 or not config.read(str(bytes)): return false
+        let drawn = read_file(file("openings.txt", &path).ptr as cstr)
+        defer free_file(drawn)
+        openings.read(str(drawn))
+        lay_out()
+        let journal = read_file(file("journal.log", &path).ptr as cstr)
+        defer free_file(journal)
+        let last = read_journal(str(journal), &records)
+        begun = journal_begun(str(journal))
+        read_machines(str(journal), &machines)
+        let crashes = read_file(file("crashes.log", &path).ptr as cstr)
+        defer free_file(crashes)
+        read_faults(str(crashes), &faults)
+        for r in records
+            if r.done: kept = max(kept, r.order + 1)
+        rank()
+        state = EventPaused
+        if last == JournalStopped: state = EventStopped
+        if last == JournalFinished: state = EventFinished
+        return true
+
+    fn place(data: *DataFolder) -> bool
+        var name: [40]u8
+        data.make_folder("tournaments")
+        if not data.make_folder(format(&name, "tournaments\\{id}")): return false
+        var buf: [600]u8
+        let at = data.path(format(&name, "tournaments\\{id}"), &buf)
+        folder_len = min(at.len, 600) as int
+        for i in 0..folder_len
+            folder[i] = at[i]
+        return true
+
+    fn lay_out()
+        make_schedule(&config, &schedule)
+        records.resize(schedule.len)
+        retries.resize(schedule.len)
+        start_board.load_fen(StartFen)
+        while slots.len < max(config.at_once, 1)
+            let s = new GameSlot
+            s.game.reset(&start_board)
+            slots.push(s)
+
+    fn update(app: *DesktopApp, lib: *EngineLibrary)
+        let now = now_ns()
+        var starting = 0
+        for i in 0..slots.len
+            let s = slots[i]
+            if not s.busy(): continue
+            s.update(app, lib)
+            if s.end == NotEnded: starting += s.starting_engines()
+            elif s.early and retries[s.index] < EarlyRetries
+                retries[s.index] += 1
+                s.told.clear()
+                s.abandon()
+                version += 1
+            else: keep_game(s)
+        if state == EventRunning and not waiting_for_book()
+            for i in 0..slots.len
+                if slots[i].busy(): continue
+                if starting >= MostStarting: break
+                let next = next_unplayed()
+                if next < 0: break
+                slots[i].begin(next, schedule[next], &config, lib, &start_board, &openings, now)
+                starting += slots[i].starting_engines()
+                version += 1
+        if state != EventRunning and state != EventPausing or busy_slots() > 0: return
+        var path: [640]u8
+        if state == EventPausing
+            state = EventPaused
+            journal_add(file("journal.log", &path), "paused")
+        elif next_unplayed() < 0
+            state = EventFinished
+            journal_add(file("journal.log", &path), "finished")
+            quit_engines()
+        version += 1
+
+    fn keep_game(s: *GameSlot)
+        var text: [..]u8
+        defer text.free()
+        write_pgn(&s.game, &text)
+        text.push('\n')
+        if eval_recorder: eval_recorder.keep_game(str(text[0..text.len]), true)
+        var path: [640]u8
+        let io = SDL_IOFromFile(file("games.pgn", &path).ptr as cstr, "ab")
+        if io
+            SDL_WriteIO(io, &text[0], text.len as u64)
+            SDL_CloseIO(io)
+        append_telemetry(file("telemetry.bin", &path), s.telemetry[0..s.telemetry.len])
+        keep_told(s)
+        if s.fault_len > 0
+            var f = EventFault(game: s.index, fullmove: s.fault_move, entrant: s.seat_of(s.fault_side).entrant, end: s.end)
+            f.text_len = keep_text(s.fault_text(), f.text[0..240])
+            var crash: [400]u8
+            journal_add(file("crashes.log", &path), fault_line(&f, &crash))
+            faults.push(f)
+        var line: [80]u8
+        journal_add(file("journal.log", &path), format(&line, "game {s.index} {result_text(s.game.result)} {end_word(s.end)}"))
+        records[s.index] = GameRecord(true, s.game.result, s.end, kept)
+        kept += 1
+        s.index = -1
+        rank()
+        version += 1
+
+    fn keep_told(s: *GameSlot)
+        var text: [..]u8
+        defer text.free()
+        var heading: [64]u8
+        let g = schedule[s.index]
+        compact_told(str(s.told[0..s.told.len]), told_header(s.index, g.round, g.white, g.black, &heading), &text)
+        var path: [640]u8
+        let io = SDL_IOFromFile(file("uci.log", &path).ptr as cstr, "ab")
+        if io
+            SDL_WriteIO(io, &text[0], text.len as u64)
+            SDL_CloseIO(io)
+        s.told.clear()
+
+    fn told_text(out: *[..]u8)
+        out.clear()
+        var path: [640]u8
+        let kept_text = read_file(file("uci.log", &path).ptr as cstr)
+        defer free_file(kept_text)
+        expand_told(str(kept_text), &config, out)
+        for s in slots
+            if not s.busy() or s.told.len == 0: continue
+            var heading: [64]u8
+            var text: [..]u8
+            defer text.free()
+            let g = schedule[s.index]
+            compact_told(str(s.told[0..s.told.len]), told_header(s.index, g.round, g.white, g.black, &heading), &text)
+            expand_told(str(text[0..text.len]), &config, out)
+
+    fn rank()
+        standings.make(config.entrants.len as int, schedule[0..schedule.len], records[0..records.len])
+
+    fn read_finished(i: int, game: *Game) -> bool
+        if i < 0 or i >= records.len or not records[i].done: return false
+        var path: [640]u8
+        let bytes = read_file(file("games.pgn", &path).ptr as cstr)
+        defer free_file(bytes)
+        var starts: [..]int
+        defer starts.free()
+        let text = str(bytes)
+        scan_pgn(text, &starts, records[i].order + 1)
+        if records[i].order >= starts.len: return false
+        let r = read_pgn(text, starts[records[i].order], game)
+        return r.ok
+
+    fn next_unplayed() -> int
+        for i in 0..records.len
+            if records[i].done: continue
+            var running = false
+            for s in slots
+                if s.index == i: running = true
+            if not running: return i as int
+        return -1
+
+    fn busy_slots() -> int
+        var n = 0
+        for s in slots
+            if s.busy(): n += 1
+        return n
+
+    fn finished_games() -> int
+        var n = 0
+        for r in records
+            if r.done: n += 1
+        return n
+
+    fn waiting_for_book() -> bool
+        return config.book == ConsensusBook and openings.count() == 0
+
+    fn take_openings(lines: str) -> bool
+        var out: [..]u8
+        defer out.free()
+        draw_openings(lines, config.seed, openings_needed(&config), &out)
+        var path: [640]u8
+        if not save_whole(file("openings.txt", &path), out[0..out.len]): return false
+        openings.read(str(out[0..out.len]))
+        version += 1
+        return openings.count() > 0
+
+    fn pause()
+        if state == EventRunning
+            state = EventPausing
+            version += 1
+
+    fn resume()
+        if state != EventPaused and state != EventPausing: return
+        var path: [640]u8
+        if state == EventPaused
+            journal_add(file("journal.log", &path), "resumed")
+            note_machine()
+        state = EventRunning
+        version += 1
+
+    fn stop()
+        if state == EventStopped or state == EventFinished: return
+        for s in slots
+            s.abandon()
+        state = EventStopped
+        var path: [640]u8
+        journal_add(file("journal.log", &path), "stopped")
+        quit_engines()
+        version += 1
+
+    fn quit_engines()
+        for s in slots
+            s.seats[0].player.engine.quit()
+            s.seats[1].player.engine.quit()
+
+    fn release()
+        for s in slots
+            s.release()
+        slots.free()
+        standings.release()
+        schedule.free()
+        records.free()
+        retries.free()
+        faults.free()
+        machines.free()
+        openings.release()
+        config.release()
+
+fn next_event_id(data: *DataFolder) -> int
+    var names: [..]u8
+    defer names.free()
+    var buf: [600]u8
+    names_in(data.path("tournaments", &buf), &names)
+    var most = 0
+    var from = 0
+    for i in 0..names.len
+        if names[i] != '\n': continue
+        let (n, ok) = uci_number(str(names[from..i]))
+        if ok: most = max(most, n as int)
+        from = i as int + 1
+    return most + 1
+
+fn unix_seconds() -> i64
+    var t: SDL_Time
+    if not SDL_GetCurrentTime(&t): return 0
+    return t / 1000000000

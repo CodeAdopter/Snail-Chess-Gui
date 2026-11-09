@@ -1,0 +1,81 @@
+use engine/desktop/desktop_app
+
+const PieceCacheMagic: u64 = 0x3165636569503344
+
+struct CacheHead
+    magic: u64
+    key: u64
+
+struct CacheMesh
+    vertices: i64
+    indices: i64
+
+fn piece_cache_key(segments: int) -> u64
+    let shapes = embed("piece_shapes.snail")
+    let carving = embed("piece_carving.snail")
+    let knight = embed("knight_outline.snail")
+    var h = hash_word(PieceCacheMagic, segments as u64)
+    h = hash_bytes(h, shapes.ptr, shapes.len as i64)
+    h = hash_bytes(h, carving.ptr, carving.len as i64)
+    return hash_bytes(h, knight.ptr, knight.len as i64)
+
+struct PieceCache
+    file: []u8
+    at: int
+    out: *u8
+    out_len: int
+    out_room: int
+    carved: bool
+
+    fn open(path: cstr, key: u64)
+        file = read_file(path)
+        at = -1
+        if file.len as int >= sizeof(CacheHead)
+            let head = file.ptr as *CacheHead
+            if head.magic == PieceCacheMagic and head.key == key: at = sizeof(CacheHead)
+        var head = CacheHead(PieceCacheMagic, key)
+        put(&head as *u8, sizeof(CacheHead))
+
+    fn take(m: *Mesh) -> bool
+        if at < 0 or at + sizeof(CacheMesh) > file.len as int: return false
+        let size = (file.ptr + at) as *CacheMesh
+        let from = at + sizeof(CacheMesh)
+        let vertex_bytes = size.vertices as int * sizeof(Vertex)
+        let index_bytes = size.indices as int * sizeof(u32)
+        if size.vertices < 0 or size.indices < 0 or from + vertex_bytes + index_bytes > file.len as int
+            at = -1
+            return false
+        m.clear()
+        m.reserve(size.vertices as int, size.indices as int)
+        copy(m.vertices as *u8, file.ptr + from, vertex_bytes)
+        copy(m.indices as *u8, file.ptr + from + vertex_bytes, index_bytes)
+        m.vertex_count = size.vertices as int
+        m.index_count = size.indices as int
+        at = from + vertex_bytes + index_bytes
+        return true
+
+    fn keep(m: *Mesh, carved_now: bool)
+        if carved_now: carved = true
+        var size = CacheMesh(m.vertex_count as i64, m.index_count as i64)
+        put(&size as *u8, sizeof(CacheMesh))
+        put(m.vertices as *u8, m.vertex_count * sizeof(Vertex))
+        put(m.indices as *u8, m.index_count * sizeof(u32))
+
+    fn put(p: *u8, n: int)
+        if out_len + n > out_room
+            let grown = max(out_room * 2, out_len + n + 1048576)
+            let moved = alloc[u8](grown)
+            if out: copy(moved, out, out_len)
+            if out: free(out)
+            out = moved
+            out_room = grown
+        copy(out + out_len, p, n)
+        out_len += n
+
+    fn close(path: cstr)
+        if carved: write_file(path, out[0..out_len])
+        free_file(file)
+        if out: free(out)
+        out = null
+        out_len = 0
+        out_room = 0

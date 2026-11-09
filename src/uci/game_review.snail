@@ -1,0 +1,208 @@
+use src/database/eval_recorder
+
+const ReviewDepth = 18
+const ReviewMoveNs: i64 = 1500000000
+
+struct GameReview
+    engine: UciEngine
+    engine_id: int
+    threads: int = 1
+    told: bool
+    lines_told: bool
+    running: bool
+    nodes: [..]int
+    next: int
+    searching: int = -1
+    began_ns: i64
+    kind: ScoreKind
+    score: int
+    depth: int
+    second_kind: ScoreKind
+    second_score: int
+    second_depth: int
+    second_move: Move
+    found: [2]PvLine
+    command: [..]u8
+    by: [96]u8
+    by_len: int
+    complete: bool
+
+    fn by_text() -> str
+        return str(by[0..by_len])
+
+    fn take(name: str, done: bool)
+        by_len = min(name.len, 96) as int
+        for i in 0..by_len
+            by[i] = name[i]
+        complete = done
+
+    fn start(game: *Game, id: int, thread_count: int, name: str)
+        stop()
+        if complete or by_len > 0 and by_text() != name: clear_line_scores(game)
+        take(name, false)
+        engine_id = id
+        threads = max(thread_count, 1)
+        told = false
+        lines_told = false
+        gather(game)
+        if nodes.len == 0
+            clear_line_scores(game)
+            gather(game)
+        next = 0
+        running = nodes.len > 0
+
+    fn gather(game: *Game)
+        nodes.clear()
+        var i = 0
+        while i != NoNode
+            var moves: MoveList
+            moves.fill(&game.nodes[i].board)
+            let n = &game.nodes[i]
+            if n.eval_depth < ReviewDepth and moves.count > 0 or n.second_depth < ReviewDepth and moves.count > 1: nodes.push(i)
+            i = n.first
+
+    fn stop()
+        if engine.state != EngineOff and engine.state != EngineFailed: engine.quit()
+        running = false
+        searching = -1
+
+    fn done() -> (int, int)
+        return next, nodes.len as int
+
+    fn update(app: *DesktopApp, game: *Game, path: str, folder: str)
+        if not running: return
+        let e = &engine
+        if e.state == EngineOff
+            if path.len == 0
+                running = false
+                return
+            e.unlogged = true
+            e.start(path, folder)
+        if e.state == EngineFailed
+            running = false
+            return
+        if e.child.waiting()
+            e.take()
+            read_batch(game)
+        let now = now_ns()
+        if e.check(now)
+            running = false
+            return
+        if e.state == EngineSearching and now - began_ns >= ReviewMoveNs: e.stop()
+        if e.state == EngineIdle
+            var value: [24]u8
+            if not told and threads > 1 and e.option("Threads") >= 0
+                told = true
+                e.set_option("Threads", format(&value, "{threads}"))
+                e.ready()
+            elif not lines_told and e.option("MultiPV") >= 0
+                lines_told = true
+                e.set_option("MultiPV", "2")
+                e.ready()
+            elif next < nodes.len
+                told = true
+                begin(game)
+            else
+                e.quit()
+                running = false
+                complete = true
+                return
+        app.wake_in(e.state == EngineSearching ? max((began_ns + ReviewMoveNs - now) as f64 / 1.0e9, 0.0) + 0.01 : 0.25)
+
+    fn begin(game: *Game)
+        let lines = engine.option("MultiPV") >= 0
+        while next < nodes.len and (nodes[next] >= game.nodes.len as int or not lines and game.nodes[nodes[next]].eval_depth >= ReviewDepth)
+            next += 1
+        if next == nodes.len: return
+        let node = nodes[next]
+        write_position(game, node, &command)
+        var go: [64]u8
+        engine.send(str(command[0..command.len]))
+        engine.send(format(&go, "go depth {ReviewDepth}"))
+        engine.state = EngineSearching
+        began_ns = now_ns()
+        searching = node
+        kind = NoScore
+        depth = 0
+        second_kind = NoScore
+        found[0].filled = false
+        found[1].filled = false
+
+    fn read_batch(game: *Game)
+        let e = &engine
+        for i in 0..e.batch.lines.len
+            let line = e.batch.line(i as int)
+            if line.len >= 4 and line[0..4] == "info"
+                if e.state != EngineSearching: continue
+                let info = read_info(line)
+                if info.multipv > 2 or info.kind == NoScore or info.bound != ExactScore: continue
+                if searching >= 0 and searching < game.nodes.len as int: take_line(&game.nodes[searching].board, &info)
+                if info.multipv == 1
+                    kind = info.kind
+                    score = info.score
+                    depth = info.depth
+                elif searching >= 0 and searching < game.nodes.len as int
+                    var w = UciWords(text: info.pv)
+                    let (move, legal) = parse_move(&game.nodes[searching].board, w.next())
+                    if not legal: continue
+                    second_kind = info.kind
+                    second_score = info.score
+                    second_depth = info.depth
+                    second_move = move
+            elif line.len >= 8 and line[0..8] == "bestmove"
+                if e.state != EngineSearching and e.state != EngineStopping: continue
+                e.state = EngineIdle
+                if searching >= 0 and searching < game.nodes.len as int
+                    var w = UciWords(text: line)
+                    w.next()
+                    let (best, legal) = parse_move(&game.nodes[searching].board, w.next())
+                    game.keep_score(searching, kind, score, depth, legal ? best : NoMove)
+                    game.keep_second(searching, second_kind, second_score, second_depth, second_move)
+                    if eval_recorder
+                        for k in 0..2
+                            let l = &found[k]
+                            if l.filled: eval_recorder.keep(&game.nodes[searching].board, by_text(), k as int + 1, l.depth, l.seldepth, l.kind, l.score, l.nodes, 0, l.moves[0..l.count])
+                searching = -1
+                next += 1
+            else: e.handshake(line)
+
+    fn take_line(board: *Board, info: *UciInfo)
+        let l = &found[info.multipv - 1]
+        l.kind = info.kind
+        l.score = info.score
+        l.depth = info.depth
+        l.seldepth = info.seldepth
+        l.nodes = info.nodes
+        l.count = 0
+        var b = *board
+        var w = UciWords(text: info.pv)
+        while l.count < DbPvMost
+            let word = w.next()
+            if word.len == 0: break
+            let (m, ok) = parse_move(&b, word)
+            if not ok: break
+            l.moves[l.count] = m
+            l.count += 1
+            b.play(m)
+        l.filled = l.count > 0
+
+    fn release()
+        stop()
+        engine.release()
+        nodes.free()
+        command.free()
+
+fn clear_line_scores(game: *Game)
+    var i = 0
+    while i != NoNode
+        let n = &game.nodes[i]
+        n.eval_cp = 0
+        n.eval_mate = 0
+        n.eval_depth = 0
+        n.eval_best = NoMove
+        n.second_cp = 0
+        n.second_mate = 0
+        n.second_depth = 0
+        n.second_best = NoMove
+        i = n.first
+    game.version += 1

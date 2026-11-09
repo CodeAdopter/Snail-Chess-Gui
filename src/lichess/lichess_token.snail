@@ -1,0 +1,54 @@
+use src/store/github_token
+
+const LichessPersonFile = "lichess_person.bin"
+const LichessBotFile = "lichess_bot.bin"
+const LichessTokenUrl = "https://lichess.org/account/oauth/token/create?scopes[]=board:play&scopes[]=challenge:read&scopes[]=challenge:write&description=Snail+Chess+GUI"
+const LichessTokensUrl = "https://lichess.org/account/oauth/token"
+
+struct LichessToken
+    token: [..]u8
+    file: str
+    loaded: bool
+    data: *DataFolder
+
+    fn load(folder: *DataFolder, name: str)
+        data = folder
+        file = name
+        if loaded: return
+        loaded = true
+        var buf: [600]u8
+        let bytes = read_file(data.path(file, &buf).ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len > 0 and not unprotect_secret(bytes, &token): token.clear()
+
+    fn text() -> str
+        return str(token[0..token.len])
+
+    fn saved() -> bool
+        return token.len > 0
+
+    fn save(typed: str) -> bool
+        var start = 0
+        var end = typed.len as int
+        while start < end and typed[start] <= 32
+            start += 1
+        while end > start and typed[end - 1] <= 32
+            end -= 1
+        let t = typed[start..end]
+        if not token_shaped(t): return false
+        var sealed: [..]u8
+        defer sealed.free()
+        var buf: [600]u8
+        if not protect_secret(t, &sealed) or not save_whole(data.path(file, &buf), sealed[0..sealed.len]): return false
+        token.clear()
+        for k in 0..t.len
+            token.push(t[k])
+        return true
+
+    fn remove()
+        token.clear()
+        var buf: [600]u8
+        SDL_RemovePath(data.path(file, &buf).ptr as cstr)
+
+    fn release()
+        token.free()

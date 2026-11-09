@@ -1,0 +1,247 @@
+use src/engines/registry
+use src/engines/asset_rank
+
+const ReleasesMostBytes: i64 = 8388608
+const ReleasesKept = 10
+const ReleasesTextMost = 300
+const ReleasesStaleNs: i64 = 21600000000000
+
+struct ReleaseAsset
+    name: PoolSpan
+    url: PoolSpan
+    digest: PoolSpan
+    size: i64
+    kind: AssetKind
+    build: AssetBuild
+    score: int
+
+struct Release
+    tag: PoolSpan
+    title: PoolSpan
+    published: PoolSpan
+    prerelease: bool
+    first: int
+    count: int
+
+struct ReleaseSet
+    releases: [..]Release
+    assets: [..]ReleaseAsset
+    pool: [..]u8
+
+    fn text(s: PoolSpan) -> str
+        return str(pool[s.at..s.at + s.len])
+
+    fn keep(s: str) -> PoolSpan
+        let at = pool.len as int
+        let n = min(s.len, ReleasesTextMost) as int
+        for k in 0..n
+            pool.push(s[k])
+        return PoolSpan(at, n)
+
+    fn read(json_text: str, forge: str, test: str, cpu: *CpuFeatures) -> bool
+        clear()
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(json_text)
+        if not doc.is(root, JsonArray): return false
+        var v = doc.first(root)
+        while v >= 0 and releases.len < ReleasesKept
+            let draft = doc.get(v, "draft")
+            let tag = catalog_text(&doc, v, "tag_name")
+            if doc.is(v, JsonObject) and tag.len > 0 and not (doc.is(draft, JsonBool) and doc.flag(draft))
+                read_release(&doc, v, tag, forge, test, cpu)
+            v = doc.next(v)
+        return true
+
+    fn read_release(doc: *JsonDoc, v: int, tag: str, forge: str, test: str, cpu: *CpuFeatures)
+        var r = Release(first: assets.len as int)
+        r.tag = keep(tag)
+        r.title = keep(catalog_text(doc, v, "name"))
+        let published = catalog_text(doc, v, "published_at")
+        r.published = keep(published[0..min(published.len, 10)])
+        let pre = doc.get(v, "prerelease")
+        r.prerelease = doc.is(pre, JsonBool) and doc.flag(pre)
+        let list = doc.get(v, "assets")
+        var a = doc.is(list, JsonArray) ? doc.first(list) : -1
+        while a >= 0
+            if doc.is(a, JsonObject): read_asset(doc, a, forge, test, cpu)
+            a = doc.next(a)
+        r.count = assets.len as int - r.first
+        for i in r.first + 1..assets.len as int
+            var k = i
+            while k > r.first and assets[k].score > assets[k - 1].score
+                let held = assets[k]
+                assets[k] = assets[k - 1]
+                assets[k - 1] = held
+                k -= 1
+        releases.push(r)
+
+    fn read_asset(doc: *JsonDoc, a: int, forge: str, test: str, cpu: *CpuFeatures)
+        let name = catalog_text(doc, a, "name")
+        let url = web_address_or_test(catalog_text(doc, a, "browser_download_url"), test)
+        let kind = asset_kind(name)
+        if name.len == 0 or name.len > ReleasesTextMost or kind == AssetOther: return
+        if not starts(url, forge) and (test.len == 0 or not starts(url, test)): return
+        var e = ReleaseAsset(kind: kind, build: asset_build(name))
+        e.score = build_score(e.build, cpu)
+        e.name = keep(name)
+        e.url = keep(url)
+        let size = doc.get(a, "size")
+        e.size = doc.is(size, JsonNumber) ? doc.num(size) as i64 : -1
+        let digest = catalog_text(doc, a, "digest")
+        if digest.len == 71 and digest[0..7] == "sha256:" and hex_digits(digest[7..71]): e.digest = keep(digest[7..71])
+        assets.push(e)
+
+    fn newer_than(installed: str) -> int
+        var at = -1
+        for i in 0..releases.len as int
+            if text(releases[i].tag) == installed: at = i
+        let pre = at >= 0 and releases[at].prerelease
+        for i in 0..releases.len as int
+            let r = &releases[i]
+            if r.count == 0 or r.prerelease and not pre: continue
+            return at < 0 or i < at ? i : -1
+        return -1
+
+    fn clear()
+        releases.clear()
+        assets.clear()
+        pool.clear()
+
+    fn release()
+        releases.free()
+        assets.free()
+        pool.free()
+
+struct ReleaseList
+    set: ReleaseSet
+    incoming: ReleaseSet
+    engine_id: [..]u8
+    repository: [..]u8
+    codeberg: bool
+    version: int
+    fetch: HttpGet
+    fetching: bool
+    fetched_ns: i64
+    failure: [240]u8
+    failure_len: int
+    test: [..]u8
+    cpu: CpuFeatures
+    cpu_read: bool
+    data: *DataFolder
+
+    fn choose(c: *Catalog, e: *RegistryEngine, folder: *DataFolder)
+        choose_by(c.text(e.id), c.text(e.repository), e.codeberg, folder)
+
+    fn choose_by(id: str, repo: str, on_codeberg: bool, folder: *DataFolder)
+        data = folder
+        if not cpu_read
+            cpu.read()
+            cpu_read = true
+        if fetching
+            fetch.cancel()
+            fetch.finished()
+            fetching = false
+        hold_text(&engine_id, id)
+        hold_text(&repository, repo)
+        codeberg = on_codeberg
+        set.clear()
+        fetched_ns = 0
+        failure_len = 0
+        version += 1
+        var buf: [600]u8
+        let path = cache_path(&buf)
+        if path.len == 0: return
+        let bytes = read_file(path.ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len > 0 and set.read(str(bytes), forge(), str(test[0..test.len]), &cpu): fetched_ns = modified_time(path.ptr as cstr)
+
+    fn due() -> bool
+        return fetched_ns == 0 or wall_ns() - fetched_ns > ReleasesStaleNs
+
+    fn refresh(token: str)
+        if fetching or engine_id.len == 0: return
+        failure_len = 0
+        if not repository_name(str(repository[0..repository.len]))
+            fail("Cannot check releases: the repository must use the owner/name format.")
+            return
+        var url: [700]u8
+        var headers: [400]u8
+        let repo = str(repository[0..repository.len])
+        let address = test.len > 0 ? format(&url, "{str(test[0..test.len])}/{str(engine_id[0..engine_id.len])}.json") : codeberg ? format(&url, "https://codeberg.org/api/v1/repos/{repo}/releases?limit={ReleasesKept}") : format(&url, "https://api.github.com/repos/{repo}/releases?per_page={ReleasesKept}")
+        let auth = token.len > 0 and not codeberg ? format(&headers, "Accept: application/vnd.github+json\nX-GitHub-Api-Version: 2022-11-28\nAuthorization: Bearer {token}\n") : format(&headers, "Accept: application/json\n")
+        fetch.most = ReleasesMostBytes
+        fetching = fetch.start(address, RegistryAgent, auth)
+
+    fn update() -> bool
+        if not fetching or not fetch.finished(): return false
+        fetching = false
+        if not fetch.done()
+            fail(fetch.error_text())
+            return true
+        let body = fetch.body_text()
+        if not incoming.read(body, forge(), str(test[0..test.len]), &cpu)
+            fail("The server returned an invalid release list.")
+            return true
+        let kept = set
+        set = incoming
+        incoming = kept
+        incoming.clear()
+        version += 1
+        fetched_ns = wall_ns()
+        var buf: [600]u8
+        let path = cache_path(&buf)
+        if path.len > 0
+            data.make_folder("registry\\releases")
+            if not save_whole(path, body as []u8): fail("The release list was downloaded but could not be saved.")
+        return true
+
+    fn forge() -> str
+        return codeberg ? "https://codeberg.org/" : "https://github.com/"
+
+    fn cache_path(buf: *[600]u8) -> str
+        let id = str(engine_id[0..engine_id.len])
+        if not safe_id(id): return format(buf, "")
+        var name: [200]u8
+        return data.path(format(&name, "registry\\releases\\{id}.json"), buf)
+
+    fn fail(why: str)
+        failure_len = min(why.len, 240) as int
+        for k in 0..failure_len
+            failure[k] = why[k]
+
+    fn failure_text() -> str
+        return str(failure[0..failure_len])
+
+    fn release()
+        fetch.release()
+        set.release()
+        incoming.release()
+        engine_id.free()
+        repository.free()
+        test.free()
+
+fn safe_id(s: str) -> bool
+    if s.len == 0 or s.len > 100 or s[0] == '.': return false
+    for k in 0..s.len
+        let c = s[k]
+        if not (c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z' or c >= '0' and c <= '9' or c == '-' or c == '_' or c == '.'): return false
+    return true
+
+fn hex_digits(s: str) -> bool
+    for k in 0..s.len
+        let c = s[k]
+        if not (c >= '0' and c <= '9' or c >= 'a' and c <= 'f'): return false
+    return true
+
+fn starts(s: str, head: str) -> bool
+    return s.len >= head.len and s[0..head.len] == head
+
+fn web_address_or_test(s: str, test: str) -> str
+    if test.len > 0 and starts(s, test): return s
+    return web_address(s)
+
+fn hold_text(into: *[..]u8, s: str)
+    into.clear()
+    for k in 0..s.len
+        into.push(s[k])

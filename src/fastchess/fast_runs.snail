@@ -1,0 +1,206 @@
+use engine/desktop/file_tree
+use src/fastchess/fast_run
+
+const FastCheckMs: i64 = 1000
+const FastQuietMs = 2000
+const FastWatchMs = 100
+const FastEcoMs = 500
+
+var fast_wake_event: u32
+
+struct FastRuns
+    place: FastPlace
+    runs: [..]*FastRun
+    fresh: [..]*FastRun
+    passed: [..]u8
+    event: *void
+    thread: u64
+    poked: int
+    quit: int
+    gap_ms: int
+    checked_ms: i64
+    scanned_ns: i64
+    rescan: bool
+    started: bool
+
+    fn start(root: str, app_path: str)
+        place.set_root(root)
+        var buf: [720]u8
+        fast_make_folder(place.path("fastchess", &buf))
+        fast_make_folder(place.path("fastchess\\runs", &buf))
+        fast_save_whole(place.path("fastchess\\app.txt", &buf), app_path)
+        if fast_wake_event == 0: fast_wake_event = SDL_RegisterEvents(1)
+        event = sn_fc_listen()
+        if event: thread = spawn(fast_listen, self)
+        atomic_store(&poked, 1)
+        started = true
+
+    fn set_gap(ms: int)
+        let was = atomic_load(&gap_ms)
+        if ms == was: return
+        atomic_store(&gap_ms, ms)
+        if ms < was and event: sn_fc_set(event)
+
+    fn eco_default() -> bool
+        var buf: [720]u8
+        return file_exists(place.path("fastchess\\eco", &buf).ptr as cstr)
+
+    fn set_eco_default(on: bool)
+        var buf: [720]u8
+        let p = place.path("fastchess\\eco", &buf)
+        if on: fast_save_whole(p, "run tabs open in eco while this file is here\n")
+        else: SDL_RemovePath(p.ptr as cstr)
+
+    fn opens_app() -> bool
+        var buf: [720]u8
+        return not file_exists(place.path("fastchess\\no_app", &buf).ptr as cstr)
+
+    fn set_open_app(on: bool)
+        var buf: [720]u8
+        let p = place.path("fastchess\\no_app", &buf)
+        if on: SDL_RemovePath(p.ptr as cstr)
+        else: fast_save_whole(p, "snailfast leaves the app closed for a run while this file is here\n")
+
+    fn forget(r: *FastRun)
+        for i in 0..runs.len
+            if runs[i] != r: continue
+            pass(r.id_text())
+            runs.remove(i)
+            r.release()
+            free(r)
+            return
+
+    fn live_count() -> int
+        var n = 0
+        for r in runs
+            if r.running() or r.continuing: n += 1
+        return n
+
+    fn update() -> bool
+        if not started: return false
+        let poke = atomic_load(&poked) != 0
+        let now = sn_fc_now_ms()
+        if not poke and (live_count() == 0 or now - checked_ms < FastCheckMs): return false
+        atomic_store(&poked, 0)
+        checked_ms = now
+        var changed = false
+        if poke and scan(): changed = true
+        for r in runs
+            if r.running()
+                if r.update(): changed = true
+            elif r.continuing and r.settle(): changed = true
+        return changed
+
+    fn scan() -> bool
+        var buf: [720]u8
+        let folder = place.path("fastchess\\runs", &buf)
+        let stamp = modified_time(folder.ptr as cstr)
+        if stamp == scanned_ns and not rescan: return false
+        scanned_ns = stamp
+        rescan = false
+        var names: [..]u8
+        defer names.free()
+        names_in(folder, &names)
+        var found = false
+        var from = 0
+        for i in 0..names.len
+            if names[i] != '\n': continue
+            let name = str(names[from..i])
+            from = i as int + 1
+            if name.len == 0: continue
+            let had = run_named(name)
+            if had
+                if had.revive(): found = true
+                continue
+            if was_passed(name)
+                var lock: [720]u8
+                var inside: [96]u8
+                if not fast_held(place.path(format(&inside, "fastchess\\runs\\{name}\\lock"), &lock)): continue
+                unpass(name)
+            let r = new FastRun
+            if not r.open(&place, name)
+                r.release()
+                free(r)
+                rescan = true
+                continue
+            if not r.running()
+                pass(name)
+                r.release()
+                free(r)
+                continue
+            runs.push(r)
+            fresh.push(r)
+            found = true
+        return found
+
+    fn run_named(name: str) -> *FastRun
+        for r in runs
+            if r.id_text() == name: return r
+        return null
+
+    fn was_passed(name: str) -> bool
+        return fast_passed_at(str(passed[0..passed.len]), name) >= 0
+
+    fn unpass(name: str)
+        let at = fast_passed_at(str(passed[0..passed.len]), name)
+        if at < 0: return
+        let end = at + name.len as int + 1
+        for k in 0..passed.len as int - end
+            passed[at + k] = passed[end + k]
+        passed.resize(passed.len as int - (end - at))
+
+    fn pass(name: str)
+        push_text(&passed, name)
+        passed.push('\n')
+
+    fn reopen(name: str) -> *FastRun
+        for r in runs
+            if r.id_text() == name: return r
+        let r = new FastRun
+        if not r.open(&place, name)
+            r.release()
+            free(r)
+            return null
+        runs.push(r)
+        return r
+
+    fn release()
+        if thread
+            atomic_store(&quit, 1)
+            sn_fc_set(event)
+            join(thread)
+            thread = 0
+        sn_fc_close(event)
+        event = null
+        for r in runs
+            r.release()
+            free(r)
+        runs.free()
+        fresh.free()
+        passed.free()
+
+fn fast_passed_at(names: str, name: str) -> int
+    var from = 0
+    for i in 0..names.len
+        if names[i] != '\n': continue
+        if names[from..i] == name: return from
+        from = i as int + 1
+    return -1
+
+fn fast_listen(r: *FastRuns)
+    var pending = false
+    var woke: i64 = 0
+    loop
+        var wait = -1
+        if pending: wait = max(atomic_load(&r.gap_ms) as i64 - (sn_fc_now_ms() - woke), 0) as int
+        if sn_fc_wait(r.event, wait) != 0: pending = true
+        if atomic_load(&r.quit) != 0: return
+        let now = sn_fc_now_ms()
+        if not pending or now - woke < atomic_load(&r.gap_ms) as i64: continue
+        pending = false
+        woke = now
+        if atomic_load(&r.poked) == 0
+            atomic_store(&r.poked, 1)
+            var e: SDL_Event
+            e.type = fast_wake_event
+            SDL_PushEvent(&e)

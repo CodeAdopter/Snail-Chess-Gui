@@ -1,0 +1,64 @@
+const DbWhiteEngine: u8 = 1
+const DbBlackEngine: u8 = 2
+const DbFromFen: u8 = 4
+
+const DbFromFile: u8 = 0
+const DbFromLichess: u8 = 1
+const DbFromBroadcast: u8 = 2
+const DbFromApp: u8 = 3
+
+struct DbGame
+    at: i64
+    len: u32
+    date: u32
+    white: u32
+    black: u32
+    event: u32
+    white_elo: u16
+    black_elo: u16
+    plies: u16
+    result: u8
+    flags: u8
+    source: u8
+    spare: [3]u8
+
+struct DbLogEntry
+    at: i64
+    len: u32
+    game: u32
+    ms: i64
+    engine: u16
+    way: u8
+    spare: [5]u8
+
+struct DbGameInput
+    tags: [..]u8
+    moves: [..]u16
+    keys: [..]u64
+    white: str
+    black: str
+    event: str
+    white_elo: int
+    black_elo: int
+    date: u32
+    result: u8
+    flags: u8
+    source: u8
+
+    fn clear()
+        tags.clear()
+        moves.clear()
+        keys.clear()
+        white = ""
+        black = ""
+        event = ""
+        white_elo = 0
+        black_elo = 0
+        date = 0
+        result = 0
+        flags = 0
+
+    fn release()
+        tags.free()
+        moves.free()
+        keys.free()

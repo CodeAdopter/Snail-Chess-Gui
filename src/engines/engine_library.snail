@@ -1,0 +1,422 @@
+use src/engines/engine_profile
+use src/engines/engine_origin
+use src/engines/engine_files
+
+const BundledEngineFile = "snailchess.exe"
+const LibrarySaveDelayNs: i64 = 400000000
+
+enum EngineSource: u8
+    FromBundle
+    FromFile
+    FromRegistry
+
+struct EngineEntry
+    id: int
+    source: EngineSource
+    copied: bool
+    favourite: bool
+    probed: bool
+    name: PoolSpan
+    author: PoolSpan
+    path: PoolSpan
+    options: [..]EngineOption
+    pool: [..]u8
+    profiles: [..]EngineProfile
+    next_profile: int = 1
+    origin: EngineOrigin
+
+    fn text(s: PoolSpan) -> str
+        return str(pool[s.at..s.at + s.len])
+
+    fn keep(s: str) -> PoolSpan
+        let at = pool.len as int
+        for k in 0..s.len
+            pool.push(s[k])
+        return PoolSpan(at, s.len as int)
+
+    fn display_name() -> str
+        if name.len > 0: return text(name)
+        if source == FromBundle: return "Snail Chess"
+        return file_name_of(text(path))
+
+    fn learn(e: *UciEngine)
+        var kept: [600]u8
+        let p = format(&kept, "{text(path)}")
+        pool.clear()
+        options.clear()
+        path = keep(p)
+        name = keep(str(e.name[0..e.name_len]))
+        author = keep(str(e.author[0..e.author_len]))
+        for o in e.options
+            options.push(EngineOption(keep(e.pool_text(o.name)), o.kind, keep(e.pool_text(o.default)), o.least, o.most, keep(e.pool_text(o.vars))))
+        probed = true
+
+    fn option_index(want: str) -> int
+        for i in 0..options.len
+            if text(options[i].name) == want: return i as int
+        return -1
+
+    fn value_for(p: *EngineProfile, i: int) -> str
+        let o = &options[i]
+        if p
+            let (v, given) = p.value_of(text(o.name))
+            if given: return v
+        return text(o.default)
+
+    fn profile(id: int) -> *EngineProfile
+        for i in 0..profiles.len
+            if profiles[i].id == id: return &profiles[i]
+        return null
+
+    fn add_profile() -> *EngineProfile
+        var p: EngineProfile
+        p.id = next_profile
+        next_profile += 1
+        var name: [32]u8
+        p.set_name(format(&name, "Profile {p.id}"))
+        profiles.push(p)
+        return &profiles[profiles.len - 1]
+
+    fn remove_profile(id: int)
+        for i in 0..profiles.len
+            if profiles[i].id == id
+                profiles[i].release()
+                profiles.remove(i)
+                return
+
+    fn release()
+        options.free()
+        pool.free()
+        for i in 0..profiles.len
+            profiles[i].release()
+        profiles.free()
+        origin.release()
+
+enum LibraryOpened: u8
+    LibraryRead
+    LibraryFresh
+    LibraryUnreadable
+
+struct EngineLibrary
+    entries: [..]EngineEntry
+    next_id: int = 1
+    default_id: int
+    version: int
+    data: *DataFolder
+    changed_ns: i64
+
+    fn open(folder: *DataFolder) -> LibraryOpened
+        data = folder
+        var buf: [600]u8
+        let bytes = read_file(data.path("engines\\engines.json", &buf).ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len == 0
+            register_bundled()
+            save()
+            return LibraryFresh
+        if not read(str(bytes))
+            var aside: [600]u8
+            SDL_RenamePath(data.path("engines\\engines.json", &buf).ptr as cstr, data.path("engines\\engines.bad.json", &aside).ptr as cstr)
+            clear()
+            register_bundled()
+            save()
+            return LibraryUnreadable
+        return LibraryRead
+
+    fn register_bundled()
+        let e = add(FromBundle)
+        default_id = e.id
+
+    fn add(source: EngineSource, id: int = 0) -> *EngineEntry
+        var e: EngineEntry
+        e.id = id > 0 ? id : reserve_id()
+        e.source = source
+        entries.push(e)
+        version += 1
+        return &entries[entries.len - 1]
+
+    fn reserve_id() -> int
+        next_id += 1
+        return next_id - 1
+
+    fn index_of(id: int) -> int
+        for i in 0..entries.len
+            if entries[i].id == id: return i as int
+        return -1
+
+    fn find(id: int) -> *EngineEntry
+        let i = index_of(id)
+        return i < 0 ? null : &entries[i]
+
+    fn chosen_id() -> int
+        if index_of(default_id) >= 0: return default_id
+        return entries.len > 0 ? entries[0].id : 0
+
+    fn review_id(asked: int) -> int
+        if asked > 0 and index_of(asked) >= 0: return asked
+        for e in entries
+            if e.source == FromBundle: return e.id
+        return chosen_id()
+
+    fn tell_bundle(into: *EngineProfile)
+        var path: [600]u8
+        if data and data.make_folder("engines"): into.put("MemoryFile", data.path("engines\\snailchess-memory.bin", &path))
+
+    fn bundled_id() -> int
+        for e in entries
+            if e.source == FromBundle: return e.id
+        let made = add(FromBundle)
+        save()
+        return made.id
+
+    fn exe_path(id: int, buf: *[600]u8) -> str
+        let e = find(id)
+        if not e: return format(buf, "")
+        if e.source == FromBundle: return format(buf, "{str(SDL_GetBasePath())}{BundledEngineFile}")
+        if e.copied: return data.path(e.text(e.path), buf)
+        return format(buf, "{e.text(e.path)}")
+
+    fn remove_files(id: int) -> bool
+        let e = find(id)
+        if not e or not e.copied: return true
+        let folder = install_folder(e.text(e.path))
+        if folder.len == 0: return true
+        for i in 0..entries.len
+            let o = &entries[i]
+            if o.id != id and o.copied and install_folder(o.text(o.path)) == folder: return true
+        wait_closed_children()
+        return remove_data_folder(data, folder)
+
+    fn remove(id: int)
+        let i = index_of(id)
+        if i < 0: return
+        entries[i].release()
+        entries.remove(i)
+        if default_id == id: default_id = chosen_id()
+        version += 1
+
+    fn learn_once(id: int, e: *UciEngine) -> bool
+        let entry = find(id)
+        if not entry: return false
+        let renewed = entry.source == FromBundle and e.name_len > 0 and entry.text(entry.name) != str(e.name[0..e.name_len])
+        if entry.probed and not renewed: return false
+        entry.learn(e)
+        version += 1
+        save()
+        return true
+
+    fn clear()
+        for i in 0..entries.len
+            entries[i].release()
+        entries.clear()
+        next_id = 1
+        default_id = 0
+
+    fn release()
+        clear()
+        entries.free()
+
+    fn changed()
+        changed_ns = now_ns()
+
+    fn save_when_due() -> f64
+        if changed_ns == 0: return -1.0
+        let wait = changed_ns + LibrarySaveDelayNs - now_ns()
+        if wait > 0: return wait as f64 / 1.0e9
+        save()
+        return -1.0
+
+    fn save() -> bool
+        changed_ns = 0
+        var out: [..]u8
+        defer out.free()
+        write(&out)
+        var buf: [600]u8
+        return save_whole(data.path("engines\\engines.json", &buf), out[0..out.len])
+
+    fn write(out: *[..]u8)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.object()
+        doc.set(root, "next_id", doc.number(next_id as f64))
+        doc.set(root, "default", doc.number(default_id as f64))
+        let list = doc.array()
+        for i in 0..entries.len
+            doc.push(list, entry_json(&doc, &entries[i]))
+        doc.set(root, "engines", list)
+        doc.write(root, out)
+
+    fn read(text: str) -> bool
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(text)
+        if not doc.is(root, JsonObject): return false
+        let list = doc.get(root, "engines")
+        if not doc.is(list, JsonArray): return false
+        next_id = doc.num_at(root, "next_id", 1.0) as int
+        default_id = doc.num_at(root, "default", 0.0) as int
+        var v = doc.first(list)
+        while v >= 0
+            if doc.is(v, JsonObject): read_entry(&doc, v)
+            v = doc.next(v)
+        for e in entries
+            next_id = max(next_id, e.id + 1)
+        return true
+
+    fn read_entry(doc: *JsonDoc, v: int)
+        let id = doc.num_at(v, "id", 0.0) as int
+        if id <= 0 or index_of(id) >= 0: return
+        var e: EngineEntry
+        e.id = id
+        e.source = source_named(json_text(doc, v, "source"))
+        e.copied = json_flag(doc, v, "copied")
+        e.favourite = json_flag(doc, v, "favourite")
+        e.probed = json_flag(doc, v, "probed")
+        e.path = e.keep(json_text(doc, v, "path"))
+        e.name = e.keep(json_text(doc, v, "name"))
+        e.author = e.keep(json_text(doc, v, "author"))
+        let options = doc.get(v, "options")
+        if doc.is(options, JsonArray)
+            var o = doc.first(options)
+            while o >= 0
+                if doc.is(o, JsonObject)
+                    let name = e.keep(json_text(doc, o, "name"))
+                    let kind = option_kind_named(json_text(doc, o, "type"))
+                    let default = e.keep(json_text(doc, o, "default"))
+                    let least = doc.num_at(o, "min", 0.0) as i64
+                    let most = doc.num_at(o, "max", 0.0) as i64
+                    let vars = e.keep(json_text(doc, o, "vars"))
+                    if name.len > 0: e.options.push(EngineOption(name, kind, default, least, most, vars))
+                o = doc.next(o)
+        read_profiles(doc, v, &e)
+        e.origin.read(doc, doc.get(v, "origin"))
+        entries.push(e)
+
+    fn read_profiles(doc: *JsonDoc, v: int, e: *EngineEntry)
+        e.next_profile = max(doc.num_at(v, "next_profile", 1.0) as int, 1)
+        let list = doc.get(v, "profiles")
+        if not doc.is(list, JsonArray): return
+        var p = doc.first(list)
+        while p >= 0
+            let id = doc.num_at(p, "id", 0.0) as int
+            if doc.is(p, JsonObject) and id > 0 and not e.profile(id)
+                var profile: EngineProfile
+                profile.id = id
+                profile.set_name(json_text(doc, p, "name"))
+                let values = doc.get(p, "values")
+                if doc.is(values, JsonObject)
+                    var m = doc.first(values)
+                    while m >= 0
+                        if doc.is(m, JsonString): profile.put(doc.key_of(m), doc.str_of(m))
+                        m = doc.next(m)
+                profile.touched_ns = 0
+                e.profiles.push(profile)
+                e.next_profile = max(e.next_profile, id + 1)
+            p = doc.next(p)
+
+fn entry_json(doc: *JsonDoc, e: *EngineEntry) -> int
+    let v = doc.object()
+    doc.set(v, "id", doc.number(e.id as f64))
+    doc.set(v, "source", doc.text(source_word(e.source)))
+    doc.set(v, "name", doc.text(e.text(e.name)))
+    doc.set(v, "author", doc.text(e.text(e.author)))
+    if e.source != FromBundle: doc.set(v, "path", doc.text(e.text(e.path)))
+    if e.copied: doc.set(v, "copied", doc.boolean(true))
+    if e.favourite: doc.set(v, "favourite", doc.boolean(true))
+    doc.set(v, "probed", doc.boolean(e.probed))
+    if e.origin.known(): doc.set(v, "origin", e.origin.write(doc))
+    let list = doc.array()
+    for o in e.options
+        let ov = doc.object()
+        doc.set(ov, "name", doc.text(e.text(o.name)))
+        doc.set(ov, "type", doc.text(option_kind_word(o.kind)))
+        if o.default.len > 0: doc.set(ov, "default", doc.text(e.text(o.default)))
+        if o.kind == SpinOption
+            doc.set(ov, "min", doc.number(o.least as f64))
+            doc.set(ov, "max", doc.number(o.most as f64))
+        if o.vars.len > 0: doc.set(ov, "vars", doc.text(e.text(o.vars)))
+        doc.push(list, ov)
+    doc.set(v, "options", list)
+    if e.profiles.len > 0
+        doc.set(v, "next_profile", doc.number(e.next_profile as f64))
+        let profiles = doc.array()
+        for p in e.profiles
+            let pv = doc.object()
+            doc.set(pv, "id", doc.number(p.id as f64))
+            doc.set(pv, "name", doc.text(p.name_text()))
+            let values = doc.object()
+            for value in p.values
+                doc.set(values, value.name_text(), doc.text(value.value_text()))
+            doc.set(pv, "values", values)
+            doc.push(profiles, pv)
+        doc.set(v, "profiles", profiles)
+    return v
+
+fn install_folder(path: str) -> str
+    if path.len < 10 or path[0..8] != "engines\\": return ""
+    var end = 8
+    while end < path.len and path[end] >= '0' and path[end] <= '9'
+        end += 1
+    if end == 8 or end >= path.len or path[end] != '\\': return ""
+    return path[0..end]
+
+fn json_text(doc: *JsonDoc, obj: int, key: str) -> str
+    let v = doc.get(obj, key)
+    return doc.is(v, JsonString) ? doc.str_of(v) : ""
+
+fn json_flag(doc: *JsonDoc, obj: int, key: str) -> bool
+    let v = doc.get(obj, key)
+    return doc.is(v, JsonBool) and doc.flag(v)
+
+fn source_word(s: EngineSource) -> str
+    match s
+        FromBundle: return "bundled"
+        FromRegistry: return "registry"
+    return "file"
+
+fn source_named(w: str) -> EngineSource
+    if w == "bundled": return FromBundle
+    if w == "registry": return FromRegistry
+    return FromFile
+
+fn option_kind_word(k: OptionKind) -> str
+    match k
+        CheckOption: return "check"
+        SpinOption: return "spin"
+        ComboOption: return "combo"
+        ButtonOption: return "button"
+        StringOption: return "string"
+    return "unknown"
+
+fn option_kind_named(w: str) -> OptionKind
+    if w == "check": return CheckOption
+    if w == "spin": return SpinOption
+    if w == "combo": return ComboOption
+    if w == "button": return ButtonOption
+    if w == "string": return StringOption
+    return UnknownOption
+
+struct EngineChoices
+    names: [..]str
+    ids: [..]int
+    made_for: int = -1
+    lib: *EngineLibrary
+
+    fn make(library: *EngineLibrary)
+        lib = library
+        if made_for == lib.version: return
+        made_for = lib.version
+        names.clear()
+        ids.clear()
+        for i in 0..lib.entries.len
+            names.push(lib.entries[i].display_name())
+            ids.push(lib.entries[i].id)
+
+    fn index_of(id: int) -> int
+        for i in 0..ids.len
+            if ids[i] == id: return i as int
+        return -1
+
+    fn release()
+        names.free()
+        ids.free()

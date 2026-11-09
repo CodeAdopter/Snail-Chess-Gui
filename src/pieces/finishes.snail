@@ -1,0 +1,18 @@
+enum PieceFinish: u8
+    NoFinish
+    CircuitFinish
+    GooFinish
+    PaperFinish
+
+const FinishCount = 4
+
+const FinishWords = ["none", "circuit", "goo", "paper"]
+const FinishLabels = ["None", "Circuit", "Goo", "Paper"]
+
+fn finish_named(word: str) -> PieceFinish
+    for i in 0..FinishWords.len
+        if FinishWords[i] == word: return i as PieceFinish
+    return NoFinish
+
+fn finish_moves(f: PieceFinish) -> bool
+    return f == CircuitFinish or f == GooFinish

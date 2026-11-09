@@ -1,0 +1,107 @@
+use src/play/play_game
+use src/views/analysis_panel
+use src/views/player_bar
+
+enum PlayPanelAsk: u8
+    PanelAsksNothing
+    PanelAsksStart
+    PanelAsksAnalyze
+    PanelAsksNewGame
+    PanelAsksTournament
+    PanelAsksCancelSearch
+
+fn draw_player_bars(app: *DesktopApp, look: *BoardLook, play: *PlayGame, engine_name: str, x: f32, top_y: f32, bottom_y: f32, w: f32, flipped: bool, handing: bool)
+    if not handing and look.cards_on_table(): return
+    let ui = &app.ui
+    let now = now_ns()
+    let top = flipped ? White : Black
+    var human = play.human
+    if play.state == PlayChoosing
+        human = top.other()
+        if play.setup.side == ChooseWhite: human = White
+        if play.setup.side == ChooseBlack: human = Black
+    for (side, y, id) in [(top, top_y, "topbar"), (top.other(), bottom_y, "bottombar")]
+        var clock: [24]u8
+        var note: [40]u8
+        var eval: [24]u8
+        var shown_clock = ""
+        if play.state == PlayChoosing and play.setup.time.kind != NoClock: shown_clock = clock_text(play.setup.time.base_ms * NsPerMs, &clock)
+        if play.state != PlayChoosing and play.clock.timed(): shown_clock = clock_text(play.clock.left_ns(side, now), &clock)
+        let untimed = shown_clock.len == 0
+        if untimed: shown_clock = "∞"
+        let running = play.state == PlayRunning and play.clock.running and play.clock.side == side
+        let person = side == human
+        let name = person ? (play.human_name_len > 0 ? play.human_text() : "You") : engine_name
+        var aside = person ? "" : play.setup.strength.text(&note)
+        if person and play.setup.terms.quick and play.state != PlayChoosing: aside = format(&note, "{play.rating_before}")
+        let shown_eval = person ? "" : eval_text(play, &eval)
+        if handing
+            if look.desk_cards
+                var c: CardText
+                c.side = side
+                c.to_move = play.state == PlayRunning and play.clock.side == side
+                c.name = name
+                c.version = aside
+                c.eval = shown_eval
+                c.clock = look.desk_clock and not untimed ? "" : shown_clock
+                look.scene.desk.card(side).keep(&c, "")
+            if look.desk_clock
+                look.scene.desk.clock.set(side, untimed ? "" : shown_clock)
+                look.scene.desk.clock.on = not untimed
+        else: draw_player_bar(ui, look.theme, look.fonts, id, x, y, w, side, name, aside, shown_eval, shown_clock, running)
+    if handing
+        look.scene.desk.clock.up = play.state == PlayChoosing ? play.game.board().side : play.clock.side
+        look.scene.desk.clock.pressable = (play.pressing or play.by_hand and play.can_move()) and look.desk_clock
+    let wait = play.clock.next_change_s(now)
+    if play.state == PlayRunning and wait >= 0.0: app.wake_in(wait)
+
+fn eval_text(play: *PlayGame, buf: *[24]u8) -> str
+    if not play.setup.show_eval or play.state == PlayChoosing or play.player.score_kind == NoScore: return ""
+    return score_text(play.player.score_kind, play.player.score, play.human.other(), buf)
+
+fn draw_game_panel(app: *DesktopApp, look: *BoardLook, play: *PlayGame, x: f32, y: f32, w: f32, h: f32) -> PlayPanelAsk
+    let ui = &app.ui
+    let theme = look.theme
+    let fonts = look.fonts
+    var asked = PanelAsksNothing
+    if w < 1.0 or h < 1.0: return asked
+    var status: [200]u8
+    var tc: [32]u8
+    var strength: [40]u8
+    var line: [120]u8
+    with ui.open(UiNode(name: "gamepanel", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(16.0, 12.0, 16.0, 12.0), gap: 6.0, clip: true))
+        ui.paragraph(play.status_text(&status), UiTextStyle(face: fonts.strong, size: 14.0, color: theme.ink))
+        let terms = &play.setup.terms
+        if terms.quick: ui.label(format(&line, "{terms.rated ? "Rated" : "Casual"} {SpeedWords[terms.speed]}  ·  {play.setup.time.text(&tc)}  ·  {StyleNames[terms.style]}"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+        else: ui.label(format(&line, "{play.setup.time.text(&tc)}  ·  {play.setup.strength.text(&strength)}"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+        if play.rated_done
+            let c = play.rating_change
+            ui.label(format(&line, "{SpeedNames[terms.speed]} rating {str(play.rating_after[0..play.rating_after_len])}, {c > 0 ? "+" : ""}{c}"), UiTextStyle(face: fonts.strong, size: 13.0, color: c > 0 ? theme.gain() : c < 0 ? theme.loss() : theme.muted))
+        ui.spacer()
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            if play.queue_note_len > 0
+                ui.label(play.queue_text(), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+                if ui.button("Cancel"): asked = PanelAsksCancelSearch
+            elif play.state == PlayOver
+                ui.spacer()
+                if ui.button(terms.quick ? "Next match" : "New game"): asked = PanelAsksNewGame
+                if ui.button("Analyze", true): asked = PanelAsksAnalyze
+    return asked
+
+fn draw_resign(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, play: *PlayGame, asking: *bool)
+    if not *asking: return
+    if play.state != PlayRunning
+        *asking = false
+        return
+    let ui = &app.ui
+    var show = true
+    with ui.modal("resign", ref show, 360.0)
+        ui.label("Resign this game?", UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+        ui.paragraph("Resigning records a loss in your game history.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.spacer()
+            if ui.button("Keep playing"): show = false
+            if ui.button("Resign", true)
+                play.resign()
+                show = false
+    *asking = show

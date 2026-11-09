@@ -1,0 +1,191 @@
+const MaxPvMoves = 48
+
+struct UciWords
+    text: str
+    at: int
+    start: int
+
+    fn next() -> str
+        while at < text.len and text[at] <= 32
+            at += 1
+        start = at
+        while at < text.len and text[at] > 32
+            at += 1
+        return text[start..at]
+
+    fn rest() -> str
+        while at < text.len and text[at] <= 32
+            at += 1
+        var end = text.len as int
+        while end > at and text[end - 1] <= 32
+            end -= 1
+        let r = text[at..end]
+        at = text.len as int
+        return r
+
+    fn done() -> bool
+        while at < text.len and text[at] <= 32
+            at += 1
+        return at >= text.len
+
+fn uci_number(s: str) -> (i64, bool)
+    var i = 0
+    var negative = false
+    if s.len > 0 and (s[0] == '-' or s[0] == '+')
+        negative = s[0] == '-'
+        i = 1
+    if i >= s.len or s.len - i > 18: return 0, false
+    var n: i64 = 0
+    while i < s.len
+        let c = s[i]
+        if c < '0' or c > '9': return 0, false
+        n = n * 10 + (c - '0') as i64
+        i += 1
+    return negative ? -n : n, true
+
+enum ScoreKind: u8
+    NoScore
+    Centipawns
+    MateIn
+
+enum ScoreBound: u8
+    ExactScore
+    LowerBound
+    UpperBound
+
+struct UciInfo
+    multipv: int = 1
+    depth: int
+    seldepth: int
+    kind: ScoreKind
+    score: int
+    bound: ScoreBound
+    nodes: i64
+    nps: i64
+    time_ms: i64
+    hashfull: int = -1
+    tbhits: i64
+    has_depth: bool
+    wdl: [3]int
+    has_wdl: bool
+    pv: str
+
+fn read_info(line: str) -> UciInfo
+    var info: UciInfo
+    var w = UciWords(text: line)
+    if w.next() != "info": return info
+    loop
+        let key = w.next()
+        if key.len == 0: break
+        if key == "depth": info.depth = info_int(&w)
+        elif key == "seldepth": info.seldepth = info_int(&w)
+        elif key == "multipv": info.multipv = clamp(info_int(&w), 1, 256)
+        elif key == "nodes": info.nodes = info_long(&w)
+        elif key == "nps": info.nps = info_long(&w)
+        elif key == "time": info.time_ms = info_long(&w)
+        elif key == "hashfull": info.hashfull = clamp(info_int(&w), 0, 1000)
+        elif key == "tbhits": info.tbhits = info_long(&w)
+        elif key == "wdl"
+            for k in 0..3
+                info.wdl[k] = clamp(info_int(&w), 0, 1000)
+            info.has_wdl = true
+        elif key == "score"
+            let unit = w.next()
+            let (n, ok) = uci_number(w.next())
+            if ok and unit == "cp": info.kind = Centipawns
+            elif ok and unit == "mate": info.kind = MateIn
+            info.score = clamp(n, -1000000, 1000000) as int
+            let before = w.at
+            let mark = w.next()
+            if mark == "lowerbound": info.bound = LowerBound
+            elif mark == "upperbound": info.bound = UpperBound
+            else: w.at = before
+        elif key == "pv"
+            info.pv = w.rest()
+        elif key == "string" or key == "refutation" or key == "currline": break
+        else
+            w.next()
+    info.has_depth = info.depth > 0
+    return info
+
+fn info_int(w: *UciWords) -> int
+    let (n, ok) = uci_number(w.next())
+    return ok ? clamp(n, -1000000000, 1000000000) as int : 0
+
+fn info_long(w: *UciWords) -> i64
+    let (n, ok) = uci_number(w.next())
+    return ok and n >= 0 ? n : 0
+
+enum OptionKind: u8
+    CheckOption
+    SpinOption
+    ComboOption
+    ButtonOption
+    StringOption
+    UnknownOption
+
+struct UciOption
+    name: str
+    kind: OptionKind
+    default: str
+    least: i64
+    most: i64
+    vars: str
+
+fn read_option(line: str) -> (UciOption, bool)
+    var o: UciOption
+    o.kind = UnknownOption
+    var w = UciWords(text: line)
+    if w.next() != "option" or w.next() != "name": return o, false
+    o.name = run_until(&w, line)
+    var vars_from = -1
+    loop
+        let key = w.next()
+        if key.len == 0: break
+        if key == "type"
+            let t = w.next()
+            if t == "check": o.kind = CheckOption
+            elif t == "spin": o.kind = SpinOption
+            elif t == "combo": o.kind = ComboOption
+            elif t == "button": o.kind = ButtonOption
+            elif t == "string": o.kind = StringOption
+        elif key == "default": o.default = run_until(&w, line)
+        elif key == "min": o.least = info_long_signed(&w)
+        elif key == "max": o.most = info_long_signed(&w)
+        elif key == "var"
+            let first = vars_from < 0 ? w.at : vars_from
+            run_until(&w, line)
+            vars_from = first
+            o.vars = line[first..w.at]
+    o.vars = trim_words(o.vars)
+    return o, o.name.len > 0
+
+fn info_long_signed(w: *UciWords) -> i64
+    let (n, ok) = uci_number(w.next())
+    return ok ? n : 0
+
+fn run_until(w: *UciWords, line: str) -> str
+    var first = -1
+    var end = w.at
+    loop
+        let before = w.at
+        let x = w.next()
+        if x.len == 0 or is_option_field(x)
+            w.at = before
+            break
+        if first < 0: first = w.start
+        end = w.at
+    if first < 0: return line[w.at..w.at]
+    return line[first..end]
+
+fn trim_words(s: str) -> str
+    var a = 0
+    var b = s.len as int
+    while a < b and s[a] <= 32
+        a += 1
+    while b > a and s[b - 1] <= 32
+        b -= 1
+    return s[a..b]
+
+fn is_option_field(x: str) -> bool
+    return x == "type" or x == "default" or x == "min" or x == "max" or x == "var"

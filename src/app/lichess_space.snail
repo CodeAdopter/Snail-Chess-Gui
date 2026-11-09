@@ -1,0 +1,324 @@
+use src/app/play_space
+use src/app/new_tab_page
+
+const LichessMinuteWords = ["8", "10", "12", "15", "20", "25", "30", "40", "45", "60", "90", "120", "180"]
+const LichessMinutes = [8, 10, 12, 15, 20, 25, 30, 40, 45, 60, 90, 120, 180]
+const LichessIncrementWords = ["0", "2", "3", "5", "8", "10", "15", "20", "30", "45", "60"]
+const LichessIncrements = [0, 2, 3, 5, 8, 10, 15, 20, 30, 45, 60]
+const LichessChatShown = 60
+const LichessChatHeight: f32 = 176.0
+const LichessChatLeast: f32 = 92.0
+const LichessMovesLeast: f32 = 120.0
+const LichessControlsHeight: f32 = 56.0
+const LichessActionTall: f32 = 36.0
+const ActionPlain = 0
+const ActionPrimary = 1
+const ActionDanger = 2
+const LichessHeadHeight: f32 = 96.0
+
+enum LichessAsk: u8
+    LichessAsksNothing
+    LichessAsksAnalyze
+
+extend Workspace
+    fn draw_lichess(app: *DesktopApp, look: *DesktopLook, theme: *GuiTheme, fonts: *GuiFonts, icons: *LineIcons, tab: *GuiTab, board_look: *BoardLook, lp: *LichessPlay, chat: *UiEditText, resigning: *bool) -> LichessAsk
+        let (ax, ay, aw, ah) = work_area(&app.ui)
+        let col_w = board_column(app, look, ax, ay, aw, ah)
+        let bar_room = board_look.cards_on_table() ? 0.0 : PlayerBarHeight + BarGap
+        let frame = backdrop_frame(board_look, min(col_w, ah))
+        let fit = board_place(0.0, 0.0, max(min(col_w - frame * 2.0, ah - bar_room * 2.0 - frame * 2.0), 1.0), app.scale)
+        let size = fit.size
+        let slack = col_w - size
+        let board_x = ax + frame + max(slack - frame * 2.0, 0.0) * shift
+        if board_look.scene: tab.board.room = board_room(app, ax, col_w, TabRowHeight + CommandBarHeight)
+        else: draw_slack(app, ax, ay + bar_room, col_w, size, slack, board_x)
+        let place = board_place(board_x, ay + bar_room + frame, size, app.scale)
+        draw_backdrop_behind(app, board_look, ax, col_w, place)
+        board_look.sheet.prepare(&app.gpu, &app.ui_gpu, board_look.set, place.cell_px, board_look.costume)
+        let game = &lp.view
+        if board_look.scene: lichess_bars(app, board_look, lp, place.x, ay, place.y + place.size + BarGap, place.size, tab.flipped, true)
+        tab.board.by_hand = true
+        tab.board.hand_waits = true
+        let live_end = lp.state == LichessLive and lp.at_end()
+        let movable = live_end and lp.my_turn()
+        let made = tab.board.draw(app, board_look, game.board(), game.last_move(), place, tab.flipped, movable, live_end and not movable)
+        if tab.board.free_on
+            let pressed = tab.board.clock_hit or tab.board.space_hit
+            tab.board.space_hit = false
+            if pressed and movable
+                let b = game.board()
+                let m = tab.board.free.match(b)
+                if m != NoMove: lp.move(m)
+                elif not tab.board.free.same(b)
+                    lp.say("That isn't a legal move. The pieces went back.")
+                    tab.board.free.unsync()
+        elif made != NoMove: lp.move(made)
+        lichess_bars(app, board_look, lp, place.x, ay, place.y + place.size + BarGap, place.size, tab.flipped, false)
+
+        let (px, py, pw, ph) = side_room(&app.ui, ax, col_w)
+        if lp.state == LichessSignedOut or lp.state == LichessChecking
+            lichess_sign_in(app, theme, fonts, lp, px, py, pw, ph)
+            return LichessAsksNothing
+        if lp.state == LichessReady or lp.state == LichessSearching
+            lichess_queue(app, theme, fonts, lp, px, py, pw, ph)
+            return LichessAsksNothing
+        var asked = LichessAsksNothing
+        lichess_head(app, theme, fonts, lp, px, py, pw, LichessHeadHeight)
+        app.ui.rect(px, py + LichessHeadHeight + WorkspaceGap * 0.5 - 0.5, pw, 1.0, theme.line)
+        let top = py + LichessHeadHeight + WorkspaceGap
+        let foot = py + ph - LichessControlsHeight
+        self.chat.least = LichessChatLeast
+        self.chat.most = max(foot - top - LichessMovesLeast - WorkspaceGap, LichessChatLeast)
+        self.chat.reset = LichessChatHeight
+        if self.chat.pos <= 0.0: self.chat.pos = LichessChatHeight
+        self.chat.draw(app, look, "chat", false, px, foot - clamp(self.chat.pos, self.chat.least, self.chat.most) - WorkspaceGap * 0.5, pw, foot, true, lined: true)
+        let chat_h = clamp(self.chat.pos, self.chat.least, self.chat.most)
+        tab.moves.fixed = true
+        tab.moves.draw(app, look, theme, fonts, game, px, top, pw, max(foot - chat_h - WorkspaceGap - top, 1.0))
+        if tab.moves.clicked: tab.board.free.unsync()
+        lichess_chat(app, theme, fonts, lp, chat, px, foot - chat_h, pw, chat_h)
+        app.ui.rect(px, foot - 0.5, pw, 1.0, theme.line)
+        if lichess_controls(app, theme, fonts, icons, lp, resigning, px, foot, pw, LichessControlsHeight): asked = LichessAsksAnalyze
+        return asked
+
+fn lichess_bars(app: *DesktopApp, look: *BoardLook, lp: *LichessPlay, x: f32, top_y: f32, bottom_y: f32, w: f32, flipped: bool, handing: bool)
+    if not handing and look.cards_on_table(): return
+    let now = now_ns()
+    let top = flipped ? White : Black
+    let in_game = lp.playing() or lp.state == LichessOver
+    for (side, y, id) in [(top, top_y, "topbar"), (top.other(), bottom_y, "bottombar")]
+        var clock: [24]u8
+        var name: [80]u8
+        var note: [24]u8
+        let s = side == White ? &lp.game.white : &lp.game.black
+        let mine = in_game ? side == lp.my_side() : side == top.other()
+        var shown_name = ""
+        var aside = ""
+        if not in_game
+            shown_name = mine ? (lp.name.len > 0 ? lp.name.text() : "You") : "Opponent"
+        elif s.ai_level > 0: shown_name = format(&name, "Lichess AI level {s.ai_level}")
+        else
+            shown_name = s.title.len > 0 ? format(&name, "{s.title.text()} {s.name.text()}") : format(&name, "{s.name.text()}")
+            if s.rating > 0: aside = format(&note, "{s.rating}")
+        let left = in_game ? lp.clock_ms(side, now) : -1
+        let shown_clock = left >= 0 ? clock_text(left * NsPerMs, &clock) : ""
+        let running = lp.clock_running(side)
+        if handing
+            if look.desk_cards
+                var c: CardText
+                c.side = side
+                c.to_move = running
+                c.name = shown_name
+                c.version = aside
+                c.clock = look.desk_clock ? "" : shown_clock
+                look.scene.desk.card(side).keep(&c, "")
+            if look.desk_clock
+                look.scene.desk.clock.set(side, shown_clock)
+                look.scene.desk.clock.on = shown_clock.len > 0
+        else: draw_player_bar(&app.ui, look.theme, look.fonts, id, x, y, w, side, shown_name, aside, "", shown_clock, running)
+    if handing
+        look.scene.desk.clock.up = lp.end_board().side
+        look.scene.desk.clock.pressable = look.desk_clock and lp.my_turn()
+
+fn lichess_sign_in(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, lp: *LichessPlay, x: f32, y: f32, w: f32, h: f32)
+    let ui = &app.ui
+    let small = UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8)
+    let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    let body = UiTextStyle(face: fonts.text, size: 13.0, color: theme.ink)
+    with ui.open(UiNode(name: "lichesssignin", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(20.0, 18.0, 20.0, 18.0), gap: 12.0, clip: true))
+        ui.label("PLAY ON LICHESS", small)
+        ui.label("Sign in", UiTextStyle(face: fonts.serif, size: 22.0, color: theme.ink))
+        ui.paragraph("Play rapid and classical games against real players, on the 2D or 3D board.", note)
+        with ui.open(UiNode(width: UiSize.grow(), gap: 8.0))
+            ui.paragraph("1. Create a token on Lichess. The permissions are filled in for you.", body)
+            if ui.button("Create token"): SDL_OpenURL(LichessTokenUrl)
+        with ui.open(UiNode(width: UiSize.grow(), gap: 8.0))
+            ui.paragraph("2. Copy the token Lichess shows, then paste it here. It stays sealed on this computer and is only sent to Lichess.", body)
+            if lp.state == LichessChecking: ui.label("Checking with Lichess…", UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink))
+            elif ui.button("Paste token", true)
+                let clip = SDL_GetClipboardText()
+                if lp.sign_in(str(clip as cstr)): SDL_SetClipboardText("")
+                SDL_free(clip)
+        if lp.problem.len > 0: ui.paragraph(lp.problem.text(), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.loss()))
+        ui.spacer()
+        ui.paragraph("Engines are off in Lichess games, as Lichess's fair play rules require. Analyze a game here once it ends.", note)
+
+fn lichess_queue(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, lp: *LichessPlay, x: f32, y: f32, w: f32, h: f32)
+    let ui = &app.ui
+    let small = UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8)
+    let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    var line: [120]u8
+    var clock: [16]u8
+    let searching = lp.state == LichessSearching
+    with ui.open(UiNode(name: "lichessqueue", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(20.0, 18.0, 20.0, 18.0), gap: 12.0, clip: true))
+        ui.label("PLAY ON LICHESS", small)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 1.0)))
+            ui.label(lp.name.text(), UiTextStyle(face: fonts.serif, size: 22.0, color: theme.ink))
+            ui.label(format(&line, "Rapid {lp.rapid}  ·  Classical {lp.classical}"), note, UiNode(padding: Vec4(0.0, 0.0, 0.0, 3.0)))
+        ui.label("QUICK PAIRING", small, UiNode(padding: Vec4(0.0, 6.0, 0.0, 0.0)))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 6.0))
+            for i in 0..LichessPresets.len
+                if clock_chip(ui, theme, fonts, i as int, LichessPresets[i], lp.preset == i) and not searching: lp.preset = i as int
+            if clock_chip(ui, theme, fonts, LichessCustom, "Custom", lp.preset == LichessCustom) and not searching: lp.preset = LichessCustom
+        if lp.preset == LichessCustom and not searching
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                var m = lichess_index_of(LichessMinutes[0..LichessMinutes.len], lp.custom_minutes)
+                ui.label("Minutes", note)
+                if ui.dropdown("lichessminutes", ref m, LichessMinuteWords, UiNode(width: UiSize.fixed(80.0))): lp.custom_minutes = LichessMinutes[m]
+                var inc = lichess_index_of(LichessIncrements[0..LichessIncrements.len], lp.custom_increment)
+                ui.label("Increment", note)
+                if ui.dropdown("lichessincrement", ref inc, LichessIncrementWords, UiNode(width: UiSize.fixed(80.0))): lp.custom_increment = LichessIncrements[inc]
+        let (minutes, increment) = lp.clock_chosen()
+        var mode = lp.rated ? 0 : 1
+        var kit = SettingsKit(ui, theme, fonts, 320.0, 0, 0.0)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.label(format(&line, "{lp.speed_word(minutes, increment)}  ·  {minutes}+{increment}"), UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink))
+            ui.spacer()
+            if kit.segments("lichessmode", RatedModes, ref mode) and not searching: lp.rated = mode == 0
+        if searching
+            let now = now_ns()
+            with ui.open(UiNode(name: "lichesssearch", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(ActionTall), gap: 14.0, align: Vec2(0.0, 0.5)))
+                rings(ui, theme, now - lp.searched_ns)
+                with ui.open(UiNode(gap: 3.0, width: UiSize.grow(), clip: true))
+                    ui.label(format(&line, "Finding a {lp.seek_rated ? "rated" : "casual"} {lp.seek_minutes}+{lp.seek_increment} game"), UiTextStyle(face: fonts.strong, size: 14.0, color: theme.ink))
+                    let s = (now - lp.searched_ns) / 1000000000
+                    ui.label(format(&clock, "{s / 60}:{s % 60:02}"), UiTextStyle(face: fonts.mono, size: 13.0, color: theme.muted))
+                if ui.button("Cancel"): lp.cancel_queue()
+            ui.wake_in(0.0)
+        else
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0))
+                if play_button(ui, theme, fonts, format(&line, "Play {lp.rated ? "rated" : "casual"} {minutes}+{increment}")): lp.queue()
+        if lp.problem.len > 0: ui.paragraph(lp.problem.text(), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.loss()))
+        if lp.challenges.len > 0
+            ui.label("CHALLENGES", small, UiNode(padding: Vec4(0.0, 6.0, 0.0, 0.0)))
+            var i = 0
+            while i < lp.challenges.len
+                let c = &lp.challenges[i]
+                var shown = c.limit_s >= 0 ? format(&clock, "{c.limit_s / 60}+{c.increment_s}") : "Correspondence"
+                with ui.open(UiNode(name: "lichesschallenge", key: i, flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                    ui.label(format(&line, "{c.challenger.text()}  ·  {shown}  ·  {c.rated ? "rated" : "casual"}"), UiTextStyle(face: fonts.text, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+                    if ui.button("Decline"): lp.decline(i)
+                    elif ui.button("Accept", true): lp.accept(i)
+                i += 1
+        ui.spacer()
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.label(format(&line, "Signed in as {lp.name.text()}"), note, UiNode(width: UiSize.grow(), clip: true))
+            if not searching and ui.button("Sign out"): lp.sign_out()
+
+fn lichess_index_of(values: []int, v: int) -> int
+    for i in 0..values.len
+        if values[i] == v: return i as int
+    return 0
+
+fn lichess_head(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, lp: *LichessPlay, x: f32, y: f32, w: f32, h: f32)
+    let ui = &app.ui
+    var status: [120]u8
+    var line: [120]u8
+    let g = &lp.game
+    with ui.open(UiNode(name: "lichesshead", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(16.0, 12.0, 16.0, 8.0), gap: 5.0, clip: true))
+        var shown = ""
+        if lp.state == LichessStarting: shown = "Joining the game…"
+        elif lp.state == LichessOver: shown = lp.result_words(&status)
+        elif lp.my_turn(): shown = "Your turn"
+        else: shown = format(&status, "{lp.white ? g.black.name.text() : g.white.name.text()} to move")
+        ui.label(shown, UiTextStyle(face: fonts.strong, size: 14.0, color: theme.ink))
+        var tc: [24]u8
+        let clock = g.initial_ms >= 0 ? format(&tc, "{g.initial_ms / 60000}+{g.increment_ms / 1000}") : "No clock"
+        let speed = g.speed.text()
+        ui.label(format(&line, "{g.rated ? "Rated" : "Casual"} {speed.len > 0 ? speed : "game"}  ·  {clock}  ·  lichess.org/{g.id.text()}"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+        if lp.problem.len > 0: ui.label(lp.problem.text(), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.loss()), UiNode(width: UiSize.grow(), clip: true))
+        let claim = lp.claim_in_s()
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            if lp.opponent_offers_draw()
+                ui.label("Your opponent offers a draw", UiTextStyle(face: fonts.strong, size: 13.0, color: theme.accent), UiNode(width: UiSize.grow()))
+                if ui.button("Decline"): lp.answer_draw(false)
+                elif ui.button("Accept", true): lp.answer_draw(true)
+            elif lp.opponent_asks_takeback()
+                ui.label("Your opponent asks for a takeback", UiTextStyle(face: fonts.strong, size: 13.0, color: theme.accent), UiNode(width: UiSize.grow()))
+                if ui.button("Decline"): lp.answer_takeback(false)
+                elif ui.button("Accept", true): lp.answer_takeback(true)
+            elif claim > 0: ui.label(format(&line, "Your opponent left. You can claim the win in {claim} s."), UiTextStyle(face: fonts.strong, size: 13.0, color: theme.accent))
+            elif claim == 0
+                ui.label("Your opponent left the game", UiTextStyle(face: fonts.strong, size: 13.0, color: theme.accent), UiNode(width: UiSize.grow()))
+                if ui.button("Claim win", true): lp.claim_victory()
+
+fn lichess_chat(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, lp: *LichessPlay, edit: *UiEditText, x: f32, y: f32, w: f32, h: f32)
+    let ui = &app.ui
+    var line: [200]u8
+    with ui.open(UiNode(name: "lichesschat", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(16.0, 10.0, 16.0, 10.0), gap: 4.0, clip: true))
+        ui.label("CHAT", UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8))
+        with ui.open(UiNode(width: UiSize.grow(), height: UiSize.grow(), gap: 3.0, align: Vec2(0.0, 1.0), clip: true))
+            if lp.chat.len == 0: ui.label("Say hello, or keep it to the moves.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+            let first = max(lp.chat.len as int - LichessChatShown, 0)
+            for i in first..lp.chat.len
+                let c = &lp.chat[i]
+                ui.paragraph(format(&line, "{c.who.text()}: {c.text.text()}"), UiTextStyle(face: fonts.text, size: 12.5, color: c.mine ? theme.accent : theme.ink), UiNode(key: i as int))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 6.0, align: Vec2(0.0, 0.5)))
+            ui.text_field("lichesssay", edit, "Say something", UiNode(width: UiSize.grow()))
+            let enter = ui.focus != 0 and app.pointer.pressed(Enter) and edit.text().len > 0
+            if ui.button("Send") or enter
+                lp.send_chat(edit.text())
+                edit.set("")
+
+fn lichess_controls(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, icons: *LineIcons, lp: *LichessPlay, resigning: *bool, x: f32, y: f32, w: f32, h: f32) -> bool
+    let ui = &app.ui
+    var asked = false
+    with ui.open(UiNode(name: "lichesscontrols", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(12.0, 0.0, 12.0, 0.0), flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5), clip: true))
+        if lp.state == LichessOver
+            if lichess_action(ui, theme, fonts, icons, "newgame", IconPlus, "New game", ActionPlain): lp.leave_game()
+            if lichess_action(ui, theme, fonts, icons, "analyze", IconSearch, "Analyze", ActionPrimary): asked = true
+        elif lp.state == LichessLive
+            if lp.can_abort()
+                if lichess_action(ui, theme, fonts, icons, "abort", IconStop, "Abort game", ActionPlain): lp.abort()
+            else
+                if lichess_action(ui, theme, fonts, icons, "resign", IconFlag, "Resign", ActionDanger): *resigning = true
+                if lichess_action(ui, theme, fonts, icons, "draw", IconHalf, lp.draw_sent ? "Draw offered" : "Offer draw", ActionPlain, lp.draw_sent): lp.offer_draw()
+                if lichess_action(ui, theme, fonts, icons, "takeback", IconUndo, lp.takeback_sent ? "Takeback asked" : "Takeback", ActionPlain, lp.takeback_sent): lp.ask_takeback()
+    return asked
+
+fn lichess_action(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, icons: *LineIcons, name: str, icon: LineIcon, word: str, kind: int, waiting: bool = false) -> bool
+    let t = &ui.theme
+    let o = ui.open(UiNode(name: name, flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(LichessActionTall), padding: Vec4(10.0, 0.0, 10.0, 0.0), gap: 7.0, align: Vec2(0.5, 0.5), hit: not waiting, focusable: not waiting, clip: true))
+    let h = ui.interact(o.id)
+    let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 22.0)
+    let press = ui.spring(o.id, 1, h.held ? 1.0 : 0.0, 30.0)
+    let ring = ui.ring_of(o.id)
+    var fill = t.surface.lerp(t.raised, lit).lerp(t.sunken, press)
+    var edge = t.line
+    var ink = theme.ink
+    if kind == ActionPrimary
+        fill = t.accent.lerp(Color.hex(0xFFFFFF), 0.12 * lit).lerp(Color.hex(0x000000), 0.15 * press)
+        edge = t.accent
+        ink = t.accent_ink
+    elif waiting
+        fill = theme.accent.with_alpha(0.12)
+        edge = theme.accent.with_alpha(0.45)
+        ink = theme.accent
+    elif kind == ActionDanger
+        let danger = theme.loss()
+        fill = fill.lerp(danger.with_alpha(1.0), 0.16 * lit)
+        edge = t.line.lerp(danger, 0.6 * lit)
+        ink = theme.ink.lerp(danger, lit)
+    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(t.radius), border: 1.0 + ring, border_color: edge.lerp(t.focus, ring))
+    icons.show(ui, icon, 16.0, ink)
+    ui.label(word, UiTextStyle(face: fonts.strong, size: 12.5, color: ink), UiNode(clip: true))
+    ui.close()
+    return not waiting and h.clicked
+
+fn draw_lichess_resign(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, lp: *LichessPlay, asking: *bool)
+    if not *asking: return
+    if lp.state != LichessLive
+        *asking = false
+        return
+    let ui = &app.ui
+    var show = true
+    with ui.modal("lichessresign", ref show, 360.0)
+        ui.label("Resign this game?", UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+        ui.paragraph("Resigning counts as a loss on Lichess.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.spacer()
+            if ui.button("Keep playing"): show = false
+            if ui.button("Resign", true)
+                lp.resign()
+                show = false
+    *asking = show

@@ -1,0 +1,158 @@
+use src/engines/registry
+
+const RatingsUrl = "https://raw.githubusercontent.com/CodeAdopter/Chess-Engines/main/ccrl.json"
+const RatingsMostBytes: i64 = 4194304
+const RatingsHome = "https://computerchess.org.uk/ccrl/"
+
+struct CcrlRating
+    rating: i64 = -1
+    margin: i64
+    rank: i64
+    games: i64
+    version: PoolSpan
+    url: PoolSpan
+
+struct CcrlEntry
+    id: PoolSpan
+    long: CcrlRating
+    blitz: CcrlRating
+
+struct CcrlTable
+    entries: [..]CcrlEntry
+    pool: [..]u8
+    long_day: PoolSpan
+    blitz_day: PoolSpan
+    long_listed: i64
+    blitz_listed: i64
+
+    fn text(s: PoolSpan) -> str
+        return str(pool[s.at..s.at + s.len])
+
+    fn keep(s: str) -> PoolSpan
+        let at = pool.len as int
+        let n = min(s.len, CatalogTextMost) as int
+        for k in 0..n
+            pool.push(s[k])
+        return PoolSpan(at, n)
+
+    fn read(json_text: str) -> bool
+        clear()
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(json_text)
+        let list = doc.get(root, "engines")
+        if not doc.is(list, JsonArray): return false
+        let lists = doc.get(root, "lists")
+        let long = doc.get(lists, "40/15")
+        let blitz = doc.get(lists, "blitz")
+        long_day = keep(catalog_day(&doc, long, "computed_at"))
+        blitz_day = keep(catalog_day(&doc, blitz, "computed_at"))
+        long_listed = catalog_count(&doc, long, "engines_listed")
+        blitz_listed = catalog_count(&doc, blitz, "engines_listed")
+        var v = doc.first(list)
+        while v >= 0 and entries.len < CatalogMostEngines
+            if doc.is(v, JsonObject): read_entry(&doc, v)
+            v = doc.next(v)
+        if entries.len == 0
+            clear()
+            return false
+        return true
+
+    fn read_entry(doc: *JsonDoc, v: int)
+        let id = catalog_text(doc, v, "id")
+        if id.len == 0: return
+        var e: CcrlEntry
+        e.id = keep(id)
+        let ratings = doc.get(v, "ratings")
+        read_rating(doc, doc.get(ratings, "40/15"), &e.long)
+        read_rating(doc, doc.get(ratings, "blitz"), &e.blitz)
+        if e.long.rating >= 0 or e.blitz.rating >= 0: entries.push(e)
+
+    fn read_rating(doc: *JsonDoc, v: int, r: *CcrlRating)
+        r.rating = -1
+        if not doc.is(v, JsonObject): return
+        let rating = catalog_count(doc, v, "rating")
+        if rating <= 0 or rating > 5000: return
+        r.rating = rating
+        r.margin = catalog_count(doc, v, "margin")
+        r.rank = catalog_count(doc, v, "rank")
+        r.games = catalog_count(doc, v, "games")
+        r.version = keep(catalog_text(doc, v, "version"))
+        r.url = keep(web_address(catalog_text(doc, v, "url")))
+
+    fn find(id: str) -> int
+        for i in 0..entries.len
+            if text(entries[i].id) == id: return i as int
+        return -1
+
+    fn clear()
+        entries.clear()
+        pool.clear()
+        long_day = PoolSpan(0, 0)
+        blitz_day = PoolSpan(0, 0)
+        long_listed = -1
+        blitz_listed = -1
+
+    fn release()
+        entries.free()
+        pool.free()
+
+struct CcrlRatings
+    table: CcrlTable
+    incoming: CcrlTable
+    version: int
+    fetch: HttpGet
+    fetching: bool
+    fetched_ns: i64
+    loaded: bool
+    source: [..]u8
+    data: *DataFolder
+
+    fn load(folder: *DataFolder)
+        data = folder
+        if loaded: return
+        loaded = true
+        var buf: [600]u8
+        let path = data.path("registry\\ccrl.json", &buf)
+        let bytes = read_file(path.ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len > 0 and table.read(str(bytes))
+            fetched_ns = modified_time(path.ptr as cstr)
+            version += 1
+
+    fn due() -> bool
+        return table.entries.len == 0 or wall_ns() - fetched_ns > CatalogDayNs
+
+    fn refresh()
+        if fetching: return
+        if source.len == 0: set_source(RatingsUrl)
+        fetch.most = RatingsMostBytes
+        fetching = fetch.start(str(source[0..source.len]), RegistryAgent, "Accept: application/json\n")
+
+    fn set_source(url: str)
+        source.clear()
+        for k in 0..url.len
+            source.push(url[k])
+
+    fn update() -> bool
+        if not fetching or not fetch.finished(): return false
+        fetching = false
+        if not fetch.done(): return false
+        let body = fetch.body_text()
+        if not incoming.read(body): return false
+        let kept = table
+        table = incoming
+        incoming = kept
+        incoming.clear()
+        version += 1
+        fetched_ns = wall_ns()
+        var buf: [600]u8
+        data.make_folder("registry")
+        save_whole(data.path("registry\\ccrl.json", &buf), body as []u8)
+        return true
+
+    fn release()
+        fetch.release()
+        table.release()
+        incoming.release()
+        source.free()

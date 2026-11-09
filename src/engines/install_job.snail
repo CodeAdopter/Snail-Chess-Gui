@@ -1,0 +1,342 @@
+use engine/desktop/zip_archive
+use src/engines/releases
+use src/engines/engine_library
+
+const InstallMostBytes: i64 = 1073741824
+const InstallUnpackMost: i64 = 2147483648
+const InstallProgramsMost = 64
+const InstallTarNs: i64 = 300000000000
+const InstallHashChunk = 1048576
+
+enum InstallStep: u8
+    InstallIdle
+    InstallDownloading
+    InstallUnpacking
+    InstallUnpackingTar
+    InstallReady
+    InstallFailed
+    InstallCancelled
+
+const WorkIdle = 0
+const WorkRunning = 1
+const WorkDone = 2
+const WorkFailed = 3
+const WorkWantsTar = 4
+
+struct InstallProgram
+    path: PoolSpan
+    build: AssetBuild
+    score: int
+    sha256: [64]u8
+
+struct InstallJob
+    step: InstallStep
+    folder_id: int
+    asset: [..]u8
+    url: [..]u8
+    digest: [..]u8
+    tag: [..]u8
+    size: i64
+    asset_build: AssetBuild
+    get: HttpGet
+    zip: ZipArchive
+    tar: ChildProcess
+    tar_lines: ChildLines
+    tar_output: [..]u8
+    tar_started_ns: i64
+    work: int
+    thread: u64
+    unpack_zip: bool
+    programs: [..]InstallProgram
+    pool: [..]u8
+    folder: [600]u8
+    folder_len: int
+    failure: [400]u8
+    failure_len: int
+    cpu: *CpuFeatures
+    data: *DataFolder
+
+    fn start(folder: *DataFolder, id: int, set: *ReleaseSet, r: int, a: int, computer: *CpuFeatures) -> bool
+        data = folder
+        cpu = computer
+        folder_id = id
+        let rel = &set.releases[r]
+        let e = &set.assets[a]
+        hold_text(&asset, set.text(e.name))
+        hold_text(&url, set.text(e.url))
+        hold_text(&digest, set.text(e.digest))
+        hold_text(&tag, set.text(rel.tag))
+        size = e.size
+        asset_build = e.build
+        programs.clear()
+        pool.clear()
+        failure_len = 0
+        tar_output.clear()
+        var inside: [64]u8
+        let place = format(&inside, "engines\\{id}")
+        remove_data_folder(data, place)
+        var buf: [600]u8
+        let whole = data.path(place, &buf)
+        folder_len = whole.len as int
+        for k in 0..folder_len
+            self.folder[k] = whole[k]
+        if not data.make_folder(place) or not data.make_folder(format(&inside, "engines\\{id}\\files")): return fail("Could not create the installation folder.")
+        var file: [700]u8
+        get.most = InstallMostBytes
+        get.hashing = true
+        if not get.start(str(url[0..url.len]), RegistryAgent, "", download_path(&file)): return fail("Could not start the download.")
+        step = InstallDownloading
+        return true
+
+    fn update() -> bool
+        match step
+            InstallDownloading
+                if not get.finished(): return false
+                return downloaded()
+            InstallUnpackingTar
+                if tar.waiting()
+                    tar.take(&tar_lines)
+                    for i in 0..tar_lines.lines.len
+                        keep_output(tar_lines.line(i as int))
+                if not tar.has_ended()
+                    if now_ns() - tar_started_ns > InstallTarNs
+                        tar.close(0)
+                        return fail("Archive extraction timed out after 5 minutes.")
+                    return false
+                tar.close(1000)
+                if tar.exit_code() != 0
+                    var line: [400]u8
+                    return fail(format(&line, "Archive extraction failed (tar.exe exit code {tar.exit_code()}): {str(tar_output[0..tar_output.len])}"))
+                start_work(false)
+                return true
+            InstallUnpacking
+                let w = atomic_load(&work)
+                if w == WorkRunning: return false
+                join(thread)
+                thread = 0
+                if w == WorkWantsTar: return start_tar()
+                if w == WorkFailed
+                    clean()
+                    step = InstallFailed
+                    return true
+                if programs.len == 0: return fail("No executable was found in the download.")
+                step = InstallReady
+                return true
+            InstallIdle, InstallReady, InstallFailed, InstallCancelled: return false
+
+    fn downloaded() -> bool
+        if get.state == HttpCancelled
+            clean()
+            step = InstallCancelled
+            return true
+        var line: [400]u8
+        if not get.done(): return fail(get.error_text())
+        if size >= 0 and get.received != size: return fail(format(&line, "Download size mismatch: received {get.received} bytes; expected {size}."))
+        if digest.len == 64
+            var hex: [64]u8
+            if sha256_hex(&get.digest, &hex) != str(digest[0..digest.len]): return fail("The download failed SHA-256 verification and was discarded.")
+        if ends_folded(str(asset[0..asset.len]), ".exe")
+            var from: [700]u8
+            var to: [700]u8
+            if not SDL_RenamePath(download_path(&from).ptr as cstr, format(&to, "{str(self.folder[0..folder_len])}\\files\\{program_name()}").ptr as cstr): return fail("Could not move the executable to the installation folder.")
+            start_work(false)
+        elif ends_folded(str(asset[0..asset.len]), ".zip"): start_work(true)
+        else: return start_tar()
+        return true
+
+    fn start_work(unzip: bool)
+        unpack_zip = unzip
+        atomic_store(&work, WorkRunning)
+        step = InstallUnpacking
+        thread = spawn(install_work, self)
+
+    fn start_tar() -> bool
+        var command: [1600]u8
+        let line = format(&command, "\"{windows_folder()}\\System32\\tar.exe\" -xf download{download_tail()} -C files")
+        if not tar.start(line, str(self.folder[0..folder_len])): return fail("Could not start Windows tar.exe to extract the archive.")
+        tar_started_ns = now_ns()
+        step = InstallUnpackingTar
+        return true
+
+    fn program_name() -> str
+        let name = str(asset[0..asset.len])
+        var safe: [..]u8
+        defer safe.free()
+        if zip_safe_path(name, &safe) and safe.len == name.len and find_folded(name, "\\") < 0: return name
+        return "engine.exe"
+
+    fn download_path(buf: *[700]u8) -> str
+        return format(buf, "{str(self.folder[0..folder_len])}\\download{download_tail()}")
+
+    fn download_tail() -> str
+        let name = str(asset[0..asset.len])
+        let tails = [".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tgz", ".tar", ".zip", ".7z", ".rar", ".exe"]
+        for t in tails
+            if ends_folded(name, t): return t
+        return ""
+
+    fn program_path(i: int) -> str
+        let s = programs[i].path
+        return str(pool[s.at..s.at + s.len])
+
+    fn add_to(library: *EngineLibrary, id: int, i: int, engine: *UciEngine, c: *Catalog, e: *RegistryEngine, needs_setup: bool) -> *EngineEntry
+        let entry = library.add(FromRegistry, id)
+        entry.copied = true
+        entry.path = entry.keep(program_path(i))
+        entry.learn(engine)
+        let o = &entry.origin
+        o.clear()
+        o.registry_id = o.keep(c.text(e.id))
+        o.repository = o.keep(c.text(e.repository))
+        o.codeberg = e.codeberg
+        o.tag = o.keep(str(tag[0..tag.len]))
+        o.asset = o.keep(str(asset[0..asset.len]))
+        o.sha256 = o.keep(str(programs[i].sha256[0..64]))
+        o.documentation = o.keep(c.text(e.documentation_url.len > 0 ? e.documentation_url : e.repository_url))
+        o.needs_setup = needs_setup
+        library.version += 1
+        library.save()
+        return entry
+
+    fn keep_output(line: str)
+        if tar_output.len + line.len > 300: return
+        for k in 0..line.len
+            tar_output.push(line[k])
+        tar_output.push(' ')
+
+    fn cancel()
+        match step
+            InstallDownloading: get.cancel()
+            InstallUnpackingTar
+                tar.close(0)
+                clean()
+                step = InstallCancelled
+            InstallIdle, InstallUnpacking, InstallReady, InstallFailed, InstallCancelled: return
+
+    fn stop()
+        match step
+            InstallDownloading
+                get.cancel()
+                while not get.finished()
+                    sleep_ms(2)
+            InstallUnpacking
+                join(thread)
+                thread = 0
+            InstallUnpackingTar: tar.close(0)
+            InstallIdle, InstallReady, InstallFailed, InstallCancelled: return
+        clean()
+        step = InstallCancelled
+
+    fn clean()
+        var inside: [64]u8
+        remove_data_folder(data, format(&inside, "engines\\{folder_id}"))
+
+    fn fail(why: str) -> bool
+        note(why)
+        clean()
+        step = InstallFailed
+        return true
+
+    fn note(why: str)
+        failure_len = min(why.len, 400) as int
+        for k in 0..failure_len
+            failure[k] = why[k]
+
+    fn failure_text() -> str
+        return str(failure[0..failure_len])
+
+    fn release()
+        get.release()
+        if thread != 0
+            join(thread)
+            thread = 0
+        tar.close(0)
+        tar.free_all()
+        tar_lines.free_all()
+        zip.release()
+        asset.free()
+        url.free()
+        digest.free()
+        tag.free()
+        tar_output.free()
+        programs.free()
+        pool.free()
+
+fn install_work(j: *InstallJob)
+    let base = str(j.folder[0..j.folder_len])
+    var files: [700]u8
+    let into = format(&files, "{base}\\files")
+    var file: [700]u8
+    let download = j.download_path(&file)
+    if j.unpack_zip
+        let ok = j.zip.open(download) and j.zip.unpack_all(into, InstallUnpackMost)
+        let other = j.zip.other
+        if not ok and not other: j.note(j.zip.error_text())
+        j.zip.release()
+        if not ok
+            atomic_store(&j.work, other ? WorkWantsTar : WorkFailed)
+            http_wake()
+            return
+    SDL_RemovePath(download.ptr as cstr)
+    var found: [..]u8
+    defer found.free()
+    files_under(into, ".exe", &found, InstallProgramsMost)
+    var inside: [64]u8
+    let place = format(&inside, "engines\\{j.folder_id}\\files")
+    let chunk = alloc[u8](InstallHashChunk)
+    defer free(chunk)
+    var start = 0
+    for k in 0..found.len as int
+        if found[k] != '\n': continue
+        let relative = str(found[start..k])
+        start = k + 1
+        var p: InstallProgram
+        let at = j.pool.len as int
+        for c in 0..place.len
+            j.pool.push(place[c])
+        j.pool.push('\\')
+        for c in 0..relative.len
+            j.pool.push(relative[c])
+        p.path = PoolSpan(at, j.pool.len as int - at)
+        p.build = asset_build(file_name_of(relative))
+        if p.build == BuildUnnamed: p.build = j.asset_build
+        p.score = build_score(p.build, j.cpu)
+        var whole: [700]u8
+        if not hash_file(format(&whole, "{into}\\{relative}"), chunk[0..InstallHashChunk], &p.sha256)
+            j.note("Could not read an executable in the archive.")
+            atomic_store(&j.work, WorkFailed)
+            http_wake()
+            return
+        j.programs.push(p)
+    for i in 1..j.programs.len as int
+        var k = i
+        while k > 0 and j.programs[k].score > j.programs[k - 1].score
+            let held = j.programs[k]
+            j.programs[k] = j.programs[k - 1]
+            j.programs[k - 1] = held
+            k -= 1
+    atomic_store(&j.work, WorkDone)
+    http_wake()
+
+fn windows_folder() -> str
+    let names = ["SystemRoot", "SYSTEMROOT", "windir", "WINDIR"]
+    for n in names
+        let v = SDL_getenv(n.ptr as cstr)
+        if v: return str(v)
+    return "C:\\Windows"
+
+fn hash_file(path: str, chunk: []u8, hex: *[64]u8) -> bool
+    var buf: [700]u8
+    let io = SDL_IOFromFile(format(&buf, "{path}").ptr as cstr, "rb")
+    if not io: return false
+    var s: Sha256
+    s.begin()
+    loop
+        let n = SDL_ReadIO(io, chunk.ptr, chunk.len as u64)
+        if n == 0: break
+        s.add(chunk[0..n as i64])
+    SDL_CloseIO(io)
+    var d: [32]u8
+    s.finish(&d)
+    sha256_hex(&d, hex)
+    return true

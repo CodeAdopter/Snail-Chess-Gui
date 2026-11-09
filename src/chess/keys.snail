@@ -1,0 +1,23 @@
+use chess/primitives
+use chess/polyglot_keys
+
+var key_white_to_move: u64
+var key_piece_square: [16 * 64]u64
+var key_castling: [16]u64
+var key_en_passant: [65]u64
+
+@inline
+fn piece_key(piece: Piece, sq: Square) -> u64
+    return key_piece_square[piece << 6 | sq]
+
+init
+    for piece in 2..PieceLimit
+        let row = ((piece - 2) ^ 1) * 64
+        for sq in 0..64
+            key_piece_square[piece << 6 | sq] = PolyglotRandom[row + sq]
+    for rights in 0..16
+        for r in 0..4
+            if rights & 1 << r: key_castling[rights] ^= PolyglotRandom[768 + r]
+    for sq in 0..64
+        key_en_passant[sq] = PolyglotRandom[772 + (sq & 7)]
+    key_white_to_move = PolyglotRandom[780]

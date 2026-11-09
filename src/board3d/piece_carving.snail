@@ -1,0 +1,184 @@
+use engine/sdf/simplify
+use src/board3d/piece_shapes
+use src/board3d/knight_outline
+
+fn add_field(m: *Mesh, f: *SdfField, cell: f32, target: int)
+    f.prepare(cell, cell * 16.0)
+    var out: SdfMesh
+    mesh_field(f, &out, false)
+    if out.triangles() > target: simplify(&out, target)
+    let first = m.vertex_count as u32
+    let h = cell * 0.25
+    for i in 0..out.positions.len
+        var p = out.positions[i]
+        for pass in 0..2
+            let n = field_normal(f, p, h)
+            p = p - n * f.distance(p)
+        m.vertex(p, field_normal(f, p, h), Vec2(0.0, 0.0))
+    var i = 0
+    while i < out.indices.len
+        m.triangle(first + out.indices[i], first + out.indices[i + 1], first + out.indices[i + 2])
+        i += 3
+    out.free_all()
+
+fn field_normal(f: *SdfField, p: Vec3, h: f32) -> Vec3
+    let x = f.distance(p + Vec3(h, 0.0, 0.0)) - f.distance(p - Vec3(h, 0.0, 0.0))
+    let y = f.distance(p + Vec3(0.0, h, 0.0)) - f.distance(p - Vec3(0.0, h, 0.0))
+    let z = f.distance(p + Vec3(0.0, 0.0, h)) - f.distance(p - Vec3(0.0, 0.0, h))
+    return Vec3(x, y, z).normalized
+
+fn surface_depth(f: *SdfField, x: f32, y: f32) -> f32
+    var inside = 0.0
+    var outside = 0.4
+    for i in 0..30
+        let z = (inside + outside) * 0.5
+        if f.distance(Vec3(x, y, z)) < 0.0: inside = z
+        else: outside = z
+    return inside
+
+const KnightScale: f32 = 0.892
+
+fn add_knight(m: *Mesh, segments: int)
+    var o: PieceOutline
+    knight_outline(&o)
+    o.add_to(m, segments)
+    let first = m.vertex_count
+    let ink = BodyInk.of()
+    let seat = Vec3(0.0, KnightSeat, 0.0)
+    var f: SdfField
+    f.add(SdfShape.puffed(seat, KnightPuff[0..KnightPuff.len], KnightPuffWide, KnightPuffTall, KnightPuffCorner, KnightPuffCell, 0.122, 0.14, 0, ink))
+    knight_chest(&f, ink)
+    f.add(SdfShape.box(Vec3(0.0, KnightSeat - 0.2, 0.0), Vec3(0.6, 0.2, 0.6), 0.0, 0, ink, blend: 0.0).carving())
+    knight_ears(&f, ink)
+    knight_mouth(&f, ink)
+    knight_cheeks(&f, ink)
+    let eye = Vec2(KnightEye.x, KnightEye.y + KnightSeat)
+    let face = surface_depth(&f, eye.x, eye.y)
+    for side in [-1.0, 1.0]
+        f.add(SdfShape.ellipsoid(Vec3(eye.x - 0.004, eye.y + 0.026, side * (face - 0.006)), Vec3(0.036, 0.012, 0.014), 0, ink, blend: 0.01))
+        f.add(SdfShape.ellipsoid(Vec3(eye.x, eye.y, side * face), Vec3(0.026, 0.022, 0.016), 0, ink, blend: 0.008).carving())
+        f.add(SdfShape.ellipsoid(Vec3(eye.x + 0.003, eye.y, side * (face - 0.012)), Vec3.splat(0.016), 0, ink, blend: 0.006))
+    knight_mane(&f, ink)
+    add_field(m, &f, 0.003, 90000)
+    f.free_all()
+    for i in first..m.vertex_count
+        let v = &m.vertices[i]
+        v.position = seat + (v.position - seat) * KnightScale
+
+fn knight_ears(f: *SdfField, ink: BodyInk)
+    let back = Vec2(-0.1, 0.735 + KnightSeat)
+    let front = Vec2(0.05, 0.72 + KnightSeat)
+    let along = (front - back).normalized
+    let up = Vec2(-along.y, along.x)
+    let middle = (back + front) * 0.5 + up * 0.06
+    let poll = Quat.axis_angle(Vec3(0.0, 0.0, 1.0), atan2(along.y, along.x))
+    f.add(SdfShape.box(Vec3(middle.x, middle.y, 0.0), Vec3(0.077, 0.06, 0.3), 0.01, 0, ink, turn: poll, blend: 0.02).carving())
+    for side in [-1.0, 1.0]
+        let foot = Vec3(-0.09, 0.72 + KnightSeat, side * 0.036)
+        let tip = Vec3(-0.095, 0.805 + KnightSeat, side * 0.05)
+        f.add(SdfShape.limb(foot, tip, 0.03, 0.011, 0, ink, front: Vec3(1.0, 0.0, 0.0), blend: 0.018, squash_z: 0.8))
+        let hollow = foot + (tip - foot) * 0.5 + Vec3(0.017, 0.0, 0.0)
+        f.add(SdfShape.ellipsoid(hollow, Vec3(0.008, 0.026, 0.011), 0, ink, blend: 0.004).carving())
+
+fn knight_chest(f: *SdfField, ink: BodyInk)
+    f.add(SdfShape.ellipsoid(Vec3(0.02, 0.1 + KnightSeat, 0.0), Vec3(0.19, 0.18, 0.205), 0, ink, blend: 0.07))
+    f.add(SdfShape.limb(Vec3(-0.02, 0.12 + KnightSeat, 0.0), Vec3(-0.11, 0.48 + KnightSeat, 0.0), 0.15, 0.1, 0, ink, blend: 0.05, squash_x: 0.85, squash_z: 1.25))
+
+fn knight_cheeks(f: *SdfField, ink: BodyInk)
+    let cheek = Vec2(0.03, 0.49 + KnightSeat)
+    let jaw = surface_depth(f, cheek.x, cheek.y)
+    let nose = Vec2(0.305, 0.535 + KnightSeat)
+    let muzzle = surface_depth(f, nose.x, nose.y)
+    for side in [-1.0, 1.0]
+        f.add(SdfShape.ellipsoid(Vec3(cheek.x, cheek.y, side * (jaw - 0.035)), Vec3(0.08, 0.075, 0.052), 0, ink, blend: 0.03))
+        f.add(SdfShape.ellipsoid(Vec3(nose.x, nose.y, side * (muzzle - 0.008)), Vec3(0.026, 0.02, 0.018), 0, ink, blend: 0.012))
+        f.add(SdfShape.ellipsoid(Vec3(nose.x + 0.006, nose.y, side * (muzzle + 0.004)), Vec3(0.014, 0.01, 0.012), 0, ink, blend: 0.004).carving())
+
+fn knight_back(y: f32) -> f32
+    let j = min(max(((y - KnightPuffCorner.y) / KnightPuffCell + 0.5) as int, 0), KnightPuffTall - 1)
+    for i in 0..KnightPuffWide
+        if KnightPuff[j * KnightPuffWide + i] > 0.0: return KnightPuffCorner.x + i as f32 * KnightPuffCell
+    return 0.0
+
+const ManeGrooves = 22
+
+fn knight_mane(f: *SdfField, ink: BodyInk)
+    var last = Vec3(0.0, 0.0, 0.0)
+    for k in 0..ManeGrooves + 1
+        let y = 0.69 - k as f32 * 0.023
+        let at = Vec3(knight_back(y) + 0.026, y + KnightSeat, 0.0)
+        if k > 0: f.add(SdfShape.limb(last, at, 0.03, 0.03, 0, ink, blend: 0.016))
+        last = at
+    for k in 0..ManeGrooves
+        let y = 0.68 - k as f32 * 0.023 + KnightSeat
+        let back = knight_back(y - KnightSeat)
+        let sway = sin(k as f32 * 1.7) * 0.006
+        let a = Vec2(back + 0.012, y + 0.012)
+        let b = Vec2(back + 0.095 + sway, y - 0.03 - sway)
+        let za = surface_depth(f, a.x, a.y)
+        let zb = surface_depth(f, b.x, b.y)
+        for side in [-1.0, 1.0]
+            f.add(SdfShape.limb(Vec3(a.x, a.y, side * (za + 0.007)), Vec3(b.x, b.y, side * (zb + 0.008)), 0.0115, 0.0085, 0, ink, blend: 0.005).carving())
+
+fn knight_mouth(f: *SdfField, ink: BodyInk)
+    let deep = surface_depth(f, 0.29, 0.5 + KnightSeat) * 0.9
+    f.add(SdfShape.box(Vec3(0.279, 0.466 + KnightSeat, 0.0), Vec3(0.039, 0.0128, deep), 0.011, 0, ink, blend: 0.01))
+    let corner = Vec3(0.266, 0.478 + KnightSeat, 0.0)
+    let lips = Vec3(0.345, 0.472 + KnightSeat, 0.0)
+    f.add(SdfShape.limb(corner, lips, 0.0045, 0.0045, 0, ink, blend: 0.003, squash_z: 30.0).carving())
+
+fn add_bishop(m: *Mesh, segments: int)
+    var o: PieceOutline
+    bishop_outline(&o)
+    o.add_to(m, segments)
+    var mitre: PieceOutline
+    bishop_mitre(&mitre)
+    let ink = BodyInk.of()
+    var f: SdfField
+    f.add(SdfShape.turned(Vec3(0.0, 0.0, 0.0), mitre.outline(), 0, ink))
+    let slant = Quat.axis_angle(Vec3(0.0, 0.0, 1.0), -40.0 * Pi / 180.0)
+    f.add(SdfShape.box(Vec3(-0.03, 0.93 + BishopLift, 0.085), Vec3(0.16, 0.011, 0.115), 0.008, 0, ink, turn: slant, blend: 0.004).carving())
+    add_field(m, &f, 0.003, 30000)
+    f.free_all()
+
+const QueenPoints = 8
+
+fn add_queen(m: *Mesh, segments: int)
+    var o: PieceOutline
+    queen_outline(&o)
+    o.add_to(m, segments)
+    var crown: PieceOutline
+    queen_crown(&crown, o.points[o.count - 1].y - QueenNeck.y)
+    let ink = BodyInk.of()
+    var f: SdfField
+    f.add(SdfShape.turned(Vec3(0.0, 0.0, 0.0), crown.outline(), 0, ink))
+    let tip = crown_tip(&crown, QueenLip.x - 0.03)
+    let half = Pi * (QueenLip.x - 0.005) / QueenPoints as f32
+    let tall = 0.05
+    var notch = [Vec2(0.0, -tall), Vec2(half * 3.0, tall * 2.0), Vec2(-half * 3.0, tall * 2.0)]
+    let ring = QueenLip.x - 0.02
+    for k in 0..QueenPoints
+        let a = Tau * (k as f32 + 0.5) / QueenPoints as f32
+        let at = Vec3(sin(a) * ring, tip, cos(a) * ring)
+        let turn = Quat.axis_angle(Vec3.up(), a)
+        f.add(SdfShape.outline(at, notch[0..3], 0.07, 0.012, 0, ink, turn: turn, blend: 0.008).carving())
+    add_field(m, &f, 0.0025, 40000)
+    f.free_all()
+
+fn crown_tip(o: *PieceOutline, from: f32) -> f32
+    var top = 0.0
+    for i in 0..o.count
+        if o.points[i].x > from: top = max(top, o.points[i].y)
+    return top
+
+fn add_king(m: *Mesh, segments: int)
+    var o: PieceOutline
+    king_outline(&o)
+    o.add_to(m, segments)
+    let ink = BodyInk.of()
+    var f: SdfField
+    let rise = o.lift
+    f.add(SdfShape.box(Vec3(0.0, 1.455 + rise, 0.0), Vec3(0.042, 0.1, 0.025), 0.012, 0, ink))
+    f.add(SdfShape.box(Vec3(0.0, 1.44 + rise, 0.0), Vec3(0.115, 0.034, 0.025), 0.012, 0, ink, blend: 0.01))
+    add_field(m, &f, 0.003, 12000)
+    f.free_all()

@@ -1,0 +1,301 @@
+use src/chess/make
+use src/chess/moves
+use src/board3d/board_shapes
+
+const MaxMen = 48
+
+const AsideRow: f32 = 5.2
+const AsideStep: f32 = 0.6
+const AsideSpots = 16
+const AsideWide: f32 = 4.9
+
+const FallSeconds: f32 = 0.2
+const FallSecondsMost: f32 = 0.45
+const FallHop: f32 = 0.12
+const FallPull: f32 = 40.0
+
+const ConjureHigh: f32 = 2.5
+const ConjureSeconds: f32 = 0.55
+
+struct FreeLanding
+    square: Square = Square.none
+    spot: Vec2
+    low: bool
+    ok: bool
+    thrown: bool
+    time: f32
+
+struct FreeMan
+    piece: Piece
+    square: Square = Square.none
+    aside: Vec2
+    laid: bool
+    low: bool
+    shown: Vec2
+    seed: f32
+    drawn: Vec3
+    fall: f32 = 1.0
+    fall_time: f32
+    fall_from: Vec3
+    thrown: bool
+    magic: bool
+
+struct FreeBoard
+    men: [MaxMen]FreeMan
+    count: int
+    synced: u64
+    held: int = -1
+    picked: int = -1
+    moving: bool
+    landed: int
+    made: u64
+
+    fn follow(board: *Board, still: bool)
+        let first = count == 0
+        if first: lay_sets()
+        if board.key == synced and not first: return
+        set_out(board)
+        if first or still
+            for i in 0..count: men[i].shown = target(i)
+
+    fn unsync()
+        synced = 0
+        held = -1
+        picked = -1
+
+    fn lay_sets()
+        count = 0
+        for side in [White, Black]
+            for kind in [King, Queen, Rook, Rook, Bishop, Bishop, Knight, Knight, Pawn, Pawn, Pawn, Pawn, Pawn, Pawn, Pawn, Pawn, Queen]
+                let i = add_man(Piece.of(side, kind))
+                men[i].shown = aside_spot(side, 0)
+
+    fn add_man(piece: Piece) -> int
+        var nth = 0
+        for i in 0..count
+            if men[i].piece == piece: nth += 1
+        men[count] = FreeMan(piece: piece, seed: man_seed(piece, nth))
+        count += 1
+        return count - 1
+
+    fn set_out(board: *Board)
+        var used: [MaxMen]bool
+        var filled: [64]bool
+        for i in 0..count
+            let m = &men[i]
+            if m.square != Square.none and board.squares[m.square] == m.piece and not filled[m.square as int]
+                used[i] = true
+                filled[m.square as int] = true
+        for sq in 0..64
+            let s = sq as Square
+            let p = board.squares[s]
+            if p == NoPiece or filled[sq]: continue
+            let at = square_spot(s)
+            var best = -1
+            var near: f32 = 1.0e9
+            for i in 0..count
+                if used[i] or men[i].piece != p: continue
+                let d = (men[i].shown - at).length
+                if d < near
+                    near = d
+                    best = i
+            if best < 0 and count < MaxMen
+                best = add_man(p)
+                men[best].shown = at
+            if best < 0: continue
+            used[best] = true
+            men[best].square = s
+            men[best].low = false
+        for i in 0..count
+            if used[i] or men[i].square == Square.none and men[i].laid: continue
+            men[i].square = Square.none
+            men[i].aside = free_spot(i)
+            men[i].laid = true
+            men[i].low = false
+        synced = board.key
+        held = -1
+        picked = -1
+        moving = true
+
+    fn free_spot(i: int) -> Vec2
+        let side = men[i].piece.side()
+        if men[i].piece.kind() == Queen and spot_free(aside_spot(side, 0), i): return aside_spot(side, 0)
+        for j in 1..AsideSpots
+            let at = aside_spot(side.other(), j)
+            if spot_free(at, i): return at
+        return aside_spot(side.other(), AsideSpots - 1)
+
+    fn spot_free(at: Vec2, skip: int) -> bool
+        for i in 0..count
+            if i != skip and men[i].square == Square.none and men[i].laid and not men[i].low and (men[i].aside - at).length < 0.45: return false
+        return true
+
+    fn target(i: int) -> Vec2
+        if men[i].square != Square.none: return square_spot(men[i].square)
+        return men[i].aside
+
+    fn rise(i: int) -> f32
+        return min((target(i) - men[i].shown).length * 0.2, 0.4)
+
+    fn fall_height(i: int, floor: f32) -> f32
+        let m = &men[i]
+        let f = m.fall
+        if m.magic: return floor + ConjureHigh * (1.0 - f * f)
+        if m.thrown: return m.fall_from.y + (floor - m.fall_from.y) * f + FallPull * m.fall_time * m.fall_time * 0.5 * f * (1.0 - f)
+        let hop = min((target(i) - Vec2(m.fall_from.x, m.fall_from.z)).length * FallHop, 0.45)
+        return floor + (m.fall_from.y - floor) * (1.0 - f * f) + hop * sin(f * Pi)
+
+    fn step(dt: f32, still: bool) -> bool
+        supply()
+        let k = still ? 1.0 : 1.0 - exp(-dt * 12.0)
+        var any = false
+        for i in 0..count
+            if i == held: continue
+            let m = &men[i]
+            if m.fall < 1.0
+                m.fall = still ? 1.0 : min(m.fall + dt / m.fall_time, 1.0)
+                let from = Vec2(m.fall_from.x, m.fall_from.z)
+                let e = m.thrown ? m.fall : 1.0 - (1.0 - m.fall) * (1.0 - m.fall) * (1.0 - m.fall)
+                m.shown = from + (target(i) - from) * e
+                if m.fall >= 1.0
+                    landed += 1
+                    m.thrown = false
+                    m.magic = false
+                any = true
+                continue
+            let gap = target(i) - men[i].shown
+            if gap.length < 0.002
+                men[i].shown = target(i)
+                continue
+            men[i].shown = men[i].shown + gap * k
+            any = true
+        moving = any
+        return any
+
+    fn on(sq: Square) -> int
+        for i in 0..count
+            if men[i].square == sq: return i
+        return -1
+
+    fn hold(i: int)
+        held = i
+        picked = -1
+        men[i].fall = 1.0
+        men[i].thrown = false
+        men[i].magic = false
+
+    fn put(at: FreeLanding) -> bool
+        let i = held
+        held = -1
+        picked = -1
+        if i < 0: return false
+        let down = at.ok and stand(i, at)
+        let m = &men[i]
+        m.fall_from = m.drawn
+        m.shown = Vec2(m.drawn.x, m.drawn.z)
+        m.thrown = down and at.thrown
+        m.fall_time = m.thrown ? max(at.time, 0.05) : min(FallSeconds + (target(i) - m.shown).length * 0.05, FallSecondsMost)
+        m.fall = 0.0
+        moving = true
+        return down
+
+    fn stand(i: int, at: FreeLanding) -> bool
+        let m = &men[i]
+        if at.square != Square.none
+            let there = on(at.square)
+            if there >= 0 and there != i: return false
+            m.square = at.square
+            m.low = false
+            return true
+        if not at.low and not spot_free(at.spot, i): return false
+        m.square = Square.none
+        m.aside = at.spot
+        m.laid = true
+        m.low = at.low
+        return true
+
+    fn supply()
+        for side in [White, Black]
+            let pawn = Piece.of(side, Pawn)
+            let rank = side == White ? 6 : 1
+            var near = false
+            for i in 0..count
+                if men[i].piece == pawn and men[i].square != Square.none and men[i].square.rank == rank: near = true
+            if not near: continue
+            for kind in [Queen, Rook, Bishop, Knight]
+                let p = Piece.of(side, kind)
+                var have = false
+                var down = -1
+                for i in 0..count
+                    let m = &men[i]
+                    if m.piece != p or m.square != Square.none: continue
+                    if i == held or not m.low or m.fall < 1.0: have = true
+                    elif down < 0: down = i
+                if have: continue
+                if down < 0 and count < MaxMen: down = add_man(p)
+                if down >= 0: conjure(down, side)
+
+    fn conjure(i: int, side: Side)
+        var spot = aside_spot(side, AsideSpots - 1)
+        for j in 0..AsideSpots
+            if spot_free(aside_spot(side, j), i)
+                spot = aside_spot(side, j)
+                break
+        let m = &men[i]
+        m.square = Square.none
+        m.aside = spot
+        m.laid = true
+        m.low = false
+        m.shown = spot
+        m.fall_from = Vec3(spot.x, 0.0, spot.y)
+        m.fall_time = ConjureSeconds
+        m.fall = 0.0
+        m.thrown = false
+        m.magic = true
+        moving = true
+
+    fn standing(into: *[64]Piece)
+        for sq in 0..64: into[sq] = NoPiece
+        for i in 0..count
+            if men[i].square != Square.none: into[men[i].square as int] = men[i].piece
+
+    fn same(board: *Board) -> bool
+        var stands: [64]Piece
+        standing(&stands)
+        for sq in 0..64
+            if stands[sq] != board.squares[sq as Square]: return false
+        return true
+
+    fn match(board: *Board) -> Move
+        var stands: [64]Piece
+        standing(&stands)
+        var list: MoveList
+        list.fill(board)
+        for k in 0..list.count
+            var b = *board
+            b.play(list.items[k])
+            var all = true
+            for sq in 0..64
+                if b.squares[sq as Square] != stands[sq]
+                    all = false
+                    break
+            if all
+                made = b.key
+                return list.items[k]
+        return NoMove
+
+    fn key() -> u64
+        var h: u64 = count as u64 | ((held + 1) as u64) << 8 | ((picked + 1) as u64) << 16
+        for i in 0..count
+            let m = &men[i]
+            h = h * 0x100000001B3 ^ (m.square as u64 | (((m.shown.x * 512.0) as i64 as u64) & 0xFFFFFF) << 8 | (((m.shown.y * 512.0) as i64 as u64) & 0xFFFFFF) << 32)
+            if m.fall < 1.0: h = h * 0x100000001B3 ^ (m.fall * 4096.0) as u64
+        return h
+
+fn aside_spot(side: Side, j: int) -> Vec2
+    let x = AsideWide - 0.55 - j as f32 * AsideStep
+    return side == White ? Vec2(x, AsideRow) : Vec2(-x, -AsideRow)
+
+fn square_spot(sq: Square) -> Vec2
+    let c = square_centre(sq)
+    return Vec2(c.x, c.z)

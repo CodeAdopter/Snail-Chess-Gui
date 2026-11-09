@@ -1,0 +1,10 @@
+use src/app/workspace
+
+extend Workspace
+    fn draw_fast(app: *DesktopApp, look: *DesktopLook, tab: *GuiTab, board_look: *BoardLook)
+        let run = tab.fast
+        let (ax, ay, aw, ah) = work_area(&app.ui)
+        let col_w = board_column(app, look, ax, ay, aw, ah)
+        tab.fast_view.draw_boards(app, board_look, run, ax, ay, col_w, ah)
+        let (px, py, pw, ph) = side_room(&app.ui, ax, col_w)
+        tab.fast_view.draw_panel(app, board_look, run, px, py, pw, ph)

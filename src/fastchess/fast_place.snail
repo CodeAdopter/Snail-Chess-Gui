@@ -1,0 +1,81 @@
+use engine/core/text
+use src/fastchess/fast_win32
+
+const FastDataEnv = "SNAIL_CHESS_DATA"
+const FastRelease = "Disservin/fastchess"
+const FastShimName = "snailfast.exe"
+
+struct FastPlace
+    root: [520]u8
+    root_len: int
+
+    fn set_root(s: str)
+        root_len = min(s.len, 510) as int
+        for i in 0..root_len
+            root[i] = s[i] == '/' ? '\\' : s[i]
+        if root_len > 0 and root[root_len - 1] != '\\'
+            root[root_len] = '\\'
+            root_len += 1
+
+    fn root_text() -> str
+        return str(root[0..root_len])
+
+    fn path(inside: str, buf: *[720]u8) -> str
+        return format(buf, "{root_text()}{inside}")
+
+    fn find_for_shim() -> bool
+        var own: [1024]u8
+        let n = sn_fc_own_path(&own[0], 1024)
+        let me = str(own[0..n])
+        let tail = "\\fastchess\\bin\\"
+        var cut = me.len as int
+        while cut > 0 and me[cut - 1] != '\\'
+            cut -= 1
+        let folder = me[0..cut]
+        if folder.len > tail.len and fast_folded(folder[folder.len - tail.len..folder.len], tail)
+            set_root(folder[0..folder.len - tail.len + 1])
+            return true
+        var value: [1024]u8
+        let asked = sn_fc_env(FastDataEnv.ptr, FastDataEnv.len as int, &value[0], 1024)
+        if asked > 0
+            set_root(str(value[0..asked]))
+            return true
+        let local = sn_fc_env("LOCALAPPDATA".ptr, 12, &value[0], 1024)
+        if local <= 0: return false
+        var buf: [1100]u8
+        set_root(format(&buf, "{str(value[0..local])}\\Snail Chess GUI"))
+        return true
+
+    fn installed(program: *[720]u8, tag: *[64]u8) -> (str, str, bool)
+        var buf: [720]u8
+        var text: [..]u8
+        defer text.free()
+        if not fast_read_whole(path("fastchess\\installed.txt", &buf), &text): return ("", "", false)
+        var at = ""
+        var inside = ""
+        var from = 0
+        let t = str(text[0..text.len])
+        for i in 0..t.len
+            if t[i] != '\n': continue
+            let line = trim(t[from..i])
+            from = i as int + 1
+            if starts_with(line, "tag "): at = line[4..line.len]
+            if starts_with(line, "program "): inside = line[8..line.len]
+        if inside.len == 0: return ("", "", false)
+        let whole = path(inside, program)
+        let n = min(at.len, 63) as int
+        for i in 0..n
+            tag[i] = at[i]
+        return (whole, str(tag[0..n]), true)
+
+fn fast_folded(a: str, b: str) -> bool
+    if a.len != b.len: return false
+    for i in 0..a.len
+        var x = a[i]
+        var y = b[i]
+        if x >= 'A' and x <= 'Z': x += 32
+        if y >= 'A' and y <= 'Z': y += 32
+        if x == '/': x = '\\'
+        if y == '/': y = '\\'
+        if x != y: return false
+    return true

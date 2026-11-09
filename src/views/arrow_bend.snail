@@ -1,0 +1,71 @@
+use engine/math/vec2
+
+struct ArrowBends
+    from: [..]Square
+    to: [..]Square
+    bend: [..]Square
+
+    fn clear()
+        from.clear()
+        to.clear()
+        bend.clear()
+
+    fn add(a: Square, b: Square)
+        from.push(a)
+        to.push(b)
+        bend.push(Square.none)
+
+    fn settle()
+        for i in 0..from.len
+            let a = from[i]
+            let b = to[i]
+            if not knight_step(a, b): continue
+            let df = b.file as int - a.file as int
+            let long = df * df == 4 ? Square(b.file, a.rank) : Square(a.file, b.rank)
+            let short = df * df == 4 ? Square(a.file, b.rank) : Square(b.file, a.rank)
+            bend[i] = meets(i, short) < meets(i, long) ? short : long
+
+    fn meets(i: int, knee: Square) -> f32
+        let a = middle(from[i])
+        let k = middle(knee)
+        let b = middle(to[i])
+        var sum: f32 = 0.0
+        for j in 0..from.len
+            if j == i or from[j] == from[i] and to[j] == to[i]: continue
+            if j > i and knight_step(from[j], to[j]): continue
+            let c = middle(from[j])
+            let d = middle(to[j])
+            if bend[j] == Square.none
+                sum += leg_meets(a, k, false, c, d, true) + leg_meets(k, b, true, c, d, true)
+            else
+                let e = middle(bend[j])
+                sum += leg_meets(a, k, false, c, e, false) + leg_meets(k, b, true, c, e, false)
+                sum += leg_meets(a, k, false, e, d, true) + leg_meets(k, b, true, e, d, true)
+        return sum
+
+fn knight_step(a: Square, b: Square) -> bool
+    let df = b.file as int - a.file as int
+    let dr = b.rank as int - a.rank as int
+    return df * df + dr * dr == 5
+
+fn middle(s: Square) -> Vec2
+    return Vec2(s.file as f32 + 0.5, s.rank as f32 + 0.5)
+
+fn leg_meets(a: Vec2, b: Vec2, ab_head: bool, c: Vec2, d: Vec2, cd_head: bool) -> f32
+    let r = b - a
+    let s = d - c
+    let q = c - a
+    let rs = r.cross(s)
+    if rs * rs < 0.000001
+        if q.cross(r) * q.cross(r) > 0.000001: return 0.0
+        let rr = r.dot(r)
+        let t0 = q.dot(r) / rr
+        let t1 = t0 + s.dot(r) / rr
+        let shared = min(max(t0, t1), 1.0) - max(min(t0, t1), 0.0)
+        return shared > 0.0 ? 4.0 * shared * r.length : 0.0
+    let t = q.cross(s) / rs
+    let u = q.cross(r) / rs
+    if t < -0.001 or t > 1.001 or u < -0.001 or u > 1.001: return 0.0
+    let x = a + r * t
+    if ab_head and x.distance(b) < 0.5 or cd_head and x.distance(d) < 0.5: return 3.0
+    return 1.0

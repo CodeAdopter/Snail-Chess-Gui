@@ -1,0 +1,411 @@
+use engine/ui/ui_edit
+use src/views/board_view
+use src/views/settings_kit
+
+const SpareKinds = [King, Queen, Rook, Bishop, Knight, Pawn]
+const PaintNone = 0
+const PaintPiece = 1
+const PaintErase = 2
+const EditorHint = "Pick a piece above or below the board, then click or drag across squares to place it. Right-click or drag with the right button to remove pieces."
+
+struct BoardEditor
+    squares: [64]Piece
+    side: Side
+    castling: u8
+    en_passant: Square = Square.none
+    clock: int
+    fullmove: int = 1
+    held: Piece
+    drag: Piece
+    drag_from: Square = Square.none
+    drag_moved: bool
+    press: Vec2
+    paint: int
+    painted: Square = Square.none
+    erasing: bool
+    erased: Square = Square.none
+    fen: UiEditText
+    fen_for: u64
+    version: u64 = 1
+    problem: [120]u8
+    problem_len: int
+
+    fn load(b: *Board)
+        squares = b.squares
+        side = b.side
+        castling = b.castling
+        en_passant = b.en_passant
+        clock = b.clock
+        fullmove = b.fullmove
+        held = NoPiece
+        drag = NoPiece
+        changed()
+
+    fn changed()
+        version += 1
+
+    fn write(out: *ShortText)
+        for row in 0..8
+            let rank = 7 - row
+            var empty = 0
+            for file in 0..8
+                let p = squares[Square(file, rank)]
+                if p == NoPiece
+                    empty += 1
+                    continue
+                if empty > 0: out.add('0' + empty as u8)
+                empty = 0
+                out.add(piece_letter(p))
+            if empty > 0: out.add('0' + empty as u8)
+            if row < 7: out.add('/')
+        out.add_str(side == White ? " w " : " b ")
+        let rights = usable_castling()
+        if rights == 0: out.add('-')
+        if rights & WhiteKingside: out.add('K')
+        if rights & WhiteQueenside: out.add('Q')
+        if rights & BlackKingside: out.add('k')
+        if rights & BlackQueenside: out.add('q')
+        out.add(' ')
+        if en_passant == Square.none: out.add('-')
+        else: write_square(en_passant, out)
+        out.add(' ')
+        out.add_int(clock)
+        out.add(' ')
+        out.add_int(fullmove)
+
+    fn usable_castling() -> u8
+        var r: u8 = 0
+        for (right, king, rook, piece_side) in [(WhiteKingside, e1, h1, White), (WhiteQueenside, e1, a1, White), (BlackKingside, e8, h8, Black), (BlackQueenside, e8, a8, Black)]
+            if castling & right != 0 and squares[king] == Piece.of(piece_side, King) and squares[rook] == Piece.of(piece_side, Rook): r |= right as u8
+        return r
+
+    fn can_castle(right: u8) -> bool
+        let saved = castling
+        castling = right
+        let ok = usable_castling() != 0
+        castling = saved
+        return ok
+
+    fn board() -> (Board, bool)
+        var b: Board
+        var fen: ShortText
+        write(&fen)
+        let ok = b.load_fen(fen.text())
+        problem_len = 0
+        if not ok: explain()
+        return b, ok
+
+    fn explain()
+        var kings: [2]int
+        var pawn_on_edge = false
+        for sq in 0..64
+            let p = squares[sq]
+            if p == NoPiece: continue
+            if p.kind == King: kings[p.side] += 1
+            let rank = (sq as Square).rank
+            if p.kind == Pawn and (rank == 0 or rank == 7): pawn_on_edge = true
+        var text = "This position cannot be reached in a game."
+        if kings[White] == 0: text = "White has no king."
+        elif kings[Black] == 0: text = "Black has no king."
+        elif kings[White] > 1: text = "White has more than one king."
+        elif kings[Black] > 1: text = "Black has more than one king."
+        elif pawn_on_edge: text = "Pawns cannot be on the first or last rank."
+        elif other_side_in_check(): text = side == White ? "Black is in check, but it is White's move." : "White is in check, but it is Black's move."
+        problem_len = min(text.len, 120) as int
+        for i in 0..problem_len
+            problem[i] = text[i]
+
+    fn other_side_in_check() -> bool
+        side = side.other
+        var fen: ShortText
+        write(&fen)
+        side = side.other
+        var b: Board
+        return b.load_fen(fen.text()) and b.in_check()
+
+    fn problem_text() -> str
+        return str(problem[0..problem_len])
+
+    fn en_passant_squares(out: *[8]Square) -> int
+        var n = 0
+        let them = side.other
+        let pawn_rank = them == Black ? 4 : 3
+        let skipped = them == Black ? 5 : 2
+        let start = them == Black ? 6 : 1
+        for file in 0..8
+            if squares[Square(file, pawn_rank)] == Piece.of(them, Pawn) and squares[Square(file, skipped)] == NoPiece and squares[Square(file, start)] == NoPiece
+                out[n] = Square(file, skipped)
+                n += 1
+        return n
+
+    fn read(text: str) -> bool
+        var w = text
+        var at = 0
+        while at < w.len and w[at] <= 32
+            at += 1
+        var placement: [64]Piece
+        var file = 0
+        var rank = 7
+        while at < w.len and w[at] > 32
+            let c = w[at]
+            at += 1
+            if c == '/'
+                if file != 8 or rank == 0: return false
+                file = 0
+                rank -= 1
+            elif c >= '1' and c <= '8'
+                file += (c - '0') as int
+                if file > 8: return false
+            else
+                let p = piece_from_letter(c)
+                if p == NoPiece or file > 7: return false
+                placement[Square(file, rank)] = p
+                file += 1
+        if rank != 0 or file != 8: return false
+        squares = placement
+        let (side_word, rights, passed, clock_word, move_word) = fen_fields(text[at..text.len])
+        side = side_word == "b" ? Black : White
+        castling = 0
+        for i in 0..rights.len
+            let c = rights[i]
+            if c == 'K': castling |= WhiteKingside as u8
+            elif c == 'Q': castling |= WhiteQueenside as u8
+            elif c == 'k': castling |= BlackKingside as u8
+            elif c == 'q': castling |= BlackQueenside as u8
+        en_passant = Square.none
+        if square_text(passed): en_passant = Square(passed[0] as int - 'a', passed[1] as int - '1')
+        let (c, c_ok) = fen_number(clock_word, 0)
+        let (f, f_ok) = fen_number(move_word, 1)
+        clock = c_ok ? clamp(c, 0, 999) : 0
+        fullmove = f_ok ? clamp(f, 1, 9999) : 1
+        changed()
+        return true
+
+    fn start_position()
+        var b: Board
+        b.load_fen(StartFen)
+        load(&b)
+
+    fn clear_board()
+        for sq in 0..64
+            squares[sq] = NoPiece
+        castling = 0
+        en_passant = Square.none
+        changed()
+
+    fn put(sq: Square, p: Piece)
+        if sq == Square.none or squares[sq] == p: return
+        squares[sq] = p
+        changed()
+
+    fn draw_board(app: *DesktopApp, look: *BoardLook, view: *BoardView, at: BoardPlace, spare: f32, flipped: bool)
+        let ui = &app.ui
+        view.place = at
+        view.flipped = flipped
+        let cell = at.size / 8.0
+        let mouse = Vec2(app.pointer.mouse.x, app.pointer.mouse.y)
+        let input = &app.pointer
+        let o = ui.open(UiNode(name: "editboard", floating: true, offset: Vec2(at.x, at.y - spare), width: UiSize.fixed(at.size), height: UiSize.fixed(at.size + spare * 2.0), hit: true))
+        let h = ui.interact(o.id, false)
+        ui.close()
+        let under = view.square_at(mouse)
+        let spare_under = spare_at(at, spare, flipped, mouse)
+        if h.hovered and (under != Square.none and (squares[under] != NoPiece or held != NoPiece) or spare_under != NoPiece): app.cursor = SDL_SYSTEM_CURSOR_POINTER
+        if h.pressed
+            if spare_under != NoPiece
+                drag = spare_under
+                drag_from = Square.none
+            elif under != Square.none and squares[under] != NoPiece and held == NoPiece
+                drag = squares[under]
+                drag_from = under
+            elif under != Square.none and held != NoPiece
+                paint = squares[under] == held ? PaintErase : PaintPiece
+                painted = Square.none
+            press = mouse
+            drag_moved = false
+        if paint != PaintNone
+            if not input.mouse.down(MouseLeft): paint = PaintNone
+            elif under != Square.none and under != painted
+                if paint == PaintPiece: put(under, held)
+                elif squares[under] == held: put(under, NoPiece)
+                painted = under
+        if drag != NoPiece
+            if (mouse - press).length > 4.0: drag_moved = true
+            if not input.mouse.down(MouseLeft)
+                if drag_moved
+                    if drag_from != Square.none: put(drag_from, NoPiece)
+                    if under != Square.none: put(under, drag)
+                elif drag_from == Square.none: held = held == drag ? NoPiece : drag
+                drag = NoPiece
+                drag_from = Square.none
+        if h.hovered and input.mouse.pressed(MouseRight)
+            erasing = true
+            erased = Square.none
+        if erasing
+            if not input.mouse.down(MouseRight): erasing = false
+            elif under != Square.none and under != erased
+                put(under, NoPiece)
+                erased = under
+        if input.pressed(Escape): held = NoPiece
+
+        ui.clip_to(at.x, at.y, at.size, at.size, 3.0)
+        ui.rect(at.x, at.y, at.size, at.size, look.colors.dark)
+        for sq in 0..64
+            let s = sq as Square
+            if (s.file + s.rank) % 2 == 1
+                let p = view.corner(s)
+                ui.rect(p.x, p.y, cell, cell, look.colors.light)
+        view.draw_coordinates(ui, look, cell)
+        for sq in 0..64
+            let s = sq as Square
+            if squares[s] == NoPiece: continue
+            let p = view.corner(s)
+            let lifted = drag != NoPiece and drag_moved and s == drag_from
+            look.sheet.show(ui, squares[s], p.x, p.y, cell, lifted ? 0.3 : 1.0)
+        if drag != NoPiece and drag_moved and under != Square.none
+            let p = view.corner(under)
+            ui.rect(p.x, p.y, cell, cell, look.theme.accent.with_alpha(0.18))
+        ui.unclip()
+        let theme = look.theme
+        let tile = spare - 4.0
+        for row in 0..2
+            let piece_side = (row == 1) != flipped ? White : Black
+            let y = row == 0 ? at.y - spare : at.y + at.size
+            let ground = piece_side == Black ? look.colors.light : look.colors.dark
+            for k in 0..6
+                let p = Piece.of(piece_side, SpareKinds[k])
+                let x = spare_x(at, k, tile)
+                let hot = h.hovered and spare_under == p and drag == NoPiece
+                let chosen = p == held
+                ui.box(x, y + 2.0, tile, tile, UiBox(fill: UiFill.solid(ground), radius: Vec4.splat(7.0), border: chosen ? 2.0 : 1.0, border_color: chosen ? theme.accent : theme.line.lerp(theme.ink, hot ? 0.35 : 0.0), shadow: UiShadow(Color(0.0, 0.0, 0.0, chosen or hot ? 0.28 : 0.16), 0.0, 1.0, chosen or hot ? 6.0 : 3.0, 0.0, false)))
+                if chosen: ui.box(x, y + 2.0, tile, tile, UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.18)), radius: Vec4.splat(7.0)))
+                let inset = tile * 0.06
+                look.sheet.show(ui, p, x + inset, y + 2.0 + inset, tile - inset * 2.0)
+        if drag != NoPiece and drag_moved
+            let keep = ui.layer
+            ui.layer = 6
+            look.sheet.show(ui, drag, mouse.x - cell * 0.5, mouse.y - cell * 0.5, cell)
+            ui.layer = keep
+        elif held != NoPiece and h.hovered and under != Square.none
+            look.sheet.show(ui, held, mouse.x - cell * 0.3, mouse.y - cell * 0.3, cell * 0.6, 0.6)
+
+    fn spare_x(at: BoardPlace, k: int, size: f32) -> f32
+        let step = at.size / 6.0
+        return at.x + step * (k as f32 + 0.5) - size * 0.5
+
+    fn spare_at(at: BoardPlace, spare: f32, flipped: bool, p: Vec2) -> Piece
+        for row in 0..2
+            let y = row == 0 ? at.y - spare : at.y + at.size
+            if p.y < y or p.y >= y + spare: continue
+            let k = floor((p.x - at.x) / (at.size / 6.0)) as int
+            if k < 0 or k > 5: return NoPiece
+            return Piece.of((row == 1) != flipped ? White : Black, SpareKinds[k])
+        return NoPiece
+
+    fn draw_panel(app: *DesktopApp, look: *BoardLook, x: f32, y: f32, w: f32, h: f32, flipped: *bool) -> bool
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        var go = false
+        let heading = UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.7)
+        let note = UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted)
+        var kit = SettingsKit(ui, theme, fonts, w, 0, 0.0)
+        with ui.scroll_area("editor", gap: 12.0, fade: 10.0, node: UiNode(floating: true, offset: Vec2(x + 1.0, y + 1.0), width: UiSize.fixed(w - 2.0), height: UiSize.fixed(h - 2.0), padding: Vec4(18.0, 16.0, 18.0, 16.0)))
+            with ui.open(UiNode(name: "edithead", width: UiSize.grow(), gap: 4.0))
+                ui.label("Edit board", UiTextStyle(face: fonts.serif, size: 20.0, color: theme.ink))
+                ui.paragraph(EditorHint, note, UiNode(width: UiSize.grow()))
+            with editor_card(ui, look, 1)
+                ui.label("SIDE TO MOVE", heading)
+                var to_move = side as int
+                if kit.segments("editside", ["White", "Black"], ref to_move)
+                    side = to_move as Side
+                    en_passant = Square.none
+                    changed()
+                ui.label("CASTLING", heading, UiNode(padding: Vec4(0.0, 4.0, 0.0, 0.0)))
+                var offered = false
+                with ui.open(UiNode(name: "castlewhite", flow: FlowRow, width: UiSize.grow(), gap: 6.0))
+                    for (right, label) in [(WhiteKingside, "White O-O"), (WhiteQueenside, "White O-O-O")]
+                        if castle_chip(ui, look, right as u8, label): offered = true
+                with ui.open(UiNode(name: "castleblack", flow: FlowRow, width: UiSize.grow(), gap: 6.0))
+                    for (right, label) in [(BlackKingside, "Black O-O"), (BlackQueenside, "Black O-O-O")]
+                        if castle_chip(ui, look, right as u8, label): offered = true
+                if not offered: ui.label("No king and rook stand on their starting squares.", note)
+                var squares_open: [8]Square
+                let n = en_passant_squares(&squares_open)
+                if n > 0
+                    ui.label("EN PASSANT", heading, UiNode(padding: Vec4(0.0, 4.0, 0.0, 0.0)))
+                    var names: [9]str
+                    var name_text: [9][3]u8
+                    names[0] = "None"
+                    var chosen = 0
+                    for i in 0..n
+                        name_text[i + 1][0] = 'a' + squares_open[i].file as u8
+                        name_text[i + 1][1] = '1' + squares_open[i].rank as u8
+                        names[i + 1] = str(name_text[i + 1][0..2])
+                        if squares_open[i] == en_passant: chosen = i as int + 1
+                    if ui.dropdown("enpassant", ref chosen, names[0..n + 1], UiNode(width: UiSize.fixed(140.0)))
+                        en_passant = chosen == 0 ? Square.none : squares_open[chosen - 1]
+                        changed()
+                ui.label("COUNTERS", heading, UiNode(padding: Vec4(0.0, 4.0, 0.0, 0.0)))
+                with ui.open(UiNode(name: "counters", flow: FlowRow, width: UiSize.grow(), gap: 16.0, clip: true))
+                    if ui.stepper("Halfmove clock", ref clock, 0, 999, UiNode(width: UiSize.fixed(200.0))): changed()
+                    if ui.stepper("Move", ref fullmove, 1, 9999, UiNode(width: UiSize.fixed(150.0))): changed()
+            with editor_card(ui, look, 2)
+                ui.label("FEN", heading)
+                if fen_for != version and not ui.wants_text
+                    var text: ShortText
+                    write(&text)
+                    fen.set(text.text())
+                    fen.caret = 0
+                    fen.anchor = 0
+                    fen_for = version
+                with ui.open(UiNode(name: "fenrow", flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                    if ui.text_field("fen", &fen, "Paste a FEN position")
+                        if read(fen.text()): fen_for = version
+                    if ui.button("Copy")
+                        var clip: [300]u8
+                        SDL_SetClipboardText(format(&clip, "{fen.text()}").ptr as cstr)
+                        ui.toast("FEN copied.")
+                with ui.open(UiNode(name: "resets", flow: FlowRow, width: UiSize.grow(), gap: 8.0, clip: true))
+                    if ui.button("Starting position"): start_position()
+                    if ui.button("Clear board"): clear_board()
+                    if ui.button("Flip board"): *flipped = not *flipped
+            let (b, ok) = board()
+            if not ok: ui.paragraph(problem_text(), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.loss()), UiNode(width: UiSize.grow()))
+            if ui.button("Continue", true, UiNode(name: "editdone", width: UiSize.grow())) and ok: go = true
+            if held != NoPiece: ui.paragraph("Press Escape to put the piece down.", note)
+        return go
+
+    fn editor_card(ui: *UiCanvas, look: *BoardLook, key: int) -> UiOpen
+        let theme = look.theme
+        return ui.open(UiNode(key: key, name: "editcard", width: UiSize.grow(), padding: Vec4(14.0, 12.0, 14.0, 14.0), gap: 8.0, box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(10.0), border: 1.0, border_color: theme.line))))
+
+    fn castle_chip(ui: *UiCanvas, look: *BoardLook, right: u8, label: str) -> bool
+        if not can_castle(right): return false
+        let theme = look.theme
+        let on = castling & right != 0
+        let o = ui.open(UiNode(name: label, flow: FlowRow, height: UiSize.fixed(28.0), padding: Vec4(9.0, 0.0, 12.0, 0.0), gap: 7.0, align: Vec2(0.0, 0.5), hit: true, focusable: true))
+        let h = ui.interact(o.id)
+        let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 22.0)
+        let held_on = ui.spring(o.id, 1, on ? 1.0 : 0.0, 22.0)
+        let ring = ui.ring_of(o.id)
+        ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.sunken.lerp(theme.accent.with_alpha(0.22), held_on).lerp(theme.line, 0.25 * lit)), radius: Vec4.splat(14.0), border: 1.0 + ring, border_color: theme.line.lerp(theme.accent, held_on).lerp(ui.theme.focus, ring))
+        ui.leaf(UiNode(width: UiSize.fixed(9.0), height: UiSize.fixed(9.0), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(held_on)), radius: Vec4.splat(4.5), border: 1.5, border_color: theme.muted.lerp(theme.accent, held_on))))
+        ui.label(label, UiTextStyle(face: look.fonts.strong, size: 12.0, color: theme.muted.lerp(theme.ink, max(held_on, lit))))
+        ui.close()
+        if h.clicked
+            castling = on ? castling & ~right : castling | right
+            changed()
+        return true
+
+fn fen_fields(t: str) -> (str, str, str, str, str)
+    var w: [5]str
+    var at = 0
+    for i in 0..5
+        while at < t.len and t[at] <= 32
+            at += 1
+        let start = at
+        while at < t.len and t[at] > 32
+            at += 1
+        w[i] = t[start..at]
+    return w[0], w[1], w[2], w[3], w[4]

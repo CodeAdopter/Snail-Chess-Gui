@@ -1,0 +1,44 @@
+use engine/desktop/desktop_app
+use src/lichess/lichess_play
+use src/views/settings_kit
+
+fn lichess_extension(app: *DesktopApp, kit: *SettingsKit, lp: *LichessPlay, removing: *bool)
+    let ui = &app.ui
+    let theme = kit.theme
+    let fonts = kit.fonts
+    let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    var line: [200]u8
+    let saved = lp.token.saved()
+    if not saved: *removing = false
+    with kit.card(1, "")
+        var status = "Not signed in."
+        if lp.state == LichessChecking: status = "Checking with Lichess…"
+        elif lp.signed_in(): status = format(&line, "Signed in as {lp.name.text()}. Rapid {lp.rapid}, classical {lp.classical}.")
+        with kit.row(10, "Account", status)
+            if not saved
+                if ui.button("Create token"): SDL_OpenURL(LichessTokenUrl)
+        let about = saved ? "Encrypted for this Windows account and sent only to Lichess. Replace pastes a token you've copied. Remove also revokes it on Lichess." : "Create a token on Lichess, copy it, then paste it here."
+        with kit.row(11, "Access token", about)
+            with ui.open(UiNode(name: "lichesstoken", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                if lp.playing(): ui.label("Finish the game to change it", note)
+                elif *removing
+                    ui.label("Remove and revoke?", note)
+                    if ui.button("Remove", true)
+                        lp.sign_out()
+                        *removing = false
+                    if ui.button("Cancel"): *removing = false
+                elif saved
+                    ui.label("Saved", note)
+                    if ui.button("Replace"): paste_token(lp)
+                    if ui.button("Remove"): *removing = true
+                elif ui.button("Paste token", true): paste_token(lp)
+        if lp.problem.len > 0: ui.paragraph(lp.problem.text(), UiTextStyle(face: fonts.text, size: 12.5, color: theme.loss()), UiNode(width: UiSize.grow(), padding: Vec4(18.0, 0.0, 18.0, 12.0)))
+        with kit.row(12, "Permissions", "Play games, and read and send challenges. Nothing else.")
+            ui.label("board:play, challenge:read, challenge:write", note)
+        with kit.row(13, "Tokens on Lichess", "See or revoke every token your account has.")
+            if ui.button("Open"): SDL_OpenURL(LichessTokensUrl)
+
+fn paste_token(lp: *LichessPlay)
+    let clip = SDL_GetClipboardText()
+    if lp.sign_in(str(clip as cstr)): SDL_SetClipboardText("")
+    SDL_free(clip)

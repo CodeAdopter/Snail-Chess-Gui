@@ -1,0 +1,925 @@
+use src/store/settings
+use engine/desktop/command_bar
+use src/views/rail
+use src/views/wrap_rows
+use src/database/eval_recorder
+use src/views/stat_tile
+use src/views/gallery
+use src/pieces/piece_groups
+use src/tabs/fast_extension
+use src/tabs/lichess_extension
+
+const SettingsSections = ["Appearance", "Arrows", "Effects", "Graphics", "Settings", "Cloud", "Board", "Pieces", "Background", "Board", "Pieces", "Scene", "FastChess", "Lichess"]
+const SettingsWords = ["appearance", "arrows", "effects", "graphics", "settings", "cloud", "board", "pieces", "background", "board3d", "pieces3d", "scene", "fastchess", "lichess"]
+const SettingsAbout = ["Choose a theme, accent colour and animation settings.", "Customise engine arrows and arrows you draw. The preview updates as you make changes.", "Customise visual effects for pieces, moves and standings. Reduced motion disables their animations.", "Adjust display and 3D graphics settings. The 2D board always uses your screen resolution.", "Manage your name, analysis defaults, startup behaviour, sounds, engines and saved data.", "Show evaluations from the cloud beside the analysis, and choose whether to share your engines' analysis.", "Choose 2D board colours, materials and move indicators.", "Choose a piece set for the 2D board.", "Choose a background for the 2D board.", "Choose a 3D board style, table accessories and arrow style.", "Choose 3D piece materials, base felt and knight orientation.", "Choose a 3D environment, clock and player nameplates. These settings replace the 2D background in 3D view.", "Run fastchess matches and SPRT tests from any terminal and watch them live here.", "Manage your Lichess account and the access token the app signs in with."]
+const SettingsGroups = ["GENERAL", "2D BOARD", "3D BOARD", "EXTENSIONS"]
+const SettingsGroupStarts = [0, 6, 9, 12]
+const SettingsIcons = [IconPalette, IconArrow, IconSparkle, IconMonitor, IconSliders, IconCloud, IconGrid, IconPawn, IconImage, IconCube, IconKing, IconHouse, IconBolt, IconPerson]
+const SectionAppearance = 0
+const SectionArrows = 1
+const SectionEffects = 2
+const SectionGraphics = 3
+const SectionSettings = 4
+const SectionCloud = 5
+const SectionBoard = 6
+const SectionPieces = 7
+const SectionBackground = 8
+const SectionBoard3d = 9
+const SectionPieces3d = 10
+const SectionScene = 11
+const SectionFastchess = 12
+const SectionLichess = 13
+
+const SettingsRailWidth: f32 = 232.0
+const SettingsTop: f32 = 28.0
+const SettingsHeader: f32 = 92.0
+const ShelfBoard: f32 = 216.0
+const ArrowsWide: f32 = 980.0
+const LegendTall: f32 = 74.0
+const BackdropWide: f32 = 288.0
+const BackdropTall: f32 = 180.0
+const BackdropBoard: f32 = 112.0
+const StillWide: f32 = 360.0
+const StillTall: f32 = 240.0
+const StillBoard = 0
+const StillPieces = 1
+const StillScene = 2
+const StillQuality = 3
+const StillClock = 4
+const StillCard = 5
+const StillSlots = [0, 6, 10, 15, 16, 19]
+const StillCount = 22
+
+const GraphicsPresets = ["Low", "Medium", "High", "Ultra"]
+const PresetSamples = [1, 2, 4, 8]
+const PresetScales = [0.75, 1.0, 1.0, 1.5]
+const PresetShadows = [1024, 2048, 2048, 4096]
+const PresetFilters = [1, 4, 8, 16]
+const SampleWords = ["Off", "2×", "4×", "8×"]
+const SampleCounts = [1, 2, 4, 8]
+const ScaleWords = ["75%", "100%", "150%", "200%"]
+const RenderScales = [0.75, 1.0, 1.5, 2.0]
+const ShadowWords = ["Low", "Medium", "High"]
+const ShadowSizes = [1024, 2048, 4096]
+const FilterWords = ["Off", "2×", "4×", "8×", "16×"]
+const FilterSteps = [1, 2, 4, 8, 16]
+const CostumeFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+const PreviewFen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+const StartChoices = ["Restore previous tabs", "New tab page", "New analysis"]
+const PriorityChoices = ["Normal", "Below normal", "Idle"]
+
+fn settings_section_named(word: str) -> int
+    for i in 0..SettingsWords.len
+        if SettingsWords[i] == word: return i as int
+    let (n, ok) = uci_number(word)
+    if ok: return clamp(n as int, 0, SettingsSections.len as int - 1)
+    return SectionAppearance
+
+fn settings_group(section: int) -> int
+    var g = 0
+    for k in 0..SettingsGroupStarts.len
+        if section >= SettingsGroupStarts[k]: g = k as int
+    return g
+
+struct SettingsPage
+    section: int
+    name: UiEditText
+    hash: UiEditText
+    token_field: UiEditText
+    cloud_field: UiEditText
+    sheet: PieceSheet
+    catalog: PieceCatalog
+    picking: FileDialog
+    ready: bool
+    kit: SettingsKit
+    icons: LineIcons
+    board_group: int
+    theme_group: int
+    finish_group: int
+    shelf_ids: [4]u32
+    preview: BoardView
+    scene: *BoardScene
+    stills: [StillCount]SceneStill
+    pace: StillPace
+    view: Vec4
+    spin: UiPath
+    sounds: *GuiSounds
+    library: *EngineLibrary
+    review_picker: EnginePicker
+    slides: PieceSlides
+    fast: *FastExtension
+    lichess: *LichessPlay
+    lichess_removing: bool
+
+    fn draw(app: *DesktopApp, desk: *DesktopLook, s: *Settings, look: *BoardLook, data: *DataFolder, token: *GithubToken) -> bool
+        let ui = &app.ui
+        if not ready
+            ready = true
+            name.set(str(s.name[0..s.name.len]))
+            cloud_field.set(str(s.cloud_address[0..s.cloud_address.len]))
+            var t: [16]u8
+            hash.set(format(&t, "{s.hash_mb}"))
+            board_group = s.palette as int >= ThemePalettes ? 1 : 0
+            finish_group = s.finish != NoFinish ? 1 : 0
+            theme_group = s.theme as int >= BasicThemes ? 1 : 0
+        sheet.finish = look.sheet.finish
+        sheet.finish_values = look.sheet.finish_values
+        let top = TabRowHeight + CommandBarHeight
+        let x = places_width(ui, SettingsRailWidth)
+        command_bar_rail(app, desk, x, PageCurve)
+        rail(ui, desk, look, top, x)
+        pace.begin(app.stats.built, section)
+        turn_spin(ui, &spin)
+        let w = max(ui.width - x, 1.0)
+        let h = max(ui.height - top, 1.0)
+        view = Vec4(x, top, w, h)
+        let side = w < 640.0 ? 20.0 : 40.0
+        let inner = max(w - side * 2.0, 1.0)
+        let g = settings_group(section)
+        let gallery = section >= SectionBoard and section <= SectionScene
+        let inset = gallery ? ShelfInset : 0.0
+        kit = SettingsKit(ui, look.theme, look.fonts, min(inner, KitColumn), 0, inset)
+        var changed = false
+        let padding = Vec4(side - inset, SettingsTop, side - inset, 40.0)
+        if section == SectionArrows: return arrows_page(app, s, look, x, top, w, h, side)
+        with ui.open(UiNode(name: "profilebody", floating: true, offset: Vec2(x, top), width: UiSize.fixed(w), height: UiSize.fixed(h), clip: true))
+            with ui.scroll_area("profilescroll", node: UiNode(key: section, width: UiSize.grow(), height: UiSize.grow(), padding: padding))
+                with ui.open(UiNode(name: "profilecolumn", width: UiSize.fixed(gallery ? inner + inset * 2.0 : kit.width), gap: 8.0))
+                    kit.title(SettingsGroups[g], SettingsSections[section], SettingsAbout[section])
+                    if section == SectionAppearance: changed = appearance(s, look)
+                    elif section == SectionEffects: changed = effect_choices(s, look)
+                    elif section == SectionGraphics: changed = graphics(app, s, look)
+                    elif section == SectionSettings: changed = settings(app, s, look, data, token)
+                    elif section == SectionCloud: changed = cloud_page(s, look)
+                    elif section == SectionBoard: changed = board(app, s, look)
+                    elif section == SectionPieces: changed = pieces(app, s, look)
+                    elif section == SectionBackground: changed = background(app, s, look)
+                    elif section == SectionBoard3d: changed = board_3d(app, s, look)
+                    elif section == SectionPieces3d: changed = pieces_3d(app, s, look)
+                    elif section == SectionFastchess
+                        if fast: fast.page(app, &kit, token.text(), look, library)
+                    elif section == SectionLichess
+                        if lichess: lichess_extension(app, &kit, lichess, &lichess_removing)
+                    else: changed = scene_page(app, s, look)
+        if fast and section != SectionFastchess: fast.left()
+        if section != SectionLichess: lichess_removing = false
+        if pace.left: ui.wake_in(0.0)
+        return changed
+
+    fn rail(ui: *UiCanvas, desk: *DesktopLook, look: *BoardLook, top: f32, wide: f32)
+        let theme = look.theme
+        let fonts = look.fonts
+        let folded = wide < SettingsRailWidth
+        with rail_room(ui, "profilerail", wide)
+            for g in 0..SettingsGroups.len
+                rail_group(ui, theme, fonts, g as int, SettingsGroups[g], g == 0, folded)
+                let last = g + 1 < SettingsGroups.len ? SettingsGroupStarts[g + 1] : SettingsSections.len as int
+                for i in SettingsGroupStarts[g]..last
+                    if rail_icon_place(ui, theme, fonts, &icons, "profilesection", i as int, SettingsIcons[i], SettingsSections[i], "", i == section, folded): section = i
+
+    fn appearance(s: *Settings, look: *BoardLook) -> bool
+        let ui = kit.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        var changed = false
+        with kit.card(1, "Appearance")
+            with kit.block(10, "Theme", "")
+                with ui.open(UiNode(name: "themegrouphead", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5)))
+                    kit.segments("themegroup", ["Basic", "Detailed"], ref theme_group)
+                    ui.label(theme_group == 0 ? "Static themes with flat colours." : "Animated materials with hover and click effects.", muted_style(look), UiNode(width: UiSize.grow(), clip: true))
+                let first = theme_group == 0 ? 0 : BasicThemes
+                let past = theme_group == 0 ? BasicThemes : ThemeCount
+                with themes = wrap_rows(ui, "themecards", kit.width - 36.0, 12.0)
+                    for i in first..past
+                        themes.next(150.0)
+                        var t = GuiTheme.of(i as ThemeName).with_accent(s.accent)
+                        if t.detailed()
+                            t.material = look.surfaces.theme_material(t.name, PanelPart)
+                            t.motion = theme.motion
+                            if t.moving(): ui.wake_in(0.0)
+                        let o = ui.open(UiNode(key: i as int, name: "themecard", width: UiSize.fixed(150.0), padding: Vec4.splat(10.0), gap: 8.0, hit: true, box: UiBox(fill: UiFill.solid(t.page), radius: Vec4.splat(8.0), border: s.theme as int == i ? 2.0 : 1.0, border_color: s.theme as int == i ? theme.accent : theme.line)))
+                        let hv = ui.interact(o.id)
+                        with ui.open(UiNode(width: UiSize.grow(), height: UiSize.fixed(36.0), padding: Vec4.splat(8.0), flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5), box: t.wear(UiBox(fill: UiFill.solid(t.surface), radius: Vec4.splat(5.0), border: 1.0, border_color: t.line), false)))
+                            ui.leaf(UiNode(width: UiSize.fixed(12.0), height: UiSize.fixed(12.0), box: UiBox(fill: UiFill.solid(t.accent), radius: Vec4.splat(6.0))))
+                            ui.leaf(UiNode(width: UiSize.fixed(50.0), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(t.muted), radius: Vec4.splat(3.0))))
+                        ui.label(theme_label(i as ThemeName), UiTextStyle(face: fonts.text, size: 12.5, color: t.ink))
+                        ui.close()
+                        if hv.clicked and s.theme as int != i
+                            s.theme = i as ThemeName
+                            changed = true
+            with kit.block(11, "Accent", "")
+                let across = clamp(floor((kit.width - 36.0 + 8.0) / 132.0) as int, 1, 4)
+                with accents = wrap_rows(ui, "accents", across as f32 * 132.0 - 8.0, 8.0)
+                    for i in 0..AccentLabels.len as int
+                        accents.next(124.0)
+                        let t = GuiTheme.of(s.theme).with_accent(i as AccentName)
+                        let o = ui.open(UiNode(key: i, name: "accent", width: UiSize.fixed(124.0), flow: FlowRow, gap: 8.0, padding: Vec4(6.0, 4.0, 10.0, 4.0), align: Vec2(0.0, 0.5), hit: true, box: UiBox(radius: Vec4.splat(5.0), border: s.accent as int == i ? 1.0 : 0.0, border_color: theme.accent)))
+                        let hv = ui.interact(o.id)
+                        ui.leaf(UiNode(width: UiSize.fixed(18.0), height: UiSize.fixed(18.0), box: UiBox(fill: UiFill.solid(t.accent), radius: Vec4.splat(9.0))))
+                        ui.label(AccentLabels[i], UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+                        ui.close()
+                        if hv.clicked and s.accent as int != i
+                            s.accent = i as AccentName
+                            changed = true
+        with kit.card(3, "Font")
+            let wide: f32 = 156.0
+            with kit.block(30, "Typeface", "Used for all of the program's text.")
+                with cards = wrap_rows(ui, "fontcards", kit.width - 36.0, 10.0)
+                    for i in 0..FontCount
+                        cards.next(wide)
+                        let face = fonts.preview(ui, i as int)
+                        let chosen = s.font == i
+                        let o = ui.open(UiNode(key: i as int, name: "fontcard", width: UiSize.fixed(wide), padding: Vec4(12.0, 8.0, 12.0, 10.0), gap: 2.0, hit: true))
+                        let hv = ui.interact(o.id)
+                        let lit = ui.spring(o.id, 0, hv.hovered ? 1.0 : 0.0, 22.0)
+                        ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.page.lerp(theme.line, 0.35 * lit)), radius: Vec4.splat(8.0), border: chosen ? 2.0 : 1.0, border_color: chosen ? theme.accent : theme.line)
+                        ui.label("Ag", UiTextStyle(face: face, size: 30.0, color: theme.ink))
+                        ui.label(FontNames[i], UiTextStyle(face: face, size: 12.5, color: theme.muted), UiNode(width: UiSize.grow(), clip: true))
+                        ui.close()
+                        if hv.clicked and not chosen
+                            s.font = i as int
+                            changed = true
+        with kit.card(2, "Motion")
+            if kit.switch(20, "Reduced motion", "Disable interface transitions, smooth scrolling and visual effect animations.", ref s.still): changed = true
+        return changed
+
+    fn board(app: *DesktopApp, s: *Settings, look: *BoardLook) -> bool
+        let ui = &app.ui
+        var changed = false
+        var b: Board
+        b.load_fen(PreviewFen)
+        let last = Move(from: Square(1, 7), to: Square(2, 5), kind: Quiet)
+        sheet.prepare(&app.gpu, &app.ui_gpu, s.pieces, max(floor(ShelfBoard * app.scale / 8.0) as int, 1), s.costume)
+        with ui.open(UiNode(name: "boardshelfhead", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5), padding: Vec4(kit.inset, 10.0, kit.inset, 0.0)))
+            kit.segments("boardgroup", ["Standard", "Theme"], ref board_group)
+            ui.label(board_group == 0 ? "Solid colours, wood, stone and glass." : "Animated boards using your accent colour.", muted_style(look), UiNode(width: UiSize.grow(), clip: true))
+        if board_group == 1 and not ui.still: ui.wake_in(0.0)
+        let shelves = board_group == 0 ? 2 : 1
+        for g in 0..shelves
+            let k = board_group == 0 ? g as int : 2
+            with kit.heading(k, PaletteShelfNames[k], PaletteShelfNotes[k])
+                shelf_turns(ui, look.theme, look.fonts, shelf_ids[g])
+            with sh = shelf(ui, "boardshelf", k)
+                shelf_ids[g] = sh.id
+                for i in PaletteShelfStarts[k]..PaletteShelfStarts[k + 1]
+                    let card = shelf_card(ui, look.theme, look.fonts, "palettecard", i as int, s.palette as int == i)
+                    board_nodes(ui, BoardColors.of(i as BoardPalette), look.surfaces, PieceSource(sheet: &sheet), &b, last, ShelfBoard, 1)
+                    if card.done(palette_label(i as BoardPalette)) and s.palette as int != i
+                        s.palette = i as BoardPalette
+                        changed = true
+        with ui.open(UiNode(width: UiSize.fixed(kit.width + kit.inset), padding: Vec4(kit.inset, 0.0, 0.0, 0.0), gap: 8.0))
+            with kit.card(30, "Board display")
+                if kit.switch(31, "Show coordinates", "Show file letters and rank numbers inside the edge squares.", ref s.coordinates): changed = true
+                if kit.switch(32, "Highlight last move and check", "", ref s.highlights): changed = true
+                if kit.switch(33, "Show legal moves", "", ref s.targets): changed = true
+                if s.targets
+                    with kit.block(34, "Colour", "Used for the selected piece and its moves.")
+                        if target_swatches(ui, look, ref s.target_color): changed = true
+        return changed
+
+    fn arrows_page(app: *DesktopApp, s: *Settings, look: *BoardLook, x: f32, top: f32, w: f32, h: f32, side: f32) -> bool
+        let ui = &app.ui
+        let g = settings_group(section)
+        let wide = w >= ArrowsWide
+        let size = floor((wide ? clamp(w * 0.34, 300.0, 480.0) : clamp(min(w - side * 2.0, h * 0.4), 200.0, 400.0)) / 8.0) * 8.0
+        let bx = wide ? x + w - side - size : x + side
+        let by = top + SettingsTop + (wide ? 8.0 : SettingsHeader + 8.0)
+        var changed = false
+        if not wide
+            with ui.open(UiNode(name: "arrowstitle", floating: true, offset: Vec2(x + side, top + SettingsTop), width: UiSize.fixed(w - side * 2.0), height: UiSize.fixed(SettingsHeader), clip: true))
+                kit.title(SettingsGroups[g], SettingsSections[section], SettingsAbout[section])
+        let cx = x
+        let cy = wide ? top : by + size + LegendTall + 8.0
+        let cw = wide ? w - size - side - 24.0 : w
+        kit.width = min(max(cw - side * 2.0, 1.0), KitColumn)
+        with ui.open(UiNode(name: "profilebody", floating: true, offset: Vec2(cx, cy), width: UiSize.fixed(cw), height: UiSize.fixed(max(top + h - cy, 1.0)), clip: true))
+            with ui.scroll_area("profilescroll", node: UiNode(key: section, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(side, wide ? SettingsTop : 8.0, side, 40.0)))
+                with ui.open(UiNode(name: "profilecolumn", width: UiSize.fixed(kit.width), gap: 8.0))
+                    if wide: kit.title(SettingsGroups[g], SettingsSections[section], SettingsAbout[section])
+                    changed = arrow_choices(s, look)
+        preview_arrows(app, s, look, bx, by, size)
+        return changed
+
+    fn preview_arrows(app: *DesktopApp, s: *Settings, look: *BoardLook, x: f32, y: f32, size: f32)
+        let ui = &app.ui
+        var b: Board
+        b.load_fen(StartFen)
+        var shown = *look
+        shown.scene = null
+        shown.arrows = true
+        shown.sheet = &sheet
+        sheet.prepare(&app.gpu, &app.ui_gpu, look.set, max(floor(size * app.scale / 8.0) as int, 1), look.costume)
+        let froms = [Square(6, 0), Square(2, 6), Square(6, 7), Square(4, 1), Square(3, 1)]
+        let tos = [Square(5, 2), Square(2, 4), Square(5, 5), Square(4, 3), Square(3, 3)]
+        if s.engine_arrows.on
+            for k in 0..ArrowKinds: preview.arrow(froms[k], tos[k], shown.arrow_colors[k], s.engine_arrows.width)
+        if s.note_arrows.on: preview.arrow(Square(1, 0), Square(2, 2), look.note_arrow, look.note_width)
+        preview.draw(app, &shown, &b, NoMove, board_place(x, y, size, app.scale), false, false)
+        let theme = look.theme
+        let note = muted_style(look)
+        with ui.open(UiNode(name: "arrowkey", floating: true, offset: Vec2(x, y + size + 12.0), width: UiSize.fixed(size), gap: 8.0))
+            for r in 0..3
+                with ui.open(UiNode(key: r as int, flow: FlowRow, width: UiSize.grow()))
+                    for c in 0..2
+                        let k = r * 2 + c
+                        let on = k < ArrowKinds ? s.engine_arrows.on : s.note_arrows.on
+                        with ui.open(UiNode(key: c as int, flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                            let paint = k < ArrowKinds ? shown.arrow_colors[k] : look.note_arrow
+                            ui.leaf(UiNode(width: UiSize.fixed(22.0), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(on ? paint : theme.line), radius: Vec4.splat(3.0))))
+                            ui.label(k < ArrowKinds ? ArrowKindLabels[k] : "Your arrow", note)
+
+    fn arrow_choices(s: *Settings, look: *BoardLook) -> bool
+        let ui = kit.ui
+        let theme = look.theme
+        var changed = false
+        with kit.card(1, "Engine arrows")
+            if kit.switch(10, "Show engine arrows", "Show engine suggestions in analyses and tournaments. Hidden during games you play against an engine.", ref s.engine_arrows.on): changed = true
+            if kit.slide(11, "Width", "Arrow width relative to the size of a square.", ref s.engine_arrows.width, 0.05, 0.3, 0.01): changed = true
+            for k in 0..ArrowKinds
+                with kit.block(20 + k as int, ArrowKindLabels[k], ArrowKindNotes[k])
+                    if paint_choice(ui, look, &s.arrow_paints[k], k as ArrowKind): changed = true
+            with kit.row(30, "Reset arrow colours", "Reset all engine arrow colours to match the board and theme, and restore default opacity.")
+                if ui.button("Match the board")
+                    s.match_board_arrows()
+                    changed = true
+        with kit.card(2, "Your arrows")
+            if kit.switch(40, "Show your arrows", "Drag with the right mouse button to draw arrows. Arrows clear when the position changes.", ref s.note_arrows.on): changed = true
+            with kit.block(41, "Colour", "")
+                with ui.open(UiNode(name: "notecolours", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    for i in 0..ArrowColorNames.len
+                        let on = s.note_arrows.color == i
+                        let o = ui.open(UiNode(key: i as int, name: "notecolour", width: UiSize.fixed(22.0), height: UiSize.fixed(22.0), hit: true, box: UiBox(fill: UiFill.solid(arrow_color(i as int)), radius: Vec4.splat(11.0), border: on ? 2.0 : 1.0, border_color: on ? theme.ink : theme.line)))
+                        let hv = ui.interact(o.id)
+                        ui.close()
+                        if hv.clicked and not on
+                            s.note_arrows.color = i as int
+                            changed = true
+            if kit.slide(42, "Width", "Arrow width relative to the size of a square.", ref s.note_arrows.width, 0.05, 0.3, 0.01): changed = true
+            if kit.slide(43, "Opacity", "", ref s.note_arrows.opacity, 0.1, 1.0, 0.05): changed = true
+        return changed
+
+    fn paint_choice(ui: *UiCanvas, look: *BoardLook, p: *ArrowPaint, kind: ArrowKind) -> bool
+        let theme = look.theme
+        var changed = false
+        with ui.open(UiNode(key: kind as int, name: "paint", gap: 10.0))
+            with ui.open(UiNode(name: "swatches", flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5)))
+                let auto = arrow_default(kind, look.colors, theme)
+                let lit = 0.3 * auto.r + 0.55 * auto.g + 0.15 * auto.b
+                let o = ui.open(UiNode(name: "paintauto", flow: FlowRow, height: UiSize.fixed(24.0), padding: Vec4(10.0, 0.0, 10.0, 0.0), align: Vec2(0.5, 0.5), hit: true, box: UiBox(fill: UiFill.solid(auto), radius: Vec4.splat(12.0), border: p.custom ? 1.0 : 2.0, border_color: p.custom ? theme.line : theme.ink)))
+                let ha = ui.interact(o.id)
+                ui.label("Auto", UiTextStyle(face: look.fonts.strong, size: 11.5, color: lit > 0.55 ? Color.hex(0x15171A) : Color.hex(0xFFFFFF)))
+                ui.close()
+                if ha.clicked and p.custom
+                    p.custom = false
+                    changed = true
+                for i in 0..ArrowSwatches.len
+                    let c = Color.hex(ArrowSwatches[i] as u32)
+                    let on = p.custom and hex_of(p.color) == ArrowSwatches[i] as u32
+                    let q = ui.open(UiNode(key: i as int, name: "swatch", width: UiSize.fixed(22.0), height: UiSize.fixed(22.0), hit: true, box: UiBox(fill: UiFill.solid(c), radius: Vec4.splat(11.0), border: on ? 2.0 : 1.0, border_color: on ? theme.ink : theme.line)))
+                    let hs = ui.interact(q.id)
+                    ui.close()
+                    if hs.clicked and not on
+                        p.custom = true
+                        p.color = c
+                        changed = true
+            if ui.slider("Opacity", ref p.opacity, 0.1, 1.0, 0.05, UiNode(name: "paintopacity", width: UiSize.fixed(KitControl))): changed = true
+        return changed
+
+    fn pieces(app: *DesktopApp, s: *Settings, look: *BoardLook) -> bool
+        let ui = &app.ui
+        var changed = false
+        catalog.prepare(&app.gpu, &app.ui_gpu, max(floor(ShelfBoard * app.scale / 8.0) as int, 1))
+        var b: Board
+        b.load_fen(PreviewFen)
+        let last = Move(from: Square(1, 7), to: Square(2, 5), kind: Quiet)
+        with ui.open(UiNode(name: "pieceshelfhead", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5), padding: Vec4(kit.inset, 10.0, kit.inset, 0.0)))
+            kit.segments("piecegroup", ["Standard", "Theme"], ref finish_group)
+            ui.label(finish_group == 0 ? "Use the piece set's own colours." :"Apply a theme finish to your selected piece set.", muted_style(look), UiNode(width: UiSize.grow(), clip: true))
+        if finish_group == 1
+            if not ui.still: ui.wake_in(0.0)
+            with kit.heading(0, "Finishes", "Visual finishes for any piece set")
+                shelf_turns(ui, look.theme, look.fonts, shelf_ids[0])
+            with sh = shelf(ui, "finishshelf", 0)
+                shelf_ids[0] = sh.id
+                for i in 1..FinishCount
+                    let f = i as PieceFinish
+                    let chosen = s.finish == f
+                    let card = shelf_card(ui, look.theme, look.fonts, "finishcard", i as int, chosen)
+                    board_nodes(ui, look.colors, look.surfaces, PieceSource(catalog: &catalog, set: s.pieces, finish: look.surfaces.finish_material(f), finish_values: look.surfaces.finish_values()), &b, last, ShelfBoard, 1)
+                    if card.done(FinishLabels[i]) and not chosen
+                        s.finish = f
+                        changed = true
+            return changed
+        for g in 0..PieceGroupNames.len
+            with kit.heading(g as int, PieceGroupNames[g], PieceGroupNotes[g])
+                shelf_turns(ui, look.theme, look.fonts, shelf_ids[g])
+            with sh = shelf(ui, "pieceshelf", g as int)
+                shelf_ids[g] = sh.id
+                for i in 0..PieceSetWords.len
+                    let set = i as PieceSet
+                    if piece_group(set) != g: continue
+                    let chosen = s.pieces == set and s.finish == NoFinish
+                    let card = shelf_card(ui, look.theme, look.fonts, "setcard", i as int, chosen)
+                    board_nodes(ui, look.colors, look.surfaces, PieceSource(catalog: &catalog, set: set), &b, last, ShelfBoard, 1)
+                    if card.done(piece_set_label(set)) and not chosen
+                        s.pieces = set
+                        s.finish = NoFinish
+                        changed = true
+        return changed
+
+    fn background(app: *DesktopApp, s: *Settings, look: *BoardLook) -> bool
+        let ui = &app.ui
+        var changed = false
+        var buf: [1024]u8
+        let picked = picking.take(buf[0..1000])
+        if picked.len > 0
+            set_text(&s.picture, picked)
+            s.backdrop = Picture
+            changed = true
+        var b: Board
+        b.load_fen(CostumeFen)
+        sheet.prepare(&app.gpu, &app.ui_gpu, s.pieces, max(floor(BackdropBoard * app.scale / 8.0) as int, 1), s.costume)
+        if backdrop_shelf(app, s, look, &b, 0, "Custom", "Use your own image or choose background colours.", CustomBackdrops[0..CustomBackdrops.len]): changed = true
+        if s.backdrop == Picture
+            with ui.open(UiNode(name: "picturebutton", padding: Vec4(kit.inset, 4.0, 0.0, 0.0)))
+                if ui.button("Choose image") and not picking.is_open(): picking.pick_file(app.window.handle, "PNG image", "png", null)
+        if s.backdrop == Colours
+            with ui.open(UiNode(width: UiSize.fixed(kit.width + kit.inset), padding: Vec4(kit.inset, 0.0, 0.0, 0.0), gap: 8.0))
+                with kit.card(40, "Custom colours")
+                    with kit.block(41, "Colour blend", "Glow places the second colour around the board and fades into the first colour at the edges.")
+                        if kit.segments("colourblend", ColourBlends, ref s.backdrop_blend): changed = true
+                    with kit.block(42, s.backdrop_blend == 0 ? "Colour" : "First colour", "")
+                        if backdrop_swatches(ui, look.theme, 0, ref s.backdrop_a): changed = true
+                    if s.backdrop_blend > 0
+                        with kit.block(43, "Second colour", "")
+                            if backdrop_swatches(ui, look.theme, 1, ref s.backdrop_b): changed = true
+        if backdrop_shelf(app, s, look, &b, 1, "Basic", "Solid colours and static textures with low graphics usage.", BasicBackdrops[0..BasicBackdrops.len]): changed = true
+        if backdrop_shelf(app, s, look, &b, 2, "Detailed", "Animated backgrounds with depth and effects. These use more graphics resources while visible.", DetailedBackdrops[0..DetailedBackdrops.len]): changed = true
+        return changed
+
+    fn backdrop_shelf(app: *DesktopApp, s: *Settings, look: *BoardLook, b: *Board, g: int, title: str, note: str, kinds: []int) -> bool
+        let ui = &app.ui
+        let theme = look.theme
+        let now = now_ns()
+        let ready = look.surfaces and look.surfaces.picture_ready
+        var changed = false
+        with kit.heading(g + 1, title, note)
+            shelf_turns(ui, theme, look.fonts, shelf_ids[g])
+        with sh = shelf(ui, "backdropshelf", g)
+            shelf_ids[g] = sh.id
+            for j in 0..kinds.len
+                let kind = kinds[j] as Backdrop
+                let chosen = s.backdrop == kind
+                let card = shelf_card(ui, theme, look.fonts, "backdropcard", kind as int, chosen)
+                var box = UiBox(fill: UiFill.solid(kind == Picture ? theme.sunken : theme.page))
+                var over = UiBox()
+                if look.surfaces and kind != ThemeBackdrop and kind != Picture
+                    box = look.surfaces.backdrop_box(ui, kind, now, Vec2(BackdropWide * 0.5, BackdropTall * 0.5), BackdropBoard * 0.5)
+                    over = look.surfaces.over_board_box(ui, kind, now, BackdropBoard)
+                box.radius = Vec4.splat(6.0)
+                with ui.open(UiNode(name: "backdropview", flow: FlowStack, width: UiSize.fixed(BackdropWide), height: UiSize.fixed(BackdropTall), align: Vec2(0.5, 0.5), clip: true, box: box))
+                    if kind == Picture and ready: ui.texture_view(&look.surfaces.picture, look.surfaces.picture_uv(BackdropWide, BackdropTall), BackdropWide, BackdropTall)
+                    board_nodes(ui, look.colors, look.surfaces, PieceSource(sheet: &sheet), b, NoMove, BackdropBoard, 1)
+                    if over.material != 0: ui.leaf(UiNode(name: "backdropover", width: UiSize.fixed(BackdropBoard), height: UiSize.fixed(BackdropBoard), box: over))
+                if card.done(kind == Picture and not ready ? "Choose a PNG image" : BackdropLabels[kind as int])
+                    if kind == Picture and (s.picture.len == 0 or chosen)
+                        if not picking.is_open(): picking.pick_file(app.window.handle, "PNG image", "png", null)
+                    elif not chosen
+                        s.backdrop = kind
+                        changed = true
+        return changed
+
+    fn board_3d(app: *DesktopApp, s: *Settings, look: *BoardLook) -> bool
+        let ui = &app.ui
+        var changed = still_shelf(app, s, look, StillBoard)
+        with ui.open(UiNode(width: UiSize.fixed(kit.width + kit.inset), padding: Vec4(kit.inset, 0.0, 0.0, 0.0), gap: 8.0))
+            with kit.card(10, "Table accessories")
+                if kit.switch(11, "3D clock", "Show a clock beside the board. Choose its position in Scene settings. During a game, press the clock after each move. When disabled, moves complete automatically and player panels show the time.", ref s.desk_clock): changed = true
+                if kit.switch(12, "Player nameplates", "Show player names, evaluations and engine lines on 3D nameplates opposite the clock. When disabled, player panels appear above and below the board.", ref s.desk_cards): changed = true
+            with kit.card(20, "Arrows")
+                var lay = s.flat_arrows ? 1 : 0
+                with kit.row(21, "Arrow style", "Arcs curve above the board and cast shadows. Flat arrows appear directly on the squares.")
+                    if kit.segments("arrowlay", ["Arcs", "Flat"], ref lay)
+                        s.flat_arrows = lay == 1
+                        changed = true
+            with kit.card(30, "3D view")
+                if kit.switch(31, "Use the 3D board", "Use the 3D board for analyses, games and tournaments. You can also switch between 2D and 3D in the board toolbar.", ref s.three_d): changed = true
+                kit.words(32, "Camera controls", "Drag an empty area to rotate the view and scroll to zoom. Hold A or D to look at the nameplates or clock. Press F to flip the board.")
+        return changed
+
+    fn scene_page(app: *DesktopApp, s: *Settings, look: *BoardLook) -> bool
+        let ui = &app.ui
+        var changed = still_shelf(app, s, look, StillScene)
+        if still_shelf(app, s, look, StillClock): changed = true
+        with ui.open(UiNode(width: UiSize.fixed(kit.width + kit.inset), padding: Vec4(kit.inset, 0.0, 0.0, 0.0), gap: 8.0))
+            with kit.card(40, "Clock position")
+                var side = s.clock_left ? 0 : 1
+                with kit.row(41, "Clock side", "Place the clock to the left or right of White. Nameplates appear on the opposite side.")
+                    if kit.segments("clockside", ["Left", "Right"], ref side)
+                        s.clock_left = side == 0
+                        changed = true
+        if still_shelf(app, s, look, StillCard): changed = true
+        return changed
+
+    fn pieces_3d(app: *DesktopApp, s: *Settings, look: *BoardLook) -> bool
+        let ui = &app.ui
+        var changed = still_shelf(app, s, look, StillPieces)
+        with ui.open(UiNode(width: UiSize.fixed(kit.width + kit.inset), padding: Vec4(kit.inset, 0.0, 0.0, 0.0), gap: 8.0))
+            with kit.card(10, "Piece appearance")
+                var felt = s.felt_style as int
+                with kit.block(11, "Felt", "Choose the felt colour under each piece. Felt is visible around the base and through glass pieces.")
+                    if kit.colour_segments("felt", FeltStyleLabels[0..FeltStyleLabels.len], FeltColors[0..FeltColors.len], ref felt)
+                        s.felt_style = felt as FeltStyle
+                        changed = true
+                var way = s.knights_sideways ? 1 : 0
+                with kit.row(12, "Knight orientation", "Face knights towards the opponent or sideways, as shown in chess diagrams.")
+                    if kit.segments("knightway", ["Forward", "Sideways"], ref way)
+                        s.knights_sideways = way == 1
+                        changed = true
+            with kit.card(20, "Piece movement")
+                if kit.switch(21, "Manual piece movement", "Move pieces as on a physical board: remove captured pieces yourself, move both pieces when castling, and swap a promoted pawn for the spare queen. In analysis, a legal move counts when you let go of the piece, and an illegal one stays on the board until the position changes. In games, press your clock or Space to finish your move. An illegal move gives the engine two extra minutes, and a second one loses the game. In blitz, the first one loses.", ref s.free_moves): changed = true
+        return changed
+
+    fn still_shelf(app: *DesktopApp, s: *Settings, look: *BoardLook, k: int) -> bool
+        let ui = &app.ui
+        let headings = ["Boards", "Sets", "Scenes", "", "Clocks", "Nameplates"]
+        let notes = ["Choose wood, stone, glass or a roll-up mat. Marble and glass boards reflect the pieces.", "Choose the material for your 3D pieces.", "Choose the environment around the board. Every scene but Empty blurs the background.", "", "Choose a style for the 3D clock.", "Choose a nameplate style. Use the colour options on the right to change its surface colour."]
+        let counts = [BoardStyles, SetStyles, RoomStyles, 0, ClockStyles, PlateStyles]
+        var changed = false
+        kit.heading(k, headings[k], notes[k]).end()
+        with shelf(ui, "stillshelf", k)
+            for i in 0..counts[k]
+                let chosen = style_index(s, k) == i
+                let card = shelf_card(ui, look.theme, look.fonts, "stillcard", k * 8 + i, chosen)
+                still_view(app, s, look, k, i, StillWide, StillTall)
+                if card.done(style_label(k, i)) and not chosen
+                    if k == StillBoard: s.board_style = i as BoardStyle
+                    if k == StillPieces: s.set_style = i as SetStyle
+                    if k == StillScene: s.room_style = i as RoomStyle
+                    if k == StillClock: s.clock_style = i as ClockStyle
+                    if k == StillCard: s.plate_style = i as PlateStyle
+                    changed = true
+            if k == StillCard
+                with ui.open(UiNode(name: "platestocks", height: UiSize.grow(), align: Vec2(0.0, 0.5)))
+                    var stock = s.card_style as int
+                    if kit.colour_segments("platestock", CardStyleLabels[0..CardStyleLabels.len], CardColors[0..CardColors.len], ref stock, down: true, wide: 132.0)
+                        s.card_style = stock as CardStyle
+                        changed = true
+        return changed
+
+    fn still_view(app: *DesktopApp, s: *Settings, look: *BoardLook, k: int, i: int, wide: f32, tall: f32)
+        let ui = &app.ui
+        let slot = StillSlots[k] + i
+        let o = ui.open(UiNode(key: slot, name: "still", width: UiSize.fixed(wide), height: UiSize.fixed(tall), clip: true, box: UiBox(fill: UiFill.solid(look.theme.page), radius: Vec4.splat(6.0))))
+        let r = ui.last_rect(o.id)
+        let near = r.z > 0.0 and r.x < view.x + view.z + wide and r.x + r.z > view.x - wide and r.y < view.y + view.w + tall and r.y + r.w > view.y - tall
+        let has = near ? draw_still(app, s, look, k, i, wide, tall) : stills[slot].key != 0
+        let seen = ui.spring(o.id, 0, has ? 1.0 : 0.0, 12.0)
+        if has: ui.texture_view(&stills[slot].target, Vec4(0.0, 0.0, 1.0, 1.0), wide, tall, Color(1.0, 1.0, 1.0, seen))
+        elif near: load_card(ui, slot, wide, tall, look.theme.page, 6.0, &spin)
+        ui.close()
+
+    fn draw_still(app: *DesktopApp, s: *Settings, look: *BoardLook, k: int, i: int, wide: f32, tall: f32) -> bool
+        if not scene: return false
+        var styled = look.style
+        if k == StillBoard: styled.board = i as BoardStyle
+        if k == StillPieces: styled.set = i as SetStyle
+        if k == StillScene: styled.room = i as RoomStyle
+        if k == StillClock: styled.clock = i as ClockStyle
+        if k == StillCard: styled.plate = i as PlateStyle
+        let desk = k == StillScene or k == StillClock or k == StillCard
+        let close = k == StillPieces or k == StillQuality
+        var b: Board
+        b.load_fen(close ? CostumeFen : PreviewFen)
+        var show: BoardShow
+        show.board = &b
+        show.last = close ? NoMove : Move(from: Square(1, 7), to: Square(2, 5), kind: Quiet)
+        show.selected = Square.none
+        show.hover = Square.none
+        show.check = Square.none
+        show.slides = &slides
+        show.landed = NoMove
+        show.flat_arrows = s.flat_arrows
+        show.accent = look.theme.accent
+        show.accent_ink = look.theme.accent_ink
+        show.page = look.theme.page
+        show.fonts = look.fonts
+        if k == StillBoard and s.engine_arrows.on
+            show.arrow(Square(5, 0), Square(1, 4), look.arrow_colors[WhiteMove as int], look.engine_width)
+            show.arrow(Square(6, 7), Square(5, 5), look.arrow_colors[WhiteLine as int], look.engine_width)
+        if k == StillQuality: show.arrow(Square(4, 1), Square(4, 3), look.arrow_colors[WhiteMove as int], look.engine_width)
+        if desk
+            for (side, name, time) in [(White, s.person_name(), "4:52"), (Black, "An engine", "5:00")]
+                var c: CardText
+                c.side = side
+                c.to_move = side == White
+                c.name = name
+                c.eval = side == Black ? "+0.3" : ""
+                c.version = side == Black ? "Snail Chess 2" : ""
+                c.search = side == Black ? "d 24" : ""
+                c.pv = side == Black ? "1... e5 2. Nf3 Nc6 3. Bb5" : ""
+                c.clock = s.desk_clock or k == StillClock ? "" : time
+                if s.desk_cards or k == StillCard: scene.desk.card(side).keep(&c, side == Black ? "own side" : "")
+                scene.desk.clock.set(side, time)
+            scene.desk.clock.on = true
+            scene.desk.clock.up = White
+        var aim = Vec3(-0.15, -0.3, -0.3)
+        var yaw: f32 = 0.3
+        var pitch: f32 = 0.74
+        var back: f32 = 13.4
+        var fov: f32 = 0.6
+        if close
+            aim = Vec3(1.2, 0.4, 2.2)
+            yaw = 0.55
+            pitch = 0.32
+            back = 5.2
+            fov = k == StillQuality ? 0.42 : 0.5
+        if k == StillScene
+            aim = Vec3(0.0, -0.6, 0.3)
+            yaw = 0.0
+            pitch = 0.62
+            back = 15.6
+            fov = 0.62
+            if i != NoRoom as int
+                aim = Vec3(0.0, -0.4, -0.6)
+                pitch = 0.4
+                back = 15.0
+        var eye = aim + Vec3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)) * back
+        if k == StillScene and i == DenRoom as int
+            aim = den_look(0, false)
+            eye = den_eye(0, false)
+            fov = 0.86
+        let table = -board_depth(styled.board)
+        let way: f32 = styled.clock_left ? -1.0 : 1.0
+        if k == StillClock
+            aim = Vec3(5.75 * way, table + 0.45, 0.0)
+            eye = aim + Vec3(-2.6 * way, 2.1, 2.8)
+            fov = 0.52
+        if k == StillCard
+            aim = Vec3(-6.1 * way, table + 0.45, 0.0)
+            eye = aim + Vec3(1.4 * way, 2.6, 4.6)
+            fov = 0.55
+        let w = max((wide * app.scale) as int, 8)
+        let h = max((tall * app.scale) as int, 8)
+        let slot = StillSlots[k] + i
+        return scene.draw_still(app, &show, &stills[slot], w, h, eye, aim, fov, k == StillClock or k == StillScene and s.desk_clock, styled, k == StillQuality ? s.render_scale : 1.0, &pace, k == StillQuality ? 2 : 1)
+
+    fn graphics(app: *DesktopApp, s: *Settings, look: *BoardLook) -> bool
+        let ui = &app.ui
+        var changed = false
+        var line: [200]u8
+        with kit.card(1, "Display")
+            if kit.switch(10, "Vertical sync", "Synchronise frames with your display to prevent screen tearing. Turning this off can reduce input delay but may cause tearing during movement.", ref s.vsync): changed = true
+            let name = app.gpu.device_name()
+            let card = name.len > 0 ? name : "the graphics card"
+            let driver = str(app.gpu.driver())
+            let api = driver == "direct3d12" ? "Direct3D 12" : driver
+            kit.words(11, "Screen", format(&line, "{1.0e9 / app.refresh_ns() as f64:.0} Hz · {card} · {api}"))
+        let most = scene ? scene.most_samples(&app.gpu) : 4
+        var offered = 0
+        for n in SampleCounts
+            if n <= most: offered += 1
+        with kit.card(2, "3D board")
+            with ui.open(UiNode(name: "qualitystill", width: UiSize.grow(), padding: Vec4(16.0, 16.0, 16.0, 4.0)))
+                let wide = max(kit.width - 34.0, 1.0)
+                still_view(app, s, look, StillQuality, 0, wide, floor(wide * 0.4))
+            var preset = -1
+            for i in 0..GraphicsPresets.len
+                if s.msaa == min(PresetSamples[i], most) and s.render_scale == PresetScales[i] and s.shadow_size == PresetShadows[i] and s.anisotropy == PresetFilters[i]: preset = i as int
+            with kit.row(20, "Quality", preset < 0 ? "Custom settings. Adjust individual options below." : "Apply a preset to the graphics settings below. High is the default.")
+                if kit.segments("graphicspreset", GraphicsPresets, ref preset)
+                    s.msaa = min(PresetSamples[preset], most)
+                    s.render_scale = PresetScales[preset]
+                    s.shadow_size = PresetShadows[preset]
+                    s.anisotropy = PresetFilters[preset]
+                    changed = true
+            var aa = -1
+            for i in 0..offered
+                if s.msaa == SampleCounts[i]: aa = i as int
+            with kit.row(21, "Anti-aliasing", "Smooth jagged edges on pieces and the board. Changing this briefly reloads the 3D board.")
+                if kit.segments("antialias", SampleWords[0..offered], ref aa)
+                    s.msaa = SampleCounts[aa]
+                    changed = true
+            var sc = -1
+            for i in 0..RenderScales.len
+                if s.render_scale == RenderScales[i]: sc = i as int
+            with kit.row(22, "Render scale", "Higher looks sharper, lower runs faster.")
+                if kit.segments("renderscale", ScaleWords, ref sc)
+                    s.render_scale = RenderScales[sc]
+                    changed = true
+            var sh = -1
+            for i in 0..ShadowSizes.len
+                if s.shadow_size == ShadowSizes[i]: sh = i as int
+            with kit.row(23, "Shadows", "Higher settings give pieces and arrow arcs sharper shadows and use more graphics memory.")
+                if kit.segments("shadows", ShadowWords, ref sh)
+                    s.shadow_size = ShadowSizes[sh]
+                    changed = true
+            var fi = -1
+            for i in 0..FilterSteps.len
+                if s.anisotropy == FilterSteps[i]: fi = i as int
+            with kit.row(24, "Texture filtering", "Keep board lettering and nameplate text sharp when viewed at an angle.")
+                if kit.segments("filtering", FilterWords, ref fi)
+                    s.anisotropy = FilterSteps[fi]
+                    changed = true
+        return changed
+
+    fn effect_choices(s: *Settings, look: *BoardLook) -> bool
+        let ui = kit.ui
+        var changed = false
+        for g in 0..GuiEffectGroups.len
+            let first = GuiEffectGroupStarts[g]
+            let past = g + 1 < GuiEffectGroups.len ? GuiEffectGroupStarts[g + 1] : GuiEffectCount
+            with kit.card(1 + g as int, GuiEffectGroups[g])
+                for i in first..past
+                    let c = &s.effects[i]
+                    with kit.row(10 + i as int, GuiEffectLabels[i], GuiEffectNotes[i])
+                        with ui.open(UiNode(name: "effectcontrols", flow: FlowRow, gap: 16.0, align: Vec2(0.0, 0.5)))
+                            if c.on and ui.slider("", ref c.intensity, 0.1, 1.0, 0.05, UiNode(name: "intensity", width: UiSize.fixed(160.0))): changed = true
+                            if ui.toggle("", ref c.on, UiNode(name: "kitswitch", width: UiSize.fixed(40.0))): changed = true
+                    if i == StreakMarks as int and look.effects and look.effects.on(StreakMarks)
+                        with kit.block(30, "Preview", "")
+                            sample_row(ui, look)
+        return changed
+
+    fn sample_row(ui: *UiCanvas, look: *BoardLook)
+        let theme = look.theme
+        let fonts = look.fonts
+        for (k, place, name, score, mark) in [(0, "1", "Example engine", "6.0 / 7", 1), (1, "8", "Another engine", "1.0 / 7", -1)]
+            let tint = mark > 0 ? theme.accent : theme.muted
+            let box = look.effects ? look.effects.mark_box(mark, 0, 2 + k as u64, tint.with_alpha(theme.dark ? 0.16 : 0.11), 4.0, true) : UiBox()
+            with ui.open(UiNode(key: k, flow: FlowRow, width: UiSize.fixed(min(420.0, kit.width - 36.0)), height: UiSize.fixed(44.0), gap: 12.0, align: Vec2(0.0, 0.5), padding: Vec4(4.0, 0.0, 12.0, 0.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(4.0))))
+                with ui.open(UiNode(width: UiSize.fixed(36.0), height: UiSize.fixed(36.0), align: Vec2(0.5, 0.5), box: box))
+                    ui.label(place, UiTextStyle(face: fonts.strong, size: 15.0, color: tint))
+                ui.label(name, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow()))
+                ui.label(score, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink))
+
+    fn settings(app: *DesktopApp, s: *Settings, look: *BoardLook, data: *DataFolder, token: *GithubToken) -> bool
+        let ui = &app.ui
+        let theme = look.theme
+        let note = muted_style(look)
+        var changed = false
+        var line: [700]u8
+        with kit.card(1, "You")
+            with kit.row(10, "Your name", "Your name in games against engines. Leave blank to use your Windows account name.")
+                if ui.text_field("profilename", &name, s.person_name(), UiNode(width: UiSize.fixed(KitControl)))
+                    set_text(&s.name, trim(name.text()))
+                    changed = true
+        with kit.card(2, "New analyses")
+            if kit.count(20, "Threads", "Default thread count for new analyses. Engine profile settings take priority.", ref s.threads, 1, max(cpu_count(), 1)): changed = true
+            with kit.row(21, "Hash", "Hash memory in MB. Set to 0 to use the engine default. Engine profile settings take priority.")
+                if ui.text_field("profilehash", &hash, "0", UiNode(width: UiSize.fixed(100.0)))
+                    let (n, ok) = uci_number(hash.text())
+                    if ok and n >= 0
+                        s.hash_mb = min(n, 1048576) as int
+                        changed = true
+            if kit.count(22, "Analysis updates per second", "How often engine analysis updates on screen. Higher values show more frequent updates and use more resources.", ref s.analysis_hz, 1, 30): changed = true
+        with kit.card(3, "Startup")
+            var start = s.start_with as int
+            if kit.choice(30, "On startup", "", ref start, StartChoices)
+                s.start_with = start as StartWith
+                changed = true
+        with kit.card(6, "Sound")
+            if kit.switch(60, "Sounds", "Play sounds for moves, captures, castling and the 3D clock.", ref s.sounds): changed = true
+            if s.sounds
+                if kit.slide(61, "Volume", "Adjust the volume of all sounds.", ref s.volume, 0.0, 1.0, 0.05): changed = true
+                for k in 0..SoundCount
+                    with kit.row(62 + k as int, SoundLabels[k], "")
+                        with ui.open(UiNode(name: "soundcontrols", flow: FlowRow, gap: 12.0, align: Vec2(0.0, 0.5)))
+                            var on = not s.sound_muted[k]
+                            if ui.toggle("", ref on, UiNode(name: "soundon", width: UiSize.fixed(40.0)))
+                                s.sound_muted[k] = not on
+                                changed = true
+                            if ui.slider("", ref s.sound_levels[k], 0.0, 1.0, 0.05, UiNode(name: "soundlevel", width: UiSize.fixed(160.0))): changed = true
+                            if ui.button("Play") and sounds and on
+                                sounds.volume = s.volume
+                                sounds.levels[k] = s.sound_levels[k]
+                                sounds.muted[k] = false
+                                sounds.hear(k as int)
+        with kit.card(4, "Engines")
+            if library
+                let id = library.review_id(s.review_engine)
+                let entry = library.find(id)
+                with kit.row(41, "Game review engine", "Choose the engine used to review moves and build evaluation graphs. Snail Chess is the default.")
+                    if engine_choice_button(ui, look, "settingsreview", 0, entry ? entry.display_name() : "No engine", "", review_picker.shown, UiNode(width: UiSize.fixed(KitControl))): review_picker.open()
+                if review_picker.draw(ui, look, library, id, -1)
+                    s.review_engine = review_picker.picked_engine
+                    changed = true
+            if kit.choice(40, "Engine process priority", "Lower priorities give other applications more CPU time. Engines started after the change use the new priority.", ref s.priority, PriorityChoices): changed = true
+        with kit.card(5, "Your data")
+            with kit.row(50, "Data folder", data.root_text())
+                if ui.button("Open"): SDL_OpenURL(format(&line, "file:///{data.root_text()}").ptr as cstr)
+            with kit.row(51, "GitHub token", "Optional. A token raises the request limit when checking engine releases. It is sent only to the GitHub API and hidden after saving.")
+                with ui.open(UiNode(name: "tokencontrols", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    if token.saved()
+                        ui.label("Saved and encrypted for this Windows account", note)
+                        if ui.button("Remove"): token.remove()
+                    else
+                        ui.text_field("profiletoken", &token_field, "Paste a token", UiNode(width: UiSize.fixed(180.0)))
+                        if ui.button("Save") and token.save(trim(token_field.text())): token_field.set("")
+        return changed
+
+    fn cloud_page(s: *Settings, look: *BoardLook) -> bool
+        let ui = kit.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        var changed = false
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        with kit.card(80, "Cloud evaluations")
+            if kit.switch(81, "Show cloud evaluations", "Show evaluations from this computer and the cloud beside the analysis. The cloud button in the analysis bar does the same. Only the position shown is sent.", ref s.database_panel): changed = true
+            with kit.row(82, "Server", "The address of a Snail Chess Gui Cloud Open Database. Leave it blank to keep everything on this computer.")
+                if ui.text_field("cloudaddress", &cloud_field, "https://", UiNode(width: UiSize.fixed(KitControl)))
+                    set_text(&s.cloud_address, trim(cloud_field.text()))
+                    changed = true
+        let c = cloud_db
+        let r = eval_recorder
+        let counts = r ? r.counts() : EvalTally()
+        var a: [48]u8
+        var b: [48]u8
+        var d: [48]u8
+        with kit.card(85, "Share your analysis")
+            with ui.open(UiNode(name: "cloudtiles", flow: FlowRow, width: UiSize.grow(), padding: Vec4(18.0, 16.0, 18.0, 4.0), gap: 10.0))
+                stat_tile(ui, fonts, theme, "Evaluated positions", group_digits(counts.positions, &a), "on this computer", theme.ink)
+                stat_tile(ui, fonts, theme, "Lines shared", group_digits(c ? c.lines_shared : 0, &b), c and c.positions_shared > 0 ? format(&d, "{c.positions_shared} positions") : "with the cloud", theme.ink)
+                var e: [48]u8
+                stat_tile(ui, fonts, theme, "Ready to share", group_digits(counts.unshared, &e), "depth 12 and deeper", counts.unshared > 0 ? theme.accent : theme.ink)
+            if not s.cloud_share
+                with kit.row(86, "Contribute evaluations", "Your engines' lines at depth 12 and deeper go to the cloud, those already on this computer too, so everyone can compare them. Only positions, engine names and their lines are sent, never your games or name. The server checks some shared lines by analyzing them again.")
+                    if not c or not c.on(): ui.label("Set a server first", note)
+                    elif ui.button("Opt in", true)
+                        s.cloud_share = true
+                        changed = true
+            else
+                with kit.row(87, "Sharing is on", cloud_state(c))
+                    if ui.button("Stop sharing")
+                        s.cloud_share = false
+                        changed = true
+        return changed
+
+    fn cloud_state(c: *CloudDb) -> str
+        if not c or not c.on(): return "Set a server to share with."
+        if c.refused: return "The server revoked this computer's key because shared lines failed its checks, so nothing more is sent."
+        if not c.has_key(): return "A key is fetched from the server with the first lines sent."
+        if c.offers.len > 0 or c.asks.len > 0: return "Lines are being sent. New engine lines follow as your engines find them."
+        return "Everything is shared. New engine lines go as your engines find them."
+
+    fn release(gpu: *Gpu)
+        icons.release()
+        spin.free_all()
+        sheet.release(gpu)
+        catalog.release(gpu)
+        for k in 0..StillCount: stills[k].release(gpu)
+        review_picker.release()
+
+fn backdrop_swatches(ui: *UiCanvas, theme: *GuiTheme, key: int, ref chosen: u32) -> bool
+    var changed = false
+    with ui.open(UiNode(key: key, name: "backdropswatches", flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5)))
+        for i in 0..BackdropSwatches.len
+            let c = BackdropSwatches[i] as u32
+            let on = chosen == c
+            let o = ui.open(UiNode(key: i as int, name: "backdropswatch", width: UiSize.fixed(24.0), height: UiSize.fixed(24.0), hit: true, box: UiBox(fill: UiFill.solid(Color.hex(c)), radius: Vec4.splat(12.0), border: on ? 2.0 : 1.0, border_color: on ? theme.accent : theme.line)))
+            let h = ui.interact(o.id)
+            ui.close()
+            if h.clicked and not on
+                chosen = c
+                changed = true
+    return changed
+
+fn target_swatches(ui: *UiCanvas, look: *BoardLook, ref chosen: u32) -> bool
+    let theme = look.theme
+    var changed = false
+    with ui.open(UiNode(name: "targetswatches", flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5)))
+        let a = ui.open(UiNode(name: "targetaccent", flow: FlowRow, height: UiSize.fixed(24.0), padding: Vec4(10.0, 0.0, 10.0, 0.0), align: Vec2(0.5, 0.5), hit: true, box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(12.0), border: chosen == 0 ? 2.0 : 1.0, border_color: chosen == 0 ? theme.ink : theme.line)))
+        let ha = ui.interact(a.id)
+        ui.label("Accent", UiTextStyle(face: look.fonts.strong, size: 11.5, color: theme.accent_ink))
+        ui.close()
+        if ha.clicked and chosen != 0
+            chosen = 0
+            changed = true
+        for i in 0..ArrowSwatches.len
+            let c = ArrowSwatches[i] as u32
+            let on = chosen == c
+            let o = ui.open(UiNode(key: i as int, name: "targetswatch", width: UiSize.fixed(22.0), height: UiSize.fixed(22.0), hit: true, box: UiBox(fill: UiFill.solid(Color.hex(c)), radius: Vec4.splat(11.0), border: on ? 2.0 : 1.0, border_color: on ? theme.ink : theme.line)))
+            let h = ui.interact(o.id)
+            ui.close()
+            if h.clicked and not on
+                chosen = c
+                changed = true
+    return changed
+
+fn muted_style(look: *BoardLook) -> UiTextStyle
+    return UiTextStyle(face: look.fonts.text, size: 12.5, color: look.theme.muted)
+
+fn style_index(s: *Settings, k: int) -> int
+    if k == StillBoard: return s.board_style as int
+    if k == StillPieces: return s.set_style as int
+    if k == StillScene: return s.room_style as int
+    if k == StillClock: return s.clock_style as int
+    if k == StillCard: return s.plate_style as int
+    return 0
+
+fn style_label(k: int, i: int) -> str
+    if k == StillBoard: return BoardStyleLabels[i]
+    if k == StillPieces: return SetStyleLabels[i]
+    if k == StillClock: return ClockStyleLabels[i]
+    if k == StillCard: return PlateStyleLabels[i]
+    return RoomStyleLabels[i]

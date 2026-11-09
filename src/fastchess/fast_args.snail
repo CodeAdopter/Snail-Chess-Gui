@@ -1,0 +1,155 @@
+use engine/core/text
+
+struct FastArgs
+    sprt: bool
+    elo0: f64
+    elo1: f64
+    alpha: f64 = 0.05
+    beta: f64 = 0.05
+    concurrency: int = 1
+    rounds: int
+    tc: [48]u8
+    tc_len: int
+    first: [48]u8
+    first_len: int
+    second: [48]u8
+    second_len: int
+    engines: int
+
+    fn read(typed: str)
+        var words: [512]str
+        let n = min(fast_words(typed, words[0..512]), 512)
+        var option = ""
+        for i in 0..n
+            let w = fast_unquoted(words[i])
+            if w.len > 1 and w[0] == '-' and not (w[1] >= '0' and w[1] <= '9')
+                option = w
+                if i + 1 < n
+                    if w == "-concurrency": concurrency = max(parse_int(words[i + 1]) as int, 1)
+                    if w == "-rounds": rounds = parse_int(words[i + 1]) as int
+                if w == "-sprt": sprt = true
+                if w == "-engine": engines += 1
+                continue
+            let eq = find(w, "=")
+            if eq <= 0: continue
+            let key = w[0..eq]
+            let value = fast_unquoted(w[eq + 1..w.len])
+            if option == "-sprt"
+                if key == "elo0": elo0 = parse_float(value)
+                if key == "elo1": elo1 = parse_float(value)
+                if key == "alpha": alpha = parse_float(value)
+                if key == "beta": beta = parse_float(value)
+            if option == "-engine" and key == "name"
+                let n = min(value.len, 47) as int
+                for k in 0..n
+                    if engines == 1: first[k] = value[k]
+                    if engines == 2: second[k] = value[k]
+                if engines == 1: first_len = n
+                if engines == 2: second_len = n
+            if (option == "-each" or option == "-engine") and (key == "tc" or key == "st") and tc_len == 0
+                tc_len = min(value.len, 47) as int
+                for k in 0..tc_len
+                    tc[k] = value[k]
+
+    fn tc_text() -> str
+        return str(tc[0..tc_len])
+
+    fn first_name() -> str
+        return str(first[0..first_len])
+
+    fn second_name() -> str
+        return str(second[0..second_len])
+
+    fn lower() -> f64
+        return log(beta / (1.0 - alpha))
+
+    fn upper() -> f64
+        return log((1.0 - beta) / alpha)
+
+fn fast_unquoted(w: str) -> str
+    if w.len >= 2 and w[0] == '"' and w[w.len - 1] == '"': return w[1..w.len - 1]
+    return w
+
+fn fast_has_word(typed: str, word: str) -> bool
+    var at = 0
+    while at < typed.len
+        while at < typed.len and typed[at] == ' '
+            at += 1
+        let from = at
+        while at < typed.len and typed[at] != ' '
+            at += 1
+        if typed[from..at] == word: return true
+    return false
+
+fn fast_option_file(typed: str, option: str, cwd: str, buf: *[1100]u8) -> str
+    var words: [256]str
+    let n = min(fast_words(typed, words[0..256]), 256)
+    for i in 0..n
+        if words[i] != option: continue
+        var k = i + 1
+        while k < n and not (words[k].len > 1 and words[k][0] == '-')
+            var w = words[k]
+            if starts_with(w, "\"") and ends_with(w, "\"") and w.len >= 2: w = w[1..w.len - 1]
+            if starts_with(w, "file=")
+                var f = w[5..w.len]
+                if starts_with(f, "\"") and ends_with(f, "\"") and f.len >= 2: f = f[1..f.len - 1]
+                let whole = f.len > 1 and (f[1] == ':' or f[0] == '\\' or f[0] == '/')
+                return whole ? format(buf, "{f}") : format(buf, "{cwd}\\{f}")
+            k += 1
+        return format(buf, "")
+    return format(buf, "")
+
+struct FastTyped
+    label: [64]u8
+    label_len: int
+    cmd: [700]u8
+    cmd_len: int
+
+    fn label_text() -> str
+        return str(label[0..label_len])
+
+    fn cmd_text() -> str
+        return str(cmd[0..cmd_len])
+
+fn fast_typed_engines(typed: str, cwd: str, out: *[..]FastTyped)
+    var words: [512]str
+    let n = min(fast_words(typed, words[0..512]), 512)
+    var in_engine = false
+    for i in 0..n
+        let w = fast_unquoted(words[i])
+        if w.len > 1 and w[0] == '-' and not (w[1] >= '0' and w[1] <= '9')
+            in_engine = w == "-engine"
+            if in_engine: out.push(FastTyped())
+            continue
+        if not in_engine or out.len == 0: continue
+        let eq = find(w, "=")
+        if eq <= 0: continue
+        let key = w[0..eq]
+        let value = fast_unquoted(w[eq + 1..w.len])
+        let t = &out[out.len - 1]
+        if key == "name"
+            t.label_len = min(value.len, 63) as int
+            for k in 0..t.label_len
+                t.label[k] = value[k]
+        if key == "cmd"
+            var whole: [1400]u8
+            let f = value.len > 1 and (value[1] == ':' or value[0] == '\\' or value[0] == '/') ? value : format(&whole, "{cwd}\\{value}")
+            t.cmd_len = min(f.len, 699) as int
+            for k in 0..t.cmd_len
+                t.cmd[k] = f[k]
+
+fn fast_words(typed: str, words: []str) -> int
+    var n = 0
+    var at = 0
+    while at < typed.len
+        while at < typed.len and typed[at] == ' '
+            at += 1
+        if at >= typed.len: break
+        let from = at
+        var quoted = false
+        while at < typed.len and (quoted or typed[at] != ' ')
+            if typed[at] == '"': quoted = not quoted
+            at += 1
+        if n < words.len: words[n] = typed[from..at]
+        n += 1
+    return n as int

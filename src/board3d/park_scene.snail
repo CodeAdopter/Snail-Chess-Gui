@@ -1,0 +1,142 @@
+use engine/render/renderer
+use src/board3d/park_shapes
+use src/board3d/scene_lens
+
+struct ParkLook
+    materials: [ParkParts]int
+    lens: SceneLens
+
+    fn init(r: *Renderer)
+        materials[LawnPart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "ground_ps"), CullBack)
+        materials[BladePart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "blade_ps"), CullNone)
+        materials[ConcretePart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "concrete_ps"), CullBack)
+        materials[BarkPart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "bark_ps"), CullBack)
+        materials[LeafPart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "foliage_ps"), CullNone)
+        materials[CanopyPart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "leaf_ps"), CullNone)
+        materials[LitterPart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "fallen_ps"), CullNone)
+        materials[CastIronPart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "iron_ps"), CullBack)
+        materials[SlatPart] = park_material(r, shader("shaders/room3d.hlsl", fragment: "woodwork_ps"), CullBack)
+        materials[WoodsPart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "woods_ps"), CullNone)
+        materials[SkyPart] = park_material(r, shader("shaders/park3d.hlsl", fragment: "sky_ps"), CullNone)
+        r.materials[materials[SkyPart]].no_fog = true
+        r.materials[materials[ConcretePart]].values[0] = Vec4(0.58, 0.56, 0.52, ParkGround)
+        r.materials[materials[CastIronPart]].values[0] = Vec4(0.1, 0.15, 0.12, 0.0)
+        r.materials[materials[SlatPart]].values[0] = Vec4(0.55, 0.47, 0.38, 5.0)
+        r.materials[materials[SlatPart]].values[1] = Vec4(0.75, 0.6, 0.05, 0.4)
+        r.materials[materials[WoodsPart]].values[0] = Vec4(0.0, 3.0, 0.0, 0.0)
+        r.materials[materials[SkyPart]].values[0] = Vec4(1.7, 0.0, 0.0, 0.0)
+        lens.init(r)
+
+    fn lights(r: *Renderer, shadow: int)
+        let sun = sun_way()
+        r.exposure = 0.6
+        r.lighting.sun_direction = Vec4.of(sun * -1.0, 0.0)
+        r.lighting.sun_color = Vec4(3.0, 2.5, 1.9, 0.0)
+        r.lighting.sky_color = Vec4(0.34, 0.44, 0.6, 0.0)
+        r.lighting.ground_color = Vec4(0.13, 0.15, 0.07, 0.0)
+        r.lighting.lamp_room = Vec4(0.0, 0.0, 0.0, 0.0)
+        r.lighting.sun_through = Vec4(6.0, 1.0, 0.5, 0.3)
+        let origin = Vec3(0.0, 0.0, 0.0)
+        shadow_from(&r.shadows[0], sun * 14.0, origin, 8.5, 8.5, 30.0, shadow, 2.0, 0.012, true)
+        shadow_from(&r.shadows[1], sun * (14.0 * Metre), origin, 6.5 * Metre, 6.5 * Metre, 30.0 * Metre, 2048, 2.5, 0.15, true)
+        shadow_from(&r.shadows[2], sun * (45.0 * Metre), origin, 28.0 * Metre, 28.0 * Metre, 95.0 * Metre, 2048, 1.5, 0.6, false)
+        r.fog = SceneFog(Exp2Fog, Color(0.66, 0.7, 0.74, 1.0), 0.0, 0.0, 0.0004)
+        r.sky = Color(0.66, 0.68, 0.7, 1.0)
+
+struct ParkScene
+    built: bool
+    building: int
+    builder: u64
+    uploaded: int
+    staged: bool
+    build: ParkBuild
+    shapes: [ParkParts]GpuMesh
+    made: [ParkParts]bool
+    parts: [ParkParts]int
+    look: ParkLook
+
+    fn parts_ready() -> bool
+        if built: return true
+        if building == 0
+            building = 1
+            builder = spawn(park_builder, self)
+        return atomic_load(&building) >= 2
+
+    fn build_parts()
+        build.init()
+        build.build()
+        build.scale_all()
+
+    fn carve(gpu: *Gpu, ns: i64 = 0) -> bool
+        if built: return true
+        if building == 0: build_parts()
+        if building == 1 or building == 2: join(builder)
+        building = 3
+        let began = now_ns()
+        while uploaded < ParkParts
+            if ns > 0 and now_ns() - began > ns: return false
+            let k = uploaded
+            made[k] = build.parts[k].vertex_count > 0
+            if made[k]: shapes[k] = gpu.upload_mesh(&build.parts[k])
+            uploaded += 1
+        built = true
+        building = 0
+        uploaded = 0
+        build.free_all()
+        return true
+
+    fn stage(r: *Renderer)
+        if staged: return
+        staged = true
+        let casting = [0, 0, 4, 6, 4, 2, 0, 4, 4, 0, 0]
+        for k in 0..ParkParts
+            if not made[k]: continue
+            parts[k] = r.add_mesh(&shapes[k])
+            r.casts[parts[k]] = casting[k] as u8
+        look.init(r)
+
+    fn unstage()
+        staged = false
+
+    fn lens_on(r: *Renderer, on: bool)
+        if staged: look.lens.show(r, on)
+
+    fn draw(r: *Renderer, camera: *Camera, at: Vec3, t: f32, height: f32, shadow: int, lift: f32, near_only: bool = false, unseen: int = -1)
+        look.lights(r, shadow)
+        look.lens.focus(camera, at, height, t)
+        let white = Color.hex(0xFFFFFF)
+        let raise = Mat4.translation(Vec3(0.0, lift, 0.0))
+        let foot = oak_at() * Metre
+        let sway = Quat.axis_angle(Vec3(1.0, 0.0, 0.6).normalized, 0.006 * sin(t * 0.8) + 0.003 * sin(t * 2.3 + 1.0))
+        let swayed = raise * Mat4.translation(foot) * Mat4.rotation(sway) * Mat4.translation(foot * -1.0)
+        for k in 0..ParkParts
+            if not made[k] or near_only and k != ConcretePart: continue
+            let hidden = k == ConcretePart and not near_only and unseen >= 0
+            r.draw_with(hidden ? unseen : look.materials[k], parts[k], k == CanopyPart ? swayed : raise, white)
+
+    fn release(gpu: *Gpu)
+        if building == 1 or building == 2: join(builder)
+        if building == 3
+            for k in 0..uploaded
+                if made[k]: gpu.release_mesh(&shapes[k])
+                made[k] = false
+            uploaded = 0
+        if building != 0
+            building = 0
+            build.free_all()
+        if not built: return
+        for k in 0..ParkParts
+            if made[k]: gpu.release_mesh(&shapes[k])
+            made[k] = false
+        built = false
+        staged = false
+
+fn park_material(r: *Renderer, fragment: ShaderCode, cull: Cull) -> int
+    var desc = MaterialDesc.three(fragment)
+    desc.vertex = shader("shaders/park3d.hlsl", vertex: "wood_vs")
+    desc.cull = cull
+    return r.add_material_desc(&desc)
+
+fn park_builder(r: *ParkScene)
+    r.build_parts()
+    atomic_store(&r.building, 2)

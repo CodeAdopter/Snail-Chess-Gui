@@ -1,0 +1,7 @@
+use src/app/session
+use src/app/stress
+use src/app/fast_glue
+
+fn main()
+    var gui: GuiApp
+    gui.run()

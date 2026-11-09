@@ -1,0 +1,233 @@
+use src/views/engine_picker
+use src/views/pv_lines
+
+const PvRowHeight: f32 = 24.0
+const PvRowGap: f32 = 2.0
+const HeadRowHeight: f32 = 34.0
+const EngineRowHeight: f32 = 30.0
+const PanelTop: f32 = 8.0
+const PanelFoot: f32 = 10.0
+const PanelGap: f32 = 4.0
+const PanelSides: f32 = 24.0
+const LeftColumn: f32 = 136.0
+const ControlHeight: f32 = 28.0
+const PvEvalWidth: f32 = 58.0
+const ThreadsPopWidth: f32 = 232.0
+const ThreadChoices = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128]
+
+struct AnalysisPanel
+    pv: PvLines
+    made_for: u64
+    made_lines: int
+    thread_choice: int = -1
+    threads_open: bool
+    picker: EnginePicker
+
+    fn height(ui: *UiCanvas, a: *EngineAnalysis, choices: *EngineChoices) -> f32
+        let entry = choices.lib ? choices.lib.find(a.engine_id) : null
+        var rows = 1
+        if not a.on: rows = kept_rows(a)
+        elif a.engine.state == EngineFailed: rows = 3
+        elif engine_known(a): rows = a.wanted_lines()
+        elif offers(a, entry, "MultiPV"): rows = clamp(a.multipv, 1, MaxAnalysisLines)
+        var want = closed_height()
+        if rows > 0: want = PanelTop + HeadRowHeight + PanelGap + EngineRowHeight + PanelGap + rows as f32 * (PvRowHeight + PvRowGap) - PvRowGap + PanelFoot
+        return ui.spring(id_hash("analysisheight"), 0, want, 18.0)
+
+    fn kept_rows(a: *EngineAnalysis) -> int
+        if not a.lines_fresh(): return 0
+        return min(made_lines, a.wanted_lines())
+
+    fn closed_height() -> f32
+        return PanelTop + HeadRowHeight + PanelGap + EngineRowHeight + PanelFoot
+
+    fn draw(app: *DesktopApp, look: *BoardLook, a: *EngineAnalysis, choices: *EngineChoices, x: f32, y: f32, w: f32, h: f32, flipped: bool) -> (int, int)
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        var clicked_line = -1
+        var clicked_ply = -1
+        if w < 1.0 or h < 1.0: return clicked_line, clicked_ply
+        if a.version != made_for: make_words(a)
+        pv.begin()
+        let entry = choices.lib ? choices.lib.find(a.engine_id) : null
+        with ui.open(UiNode(name: "analysis", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(14.0, PanelTop, 10.0, PanelFoot), gap: PanelGap, clip: true))
+            header(app, look, a, entry)
+            engine_row(ui, look, a, entry, w)
+            let room = h - PanelTop - PanelFoot - HeadRowHeight - EngineRowHeight - PanelGap * 2.0
+            let fit = max(floor((room + PvRowGap) / (PvRowHeight + PvRowGap)) as int, 0)
+            let e = &a.engine
+            let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+            with ui.open(UiNode(name: "lines", width: UiSize.grow(), gap: PvRowGap))
+                if a.on and e.state == EngineFailed
+                    ui.paragraph(e.failure_text(), UiTextStyle(color: theme.ink, ..note))
+                    ui.paragraph("Turn the engine off and on to retry.", note)
+                elif a.on and not a.lines_fresh(): ui.paragraph(e.state == EngineStarting or e.state == EngineReadying ? "Starting engine..." : "Analyzing...", note)
+                elif a.lines_fresh()
+                    for line in 0..min(min(made_lines, fit), a.wanted_lines())
+                        let (l, p) = line_row(app, look, a, line)
+                        if l >= 0
+                            clicked_line = l
+                            clicked_ply = p
+        pv.hover_board(app, look, &a.searching, a.lines[0..MaxAnalysisLines], flipped)
+        if picker.draw(ui, look, choices.lib, a.engine_id, a.profile_id)
+            let e = choices.lib.find(picker.picked_engine)
+            a.switch_engine(picker.picked_engine)
+            a.switch_profile(picker.picked_profile, e and picker.picked_profile != 0 ? e.profile(picker.picked_profile) : null)
+            thread_choice = -1
+        return clicked_line, clicked_ply
+
+    fn header(app: *DesktopApp, look: *BoardLook, a: *EngineAnalysis, entry: *EngineEntry)
+        let ui = &app.ui
+        let theme = look.theme
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(HeadRowHeight), gap: 8.0, align: Vec2(0.0, 0.5)))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.fixed(LeftColumn), gap: 10.0, align: Vec2(0.0, 0.5)))
+                ui.toggle("", ref a.on, UiNode(width: UiSize.fixed(40.0)))
+                var eval: [24]u8
+                var shown = "–"
+                if a.lines_fresh(): shown = score_text(a.lines[0].kind, a.lines[0].score, a.searching.side, &eval)
+                ui.label(shown, UiTextStyle(face: look.fonts.strong, size: 19.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+            ui.spacer()
+            if offers(a, entry, "Threads"): threads_chip(app, look, a)
+            if offers(a, entry, "MultiPV"): lines_stepper(ui, look, a)
+
+    fn threads_chip(app: *DesktopApp, look: *BoardLook, a: *EngineAnalysis)
+        let ui = &app.ui
+        let t = &ui.theme
+        let muted = look.theme.muted
+        var count = 0
+        let cores = max(cpu_count(), 1)
+        for c in ThreadChoices
+            if c <= cores: count += 1
+        if thread_choice < 0
+            thread_choice = 0
+            for i in 0..count
+                if ThreadChoices[i] <= a.threads: thread_choice = i as int
+        let o = ui.open(UiNode(name: "threads", flow: FlowRow, height: UiSize.fixed(ControlHeight), padding: Vec4(8.0, 0.0, 10.0, 0.0), gap: 6.0, align: Vec2(0.0, 0.5), hit: true, focusable: true))
+        let h = ui.interact(o.id)
+        if h.clicked: threads_open = not threads_open
+        let hover = ui.spring(o.id, 0, h.hovered or threads_open ? 1.0 : 0.0)
+        let ring = ui.ring_of(o.id)
+        ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(t.surface.lerp(t.raised, hover)), radius: Vec4.splat(t.radius), border: 1.0 + ring, border_color: t.line.lerp(t.focus, ring))
+        with ui.open(UiNode(flow: FlowStack, width: UiSize.fixed(13.0), height: UiSize.fixed(13.0), align: Vec2(0.5, 0.5), box: UiBox(radius: Vec4.splat(3.0), border: 1.5, border_color: muted)))
+            ui.leaf(UiNode(width: UiSize.fixed(5.0), height: UiSize.fixed(5.0), box: UiBox(fill: UiFill.solid(muted), radius: Vec4.splat(1.0))))
+        var n: [16]u8
+        ui.label(format(&n, "{a.threads}"), UiTextStyle(face: look.fonts.strong, size: 12.5, color: look.theme.ink))
+        if not threads_open: ui.tooltip("Threads")
+        let opened = ui.spring(o.id, 1, threads_open ? 1.0 : 0.0, 24.0)
+        var inside = h.hovered
+        if threads_open
+            let pop = ui.open(UiNode(name: "threadspop", floating: true, anchor: Vec2(1.0, 1.0), pivot: Vec2(1.0, 0.0), offset: Vec2(0.0, 6.0 + 6.0 * (1.0 - opened)), layer: 6, width: UiSize.fixed(ThreadsPopWidth), padding: Vec4(14.0, 10.0, 14.0, 12.0), gap: 6.0, hit: true, box: UiBox(fill: UiFill.solid(t.raised.with_alpha(opened)), radius: Vec4.splat(t.radius), border: 1.0, border_color: t.line, shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.18 * opened), 0.0, 8.0, 22.0, 0.0, false))))
+            var line: [40]u8
+            let small = UiTextStyle(face: look.fonts.text, size: 12.0, color: muted)
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), align: Vec2(0.0, 0.5)))
+                ui.label("Threads", UiTextStyle(face: look.fonts.strong, size: 12.5, color: look.theme.ink), UiNode(width: UiSize.grow()))
+                ui.label(format(&line, "{a.threads} of {cores}"), small)
+            var v = thread_choice as f32
+            if ui.slider_track("threadslider", ref v, 0.0, max(count - 1, 0) as f32, 1.0)
+                thread_choice = v as int
+                a.threads = ThreadChoices[thread_choice]
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow()))
+                ui.label("1", small, UiNode(width: UiSize.grow()))
+                ui.label(format(&line, "{ThreadChoices[max(count - 1, 0)]}"), small)
+            ui.close()
+            let r = ui.memory(pop.id).rect
+            let p = ui.pointer_local()
+            if p.x >= r.x and p.x < r.x + r.z and p.y >= r.y and p.y < r.y + r.w: inside = true
+        ui.close()
+        if threads_open and ((ui.pointer_pressed and not inside) or ui.input.pressed(Escape)): threads_open = false
+
+    fn lines_stepper(ui: *UiCanvas, look: *BoardLook, a: *EngineAnalysis)
+        with ui.open(UiNode(name: "multipv", flow: FlowRow, gap: 2.0, align: Vec2(0.0, 0.5)))
+            if ui.small_button("fewer", MarkMinus, ControlHeight) and a.multipv > 1: a.multipv -= 1
+            var n: [16]u8
+            ui.label(format(&n, "{a.multipv}"), UiTextStyle(face: look.fonts.strong, size: 12.5, color: look.theme.ink), UiNode(width: UiSize.fixed(22.0), align: Vec2(0.5, 0.5)))
+            if ui.small_button("more", MarkPlus, ControlHeight) and a.multipv < MaxAnalysisLines: a.multipv += 1
+
+    fn engine_row(ui: *UiCanvas, look: *BoardLook, a: *EngineAnalysis, entry: *EngineEntry, w: f32)
+        let theme = look.theme
+        let small = UiTextStyle(face: look.fonts.text, size: 12.0, color: theme.muted)
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(EngineRowHeight), gap: 10.0, align: Vec2(0.0, 0.5)))
+            engine_button(ui, look, a, entry)
+            ui.spacer()
+            if a.lines_fresh()
+                var d: [32]u8
+                var s: [32]u8
+                var hash: [32]u8
+                let l = &a.lines[0]
+                let depth = l.seldepth > 0 ? format(&d, "depth {l.depth}/{l.seldepth}") : format(&d, "depth {l.depth}")
+                let speed = speed_text(a.nps, &s)
+                let full = a.hashfull >= 0 ? format(&hash, "hash {a.hashfull / 10}%") : ""
+                var room = w - PanelSides - LeftColumn - 10.0
+                for part in [depth, speed, full]
+                    if part.len == 0: continue
+                    let need = ui.measure(part, small).x
+                    if need > room: break
+                    ui.label(part, small)
+                    room -= need + 10.0
+
+    fn engine_button(ui: *UiCanvas, look: *BoardLook, a: *EngineAnalysis, entry: *EngineEntry)
+        let t = &ui.theme
+        let o = ui.open(UiNode(name: "engine", flow: FlowRow, width: UiSize.fixed(LeftColumn), height: UiSize.fixed(ControlHeight), padding: Vec4(10.0, 0.0, 10.0, 0.0), align: Vec2(0.0, 0.5), hit: true, focusable: true, clip: true))
+        let h = ui.interact(o.id)
+        if h.clicked: picker.open()
+        let hover = ui.spring(o.id, 0, h.hovered or picker.shown ? 1.0 : 0.0)
+        let press = ui.spring(o.id, 1, h.held ? 1.0 : 0.0, 30.0)
+        let ring = ui.ring_of(o.id)
+        ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(t.surface.lerp(t.raised, hover).lerp(t.sunken, press)), radius: Vec4.splat(t.radius), border: 1.0 + ring, border_color: t.line.lerp(t.focus, ring))
+        var named: [200]u8
+        let name = entry ? entry.display_name() : a.engine.name_len > 0 ? a.engine.display_name() : "No engine"
+        let p = entry and a.profile_id != 0 ? entry.profile(a.profile_id) : null
+        ui.label(p ? format(&named, "{name} · {p.name_text()}") : name, UiTextStyle(face: look.fonts.strong, size: 12.5, color: look.theme.ink))
+        ui.tooltip("Choose engine")
+        ui.close()
+
+    fn line_row(app: *DesktopApp, look: *BoardLook, a: *EngineAnalysis, line: int) -> (int, int)
+        let ui = &app.ui
+        let theme = look.theme
+        var clicked = -1
+        var ply = -1
+        with ui.open(UiNode(key: line, name: "pv", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(PvRowHeight), align: Vec2(0.0, 0.5), clip: true, box: UiBox(fill: UiFill.solid(line % 2 == 0 ? theme.sunken : theme.surface), radius: Vec4.splat(4.0))))
+            var eval: [24]u8
+            ui.label(score_text(a.lines[line].kind, a.lines[line].score, a.searching.side, &eval), UiTextStyle(face: look.fonts.strong, size: 12.5, color: theme.ink), UiNode(width: UiSize.fixed(PvEvalWidth), padding: Vec4(8.0, 0.0, 4.0, 0.0)))
+            let p = pv.moves(app, look, line)
+            if p >= 0
+                clicked = line
+                ply = p
+        return clicked, ply
+
+    fn make_words(a: *EngineAnalysis)
+        made_for = a.version
+        made_lines = 0
+        pv.clear()
+        if a.lines_fresh(): made_lines = pv.make(&a.searching, a.lines[0..MaxAnalysisLines])
+
+    fn release()
+        pv.release()
+        picker.release()
+
+fn engine_known(a: *EngineAnalysis) -> bool
+    let s = a.engine.state
+    return s == EngineIdle or s == EngineSearching or s == EngineStopping
+
+fn offers(a: *EngineAnalysis, entry: *EngineEntry, name: str) -> bool
+    if engine_known(a): return a.engine.option(name) >= 0
+    if entry and entry.probed
+        for o in entry.options
+            if entry.text(o.name) == name: return true
+        return false
+    return true
+
+fn score_text(kind: ScoreKind, score: int, side: Side, buf: *[24]u8) -> str
+    let s = side == White ? score : -score
+    if kind == MateIn: return s > 0 ? format(buf, "#{s}") : format(buf, "#-{-s}")
+    let a = abs(s)
+    let sign = s > 0 ? "+" : s < 0 ? "−" : ""
+    let cents = a % 100
+    if cents < 10: return format(buf, "{sign}{a / 100}.0{cents}")
+    return format(buf, "{sign}{a / 100}.{cents}")
+
+fn speed_text(nps: i64, buf: *[32]u8) -> str
+    if nps >= 1000000: return format(buf, "{nps as f64 / 1.0e6:.1} MN/s")
+    if nps >= 1000: return format(buf, "{nps as f64 / 1.0e3:.0} kN/s")
+    return format(buf, "{nps} N/s")

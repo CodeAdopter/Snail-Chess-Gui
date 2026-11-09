@@ -1,0 +1,4 @@
+Chewy, from Google Fonts (fonts.google.com/specimen/Chewy).
+regular.ttf is weight 400, static instances served by the Google Fonts CSS API,
+cut by tools/fonts.py to the characters Snail Chess GUI's own text uses, without hinting or glyph names.
+Licence: LICENSE.txt, from github.com/google/fonts/tree/main/apache/chewy.

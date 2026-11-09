@@ -1,0 +1,78 @@
+use src/uci/uci_engine
+use src/store/data_folder
+use engine/desktop/file_tree
+
+const MostFilesListed = 400
+
+struct NameList
+    text: [..]u8
+    spans: [..]PoolSpan
+
+    fn add(s: str)
+        let at = text.len as int
+        for k in 0..s.len
+            text.push(s[k])
+        spans.push(PoolSpan(at, s.len as int))
+
+    fn name(i: int) -> str
+        let s = spans[i]
+        return str(text[s.at..s.at + s.len])
+
+    fn count() -> int
+        return spans.len as int
+
+    fn clear()
+        text.clear()
+        spans.clear()
+
+    fn free_all()
+        text.free()
+        spans.free()
+
+fn files_in(folder: str, into: *NameList)
+    into.clear()
+    var buf: [600]u8
+    let callback: extern fn(*void, cstr, cstr) -> SDL_EnumerationResult = list_file
+    SDL_EnumerateDirectory(format(&buf, "{folder}").ptr as cstr, callback as SDL_EnumerateDirectoryCallback, into)
+
+fn list_file(data: *void, dirname: cstr, fname: cstr) -> SDL_EnumerationResult
+    let into = data as *NameList
+    var buf: [600]u8
+    if file_exists(format(&buf, "{str(dirname)}{str(fname)}").ptr as cstr): into.add(str(fname))
+    return into.count() >= MostFilesListed ? SDL_ENUM_SUCCESS : SDL_ENUM_CONTINUE
+
+fn copy_engine_in(data: *DataFolder, id: int, exe: str, beside: *NameList, picked: []bool, out: *[600]u8) -> str
+    var inside: [64]u8
+    let folder = format(&inside, "engines\\{id}")
+    if not data.make_folder(folder): return format(out, "")
+    let from = folder_of(exe)
+    let program = file_name_of(exe)
+    var ok = copy_one(data, folder, from, program)
+    for i in 0..beside.count()
+        if not ok: break
+        let name = beside.name(i as int)
+        if i < picked.len and picked[i] and name != program: ok = copy_one(data, folder, from, name)
+    if not ok
+        remove_engine_folder(data, id)
+        return format(out, "")
+    return format(out, "{folder}\\{program}")
+
+fn copy_one(data: *DataFolder, folder: str, from: str, name: str) -> bool
+    var a: [600]u8
+    var b: [600]u8
+    var inside: [600]u8
+    let source = format(&a, "{from}\\{name}")
+    let target = data.path(format(&inside, "{folder}\\{name}"), &b)
+    return SDL_CopyFile(source.ptr as cstr, target.ptr as cstr)
+
+fn remove_engine_folder(data: *DataFolder, id: int)
+    wait_closed_children()
+    var inside: [64]u8
+    remove_data_folder(data, format(&inside, "engines\\{id}"))
+
+fn remove_data_folder(data: *DataFolder, inside: str) -> bool
+    if inside.len < 9 or inside[0..8] != "engines\\": return false
+    for k in 8..inside.len
+        if inside[k] < '0' or inside[k] > '9': return false
+    var buf: [600]u8
+    return remove_tree(data.path(inside, &buf))

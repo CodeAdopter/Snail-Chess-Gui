@@ -1,0 +1,894 @@
+use src/chess/notation
+use src/chess/status
+use src/board3d/desk_look
+
+const DenScreenW = 800
+const DenScreenH = 600
+const DenSquare = 56
+const DenBoardX = 112
+const DenBoardY = 64
+const DenMaxPlies = 600
+const DenWinX = 84
+const DenWinY = 6
+const DenWinW = 708
+const DenWinH = 560
+const DenPanelX = 576
+const DenTaskY = 570
+
+const DenCoverCd = 0
+const DenFloppy = 1
+
+const DenNewGame = 0
+const DenTakeBack = 1
+const DenFlipBoard = 2
+const DenButtons = 3
+
+struct DenScreen
+    base: *u32
+    shown: *u32
+    sprites: *u8
+    board: Board
+    boards: *Board
+    sans: *ShortText
+    plies: int
+    selected: int
+    last_from: int
+    last_to: int
+    flipped: bool
+    think_at: f64
+    now: f64
+    dots: int
+    px: int
+    py: int
+    hover: int
+    hover_button: int
+    dirty: bool
+    moved: bool
+    glow: Vec3
+    disc: int
+    rng: Mulberry32
+    legal: MoveList
+    backdrop: *u32
+    wood: *u32
+    outside: bool
+    targets: u64
+    captures: u64
+    check_sq: int
+    lifted: bool
+    shown_key: u64
+    names: [2]ShortText
+    times: [2]ShortText
+    notes: [3]ShortText
+
+    fn init(kind: int)
+        base = alloc[u32](DenScreenW * DenScreenH)
+        shown = alloc[u32](DenScreenW * DenScreenH)
+        sprites = alloc[u8](6 * 324)
+        backdrop = alloc[u32](DenScreenW * DenScreenH)
+        wood = alloc[u32](64 * DenSquare * DenSquare)
+        boards = alloc[Board](DenMaxPlies + 1)
+        sans = alloc[ShortText](DenMaxPlies + 1)
+        disc = kind
+        rng = Mulberry32(0xC0FFEE)
+        px = -1
+        py = -1
+        hover = -1
+        hover_button = -1
+        check_sq = -1
+        carve_sprites()
+        carve_backdrop()
+        new_game()
+
+    fn release()
+        free(base)
+        free(shown)
+        free(sprites)
+        free(backdrop)
+        free(wood)
+        free(boards)
+        free(sans)
+
+    fn new_game()
+        let read = board.load_fen(StartFen)
+        plies = 0
+        selected = -1
+        last_from = -1
+        last_to = -1
+        legal.fill(&board)
+        dirty = true
+
+    fn present(b: *Board, last: Move, picked: Square, reach: u64, takes: u64, check: Square, turned: bool, carried: bool, desk: *DeskShow)
+        outside = true
+        var h: u64 = den_hash(0xCBF29CE484222325, b.key)
+        h = den_hash(h, last as u64 | (picked as u64) << 16 | (check as u64) << 24 | ((turned ? 1 : 0) as u64) << 32 | ((carried ? 1 : 0) as u64) << 33)
+        h = den_hash(den_hash(h, reach), takes)
+        h = den_hash(den_hash(h, desk.cards[0].key()), desk.cards[1].key())
+        if h == shown_key: return
+        shown_key = h
+        board = *b
+        last_from = last == NoMove ? -1 : last.from as int
+        last_to = last == NoMove ? -1 : last.to as int
+        selected = picked == Square.none ? -1 : picked as int
+        targets = reach
+        captures = takes
+        check_sq = check == Square.none ? -1 : check as int
+        flipped = turned
+        lifted = carried and selected >= 0
+        for k in 0..3: notes[k].clear()
+        if last_from >= 0
+            notes[0].add_str("Last move ")
+            den_add_square(&notes[0], last_from)
+            notes[0].add('-')
+            den_add_square(&notes[0], last_to)
+        for k in 0..2
+            let c = &desk.cards[k]
+            names[k].clear()
+            times[k].clear()
+            if c.shown and c.part(0).len > 0: names[k].add_str(c.part(0))
+            else: names[k].add_str(k == 0 ? "White" : "Black")
+            if c.shown: times[k].add_str(c.part(6))
+            if c.shown and c.part(2).len > 0 and notes[1].len == 0
+                notes[1].add_str("Eval ")
+                notes[1].add_str(c.part(2))
+                notes[2].add_str(c.part(5))
+        dirty = true
+
+    fn computer_to_move() -> bool
+        return not outside and board.side == Black and outcome_of(&board) == Playing
+
+    fn play(move: Move)
+        if plies >= DenMaxPlies: return
+        boards[plies] = board
+        sans[plies].clear()
+        write_san(&board, move, &sans[plies])
+        board.play(move)
+        plies += 1
+        last_from = move.from as int
+        last_to = move.to as int
+        selected = -1
+        legal.fill(&board)
+        think_at = now + 0.6 + rng.next() * 1.1
+        dirty = true
+
+    fn take_back()
+        var back = board.side == White ? 2 : 1
+        while back > 0 and plies > 0
+            plies -= 1
+            board = boards[plies]
+            back -= 1
+        last_from = -1
+        last_to = -1
+        selected = -1
+        legal.fill(&board)
+        dirty = true
+
+    fn reply()
+        var best = NoMove
+        var best_score: f64 = -1.0e18
+        for i in 0..legal.count
+            let m = legal.items[i]
+            var b = board
+            b.play(m)
+            var score: f64 = 0.0
+            if not has_any_move(&b)
+                score = b.in_check() ? 1.0e9 : 0.0
+            else
+                var replies: MoveList
+                replies.fill(&b)
+                var worst: f64 = 1.0e18
+                for k in 0..replies.count
+                    var c = b
+                    c.play(replies.items[k])
+                    worst = min(worst, den_worth(&c, Black))
+                score = worst
+            score += rng.next() * 18.0
+            if score > best_score
+                best_score = score
+                best = m
+        if best != NoMove: play(best)
+
+    fn update(t: f64)
+        now = t
+        if computer_to_move()
+            if t >= think_at
+                reply()
+                return
+            let d = (t * 2.5) as int % 4
+            if d != dots
+                dots = d
+                dirty = true
+
+    fn point(x: int, y: int)
+        if x == px and y == py: return
+        px = x
+        py = y
+        moved = true
+        let sq = square_at(x, y)
+        var b = -1
+        for k in 0..DenButtons
+            if inside_button(k, x, y): b = k
+        if sq != hover or b != hover_button or lifted
+            hover = sq
+            hover_button = b
+            dirty = true
+
+    fn click(x: int, y: int)
+        for k in 0..DenButtons
+            if not inside_button(k, x, y): continue
+            if k == DenNewGame: new_game()
+            if k == DenTakeBack: take_back()
+            if k == DenFlipBoard
+                flipped = not flipped
+                dirty = true
+            return
+        let sq = square_at(x, y)
+        if sq < 0 or board.side != White or outcome_of(&board) != Playing
+            if selected >= 0: dirty = true
+            selected = -1
+            return
+        if selected >= 0
+            let m = find(selected, sq)
+            if m != NoMove
+                play(m)
+                return
+        let p = board.squares[sq]
+        selected = p != NoPiece and p.side == board.side and moves_from(sq) ? sq : -1
+        dirty = true
+
+    fn find(from: int, to: int) -> Move
+        var found = NoMove
+        for i in 0..legal.count
+            let m = legal.items[i]
+            if m.from as int != from or m.to as int != to: continue
+            if not m.is_promotion or m.promotion == Queen: return m
+            found = m
+        return found
+
+    fn moves_from(sq: int) -> bool
+        for i in 0..legal.count
+            if legal.items[i].from as int == sq: return true
+        return false
+
+    fn target(sq: int) -> bool
+        if outside: return ((targets | captures) >> sq as u64) & 1 != 0
+        return selected >= 0 and find(selected, sq) != NoMove
+
+    fn square_at(x: int, y: int) -> int
+        if x < DenBoardX or y < DenBoardY or x >= DenBoardX + 8 * DenSquare or y >= DenBoardY + 8 * DenSquare: return -1
+        let col = (x - DenBoardX) / DenSquare
+        let row = (y - DenBoardY) / DenSquare
+        return flipped ? row * 8 + 7 - col : (7 - row) * 8 + col
+
+    fn square_xy(sq: int) -> (int, int)
+        let file = sq % 8
+        let rank = sq / 8
+        let col = flipped ? 7 - file : file
+        let row = flipped ? rank : 7 - rank
+        return DenBoardX + col * DenSquare, DenBoardY + row * DenSquare
+
+    fn button_rect(k: int) -> (int, int, int, int)
+        if k == DenNewGame: return DenPanelX, 470, 98, 24
+        if k == DenTakeBack: return DenPanelX + 106, 470, 98, 24
+        return DenPanelX, 500, 204, 24
+
+    fn inside_button(k: int, x: int, y: int) -> bool
+        let (bx, by, bw, bh) = button_rect(k)
+        return x >= bx and y >= by and x < bx + bw and y < by + bh
+
+    fn refresh() -> bool
+        if dirty
+            paint()
+            dirty = false
+            moved = true
+        if not moved: return false
+        moved = false
+        copy(shown as *u8, base as *u8, (DenScreenW * DenScreenH * 4) as u32)
+        if px >= 0: pointer(px, py)
+        return true
+
+    fn put(x: int, y: int, c: u32)
+        if x < 0 or y < 0 or x >= DenScreenW or y >= DenScreenH: return
+        base[y * DenScreenW + x] = c
+
+    fn rect(x: int, y: int, w: int, h: int, c: u32)
+        let x0 = max(x, 0)
+        let y0 = max(y, 0)
+        let x1 = min(x + w, DenScreenW)
+        let y1 = min(y + h, DenScreenH)
+        for yy in y0..y1
+            for xx in x0..x1: base[yy * DenScreenW + xx] = c
+
+    fn blend(x: int, y: int, w: int, h: int, c: u32, a: f32)
+        let x0 = max(x, 0)
+        let y0 = max(y, 0)
+        let x1 = min(x + w, DenScreenW)
+        let y1 = min(y + h, DenScreenH)
+        for yy in y0..y1
+            for xx in x0..x1
+                let i = yy * DenScreenW + xx
+                base[i] = den_mix(base[i], c, a)
+
+    fn vgrad(x: int, y: int, w: int, h: int, top: u32, bottom: u32)
+        for k in 0..h: rect(x, y + k, w, 1, den_mix(top, bottom, k as f32 / max(h - 1, 1) as f32))
+
+    fn bevel(x: int, y: int, w: int, h: int, raised: bool)
+        let light = den_rgb(raised ? 0xFFFFFF : 0x808080)
+        let dark = den_rgb(raised ? 0x808080 : 0xFFFFFF)
+        rect(x, y, w, 1, light)
+        rect(x, y, 1, h, light)
+        rect(x, y + h - 1, w, 1, dark)
+        rect(x + w - 1, y, 1, h, dark)
+
+    fn text(x: int, y: int, s: str, c: u32, scale: int = 1, bold: bool = false, slant: bool = false)
+        var at = x
+        for i in 0..s.len
+            var ch = s[i] as int
+            if ch < 32 or ch > 126: ch = 63
+            let g = (ch - 32) * 5
+            for col in 0..5
+                let bits = DenFont[g + col]
+                for row in 0..7
+                    if ((bits >> row) & 1) == 0: continue
+                    let lean = slant ? (6 - row) * scale / 3 : 0
+                    rect(at + col * scale + lean, y + row * scale, scale + (bold ? 1 : 0), scale, c)
+            at += 6 * scale + (bold ? 1 : 0)
+
+    fn text_width(s: str, scale: int = 1, bold: bool = false) -> int
+        return s.len * (6 * scale + (bold ? 1 : 0)) - scale
+
+    fn piece(kind: Kind, side: Side, x: int, y: int, scale: int)
+        let white = side == White
+        let tones = [den_rgb(white ? 0x141414 : 0x050505), den_rgb(white ? 0xFFFFFF : 0x75758A), den_rgb(white ? 0xEDE5D2 : 0x3A3A48), den_rgb(white ? 0xB0A68C : 0x1D1D25)]
+        let s = sprites + (kind as int - 1) * 324
+        for row in 0..18
+            for col in 0..18
+                let v = s[row * 18 + col] as int
+                if v == 0: continue
+                rect(x + col * scale, y + row * scale, scale, scale, tones[v - 1])
+
+    fn carve_sprites()
+        for k in 0..6
+            let s = sprites + k * 324
+            for row in 0..18
+                for col in 0..18
+                    let v = den_art(k, col - 1, row - 1)
+                    var tone = 0
+                    if v == 2: tone = 1
+                    elif v == 1
+                        tone = 3
+                        if den_art(k, col - 2, row - 1) != 1 or den_art(k, col - 1, row - 2) != 1: tone = 2
+                        if den_art(k, col, row - 1) != 1 or den_art(k, col + 1, row - 1) != 1: tone = 4
+                    elif den_art(k, col - 2, row - 1) == 1 or den_art(k, col, row - 1) == 1 or den_art(k, col - 1, row - 2) == 1 or den_art(k, col - 1, row) == 1
+                        tone = 1
+                    s[row * 18 + col] = tone as u8
+
+    fn paint()
+        desktop()
+        window()
+        chess_board()
+        panel()
+        taskbar()
+        var sum = Vec3(0.0, 0.0, 0.0)
+        var y = 4
+        while y < DenScreenH
+            var x = 4
+            while x < DenScreenW
+                let c = base[y * DenScreenW + x]
+                let r = (c & 0xFF) as f32 / 255.0
+                let g = ((c >> 8) & 0xFF) as f32 / 255.0
+                let b = ((c >> 16) & 0xFF) as f32 / 255.0
+                sum = sum + Vec3(r * r, g * g, b * b)
+                x += 16
+            y += 16
+        glow = sum * (1.0 / (50.0 * 38.0))
+
+    fn desktop()
+        copy(base as *u8, backdrop as *u8, (DenScreenW * DenScreenH * 4) as u32)
+
+    fn carve_backdrop()
+        for y in 0..DenTaskY
+            let t = y as f32 / DenTaskY as f32
+            for x in 0..DenScreenW
+                let d = ((x * 7 + y * 13) % 4) as f32 * 0.008
+                base[y * DenScreenW + x] = den_mix(den_rgb(0x163E7A), den_rgb(0x3E8CB8), t * 0.9 + d)
+        let names = ["My Files", "Trash", disc == DenFloppy ? "Floppy (A:)" : "Cover CD (D:)", "Snail Chess"]
+        for i in 0..4
+            let y = 14 + i * 74
+            icon(i, 26, y)
+            let s = names[i]
+            let w = text_width(s)
+            text(42 - w / 2 + 1, y + 41, s, den_rgb(0x000000))
+            text(42 - w / 2, y + 40, s, den_rgb(0xFFFFFF))
+        copy(backdrop as *u8, base as *u8, (DenScreenW * DenScreenH * 4) as u32)
+        for sq in 0..64
+            let light = (sq % 8 + sq / 8) % 2 == 1
+            for yy in 0..DenSquare
+                for xx in 0..DenSquare
+                    wood[(sq * DenSquare + yy) * DenSquare + xx] = den_mix(den_rgb(light ? 0xE8CFA0 : 0xA9764A), den_rgb(light ? 0xF6E4C0 : 0x8A5A32), den_grain(sq, xx, yy, light))
+
+    fn icon(k: int, x: int, y: int)
+        let ink = den_rgb(0x1A1A1A)
+        if k == 0
+            rect(x + 1, y + 6, 12, 4, den_rgb(0xE8B630))
+            rect(x, y + 9, 32, 21, ink)
+            vgrad(x + 1, y + 10, 30, 19, den_rgb(0xFFE38A), den_rgb(0xE0A82A))
+            rect(x + 1, y + 10, 30, 1, den_rgb(0xFFF6CC))
+        elif k == 1
+            rect(x + 6, y + 3, 20, 3, den_rgb(0x9AA4AE))
+            rect(x + 13, y + 1, 6, 2, den_rgb(0x9AA4AE))
+            rect(x + 7, y + 7, 18, 23, ink)
+            vgrad(x + 8, y + 8, 16, 21, den_rgb(0xE6EEF4), den_rgb(0x8E9AA6))
+            for i in 0..3: rect(x + 11 + i * 4, y + 10, 1, 17, den_rgb(0x6D7884))
+        elif k == 2 and disc == DenFloppy
+            rect(x + 2, y + 2, 28, 28, ink)
+            rect(x + 3, y + 3, 26, 26, den_rgb(0x2C3E8C))
+            rect(x + 9, y + 3, 14, 9, den_rgb(0xB8BEC6))
+            rect(x + 18, y + 4, 3, 7, den_rgb(0x2C3E8C))
+            rect(x + 6, y + 16, 20, 13, den_rgb(0xF2F2EE))
+            for i in 0..3: rect(x + 8, y + 19 + i * 3, 16, 1, den_rgb(0x8890C0))
+        elif k == 2
+            for yy in 0..32
+                for xx in 0..32
+                    let dx = xx as f32 - 15.5
+                    let dy = yy as f32 - 15.5
+                    let r = sqrt(dx * dx + dy * dy)
+                    if r > 15.5 or r < 3.0: continue
+                    var c = den_mix(den_rgb(0xD8DCE4), den_rgb(0xFFFFFF), (atan2(dy, dx) + 3.1416) / 6.2832)
+                    if r > 14.5 or r < 4.0: c = den_rgb(0x6A707A)
+                    elif r < 7.0: c = den_rgb(0xBFC6D0)
+                    elif (atan2(dy, dx) * 3.0 + r * 0.2) as int % 2 == 0: c = den_mix(c, den_rgb(0xB8E0FF), 0.35)
+                    put(x + xx, y + yy, c)
+        else
+            rect(x + 2, y + 2, 28, 28, ink)
+            vgrad(x + 3, y + 3, 26, 26, den_rgb(0xE9CFA0), den_rgb(0xA9764A))
+            piece(Knight, White, x + 7, y + 7, 1)
+
+    fn window()
+        let x = DenWinX
+        let y = DenWinY
+        let w = DenWinW
+        let h = DenWinH
+        rect(x, y, w, h, den_rgb(0x0A3ED0))
+        vgrad(x, y, w, 4, den_rgb(0x8CC0FF), den_rgb(0x3C8CF8))
+        vgrad(x, y + 4, w, 22, den_rgb(0x2A7AF4), den_rgb(0x0846D4))
+        for i in 0..3
+            let cut = 3 - i
+            for j in 0..cut
+                put(x + j, y + i, desk_at(x + j, y + i))
+                put(x + w - 1 - j, y + i, desk_at(x + w - 1 - j, y + i))
+        piece(Knight, White, x + 6, y + 4, 1)
+        text(x + 30, y + 10, "Snail Chess 2001", den_rgb(0x0A2A80), 1, true)
+        text(x + 29, y + 9, "Snail Chess 2001", den_rgb(0xFFFFFF), 1, true)
+        for i in 0..3
+            let bx = x + w - 73 + i * 23
+            let close = i == 2
+            rect(bx, y + 3, 21, 21, den_rgb(0xFFFFFF))
+            vgrad(bx + 1, y + 4, 19, 19, den_rgb(close ? 0xF08A6A : 0x5A9CFF), den_rgb(close ? 0xC8381C : 0x1E5CE0))
+            let ink = den_rgb(0xFFFFFF)
+            if i == 0: rect(bx + 5, y + 16, 7, 3, ink)
+            if i == 1
+                rect(bx + 5, y + 7, 11, 11, ink)
+                rect(bx + 6, y + 10, 9, 7, den_rgb(0x2F70EE))
+            if close
+                for k in 0..9
+                    rect(bx + 6 + k, y + 8 + k, 2, 2, ink)
+                    rect(bx + 14 - k, y + 8 + k, 2, 2, ink)
+        let cx = x + 4
+        let cw = w - 8
+        rect(cx, y + 26, cw, h - 30, den_rgb(0xECE9D8))
+        let menu = ["Game", "Options", "View", "Help"]
+        var mx = cx + 8
+        for i in 0..4
+            text(mx, y + 32, menu[i], den_rgb(0x000000))
+            mx += text_width(menu[i]) + 16
+        rect(cx, y + 44, cw, 1, den_rgb(0xACA899))
+        rect(cx, y + 45, cw, 1, den_rgb(0xFFFFFF))
+        let sy = y + h - 4 - 20
+        rect(cx, sy, cw, 1, den_rgb(0xACA899))
+        rect(cx, sy + 1, cw, 1, den_rgb(0xFFFFFF))
+        var status: ShortText
+        let o = outcome_of(&board)
+        if o == Checkmate: status.add_str(board.side == Black ? "Checkmate. You win!" : "Checkmate. The computer wins.")
+        elif o == Stalemate: status.add_str("Stalemate. A draw.")
+        elif o != Playing: status.add_str("Draw.")
+        elif outside: status.add_str(board.in_check() ? "Check!" : (board.side == White ? "White to move." : "Black to move."))
+        elif board.side == Black
+            status.add_str("Computer is thinking")
+            for k in 0..dots: status.add('.')
+        elif board.in_check(): status.add_str("Check! Your move.")
+        else: status.add_str("Your move.")
+        text(cx + 8, sy + 7, status.text, den_rgb(0x000000))
+        rect(x + w - 150, sy + 4, 1, 14, den_rgb(0xACA899))
+        if not outside: text(x + w - 142, sy + 7, "Level 2", den_rgb(0x000000))
+        let cover = disc == DenFloppy ? "A:" : "D:"
+        text(x + w - 80, sy + 7, cover, den_rgb(0x6A6A6A))
+
+    fn desk_at(x: int, y: int) -> u32
+        let d = ((x * 7 + y * 13) % 4) as f32 * 0.008
+        return den_mix(den_rgb(0x163E7A), den_rgb(0x3E8CB8), y as f32 / DenTaskY as f32 * 0.9 + d)
+
+    fn chess_board()
+        let bx = DenBoardX
+        let by = DenBoardY
+        let side = 8 * DenSquare
+        bevel(bx - 3, by - 3, side + 6, side + 6, false)
+        rect(bx - 2, by - 2, side + 4, side + 4, den_rgb(0x404040))
+        var checked = board.in_check() ? board.king_square(board.side) as int : -1
+        if outside: checked = check_sq
+        for sq in 0..64
+            let (x, y) = square_xy(sq)
+            for yy in 0..DenSquare: copy((base + (y + yy) * DenScreenW + x) as *u8, (wood + (sq * DenSquare + yy) * DenSquare) as *u8, (DenSquare * 4) as u32)
+            if sq == last_from or sq == last_to: blend(x, y, DenSquare, DenSquare, den_rgb(0xF2DA4A), 0.45)
+            if sq == selected: blend(x, y, DenSquare, DenSquare, den_rgb(0x7FC24A), 0.55)
+            if sq == checked
+                for yy in 0..DenSquare
+                    for xx in 0..DenSquare
+                        let dx = (xx - DenSquare / 2) as f32
+                        let dy = (yy - DenSquare / 2) as f32
+                        let a = saturate(1.0 - sqrt(dx * dx + dy * dy) / 34.0)
+                        let i = (y + yy) * DenScreenW + x + xx
+                        base[i] = den_mix(base[i], den_rgb(0xFF2010), a * 0.9)
+            let p = board.squares[sq]
+            if p != NoPiece and not (lifted and sq == selected): piece(p.kind, p.side, x + 1, y + 1, 3)
+            if target(sq)
+                let ink = den_rgb(0x1E3A10)
+                if p == NoPiece
+                    for yy in 0..DenSquare
+                        for xx in 0..DenSquare
+                            let dx = (xx - DenSquare / 2) as f32 + 0.5
+                            let dy = (yy - DenSquare / 2) as f32 + 0.5
+                            if dx * dx + dy * dy < 64.0: blend(x + xx, y + yy, 1, 1, ink, 0.45)
+                else
+                    for k in 0..10
+                        blend(x, y + k, 10 - k, 1, ink, 0.5)
+                        blend(x + DenSquare - 10 + k, y + k, 10 - k, 1, ink, 0.5)
+                        blend(x, y + DenSquare - 1 - k, 10 - k, 1, ink, 0.5)
+                        blend(x + DenSquare - 10 + k, y + DenSquare - 1 - k, 10 - k, 1, ink, 0.5)
+            if sq == hover and (target(sq) or (p != NoPiece and p.side == board.side and (outside or board.side == White)))
+                let rim = den_rgb(0xFFFFFF)
+                blend(x, y, DenSquare, 2, rim, 0.7)
+                blend(x, y + DenSquare - 2, DenSquare, 2, rim, 0.7)
+                blend(x, y + 2, 2, DenSquare - 4, rim, 0.7)
+                blend(x + DenSquare - 2, y + 2, 2, DenSquare - 4, rim, 0.7)
+        let files = "abcdefgh"
+        let ranks = "12345678"
+        for i in 0..8
+            let file = flipped ? 7 - i : i
+            let rank = flipped ? i : 7 - i
+            text(bx + i * DenSquare + DenSquare / 2 - 2, by + side + 6, files[file..file + 1] as str, den_rgb(0x404040))
+            text(bx - 14, by + i * DenSquare + DenSquare / 2 - 3, ranks[rank..rank + 1] as str, den_rgb(0x404040))
+        if lifted and px >= 0
+            let p = board.squares[selected]
+            if p != NoPiece: piece(p.kind, p.side, px - 27, py - 27, 3)
+
+    fn panel()
+        let x = DenPanelX
+        let w = 204
+        if outside
+            let top = flipped ? White : Black
+            let low = top.other
+            player_card(x, DenBoardY, w, top, names[top as int].text, times[top as int].text)
+            player_card(x, 464, w, low, names[low as int].text, times[low as int].text)
+            rect(x, 120, w, 334, den_rgb(0xFFFFFF))
+            bevel(x - 1, 119, w + 2, 336, false)
+            rect(x, 120, w, 16, den_rgb(0xD6D2C2))
+            text(x + 6, 125, "Game", den_rgb(0x000000))
+            var y = 144
+            for k in 0..3
+                let line = notes[k].text
+                var at = 0
+                while at < line.len and y < 440
+                    let n = min(line.len - at, 32)
+                    text(x + 6, y, line[at..at + n] as str, den_rgb(k == 2 ? 0x404040 : 0x000000))
+                    at += n
+                    y += 12
+                if line.len > 0: y += 6
+            return
+        player_card(x, DenBoardY, w, Black, "Computer", "Level 2")
+        player_card(x, 412, w, White, "You", "Player 1")
+        rect(x, 120, w, 284, den_rgb(0xFFFFFF))
+        bevel(x - 1, 119, w + 2, 286, false)
+        rect(x, 120, w, 16, den_rgb(0xD6D2C2))
+        text(x + 6, 125, "Moves", den_rgb(0x000000))
+        let lines = (plies + 1) / 2
+        let rows = 21
+        let first = max(lines - rows, 0)
+        for l in first..lines
+            let y = 141 + (l - first) * 12
+            var t: ShortText
+            t.add_int(l + 1)
+            t.add('.')
+            text(x + 6, y, t.text, den_rgb(0x808080))
+            text(x + 40, y, sans[l * 2].text, den_rgb(0x000000))
+            if l * 2 + 1 < plies: text(x + 116, y, sans[l * 2 + 1].text, den_rgb(0x000000))
+        if plies > 0
+            let l = (plies - 1) / 2
+            let y = 140 + (l - first) * 12
+            let mx = (plies - 1) % 2 == 0 ? x + 38 : x + 114
+            blend(mx, y - 1, 70, 10, den_rgb(0x316AC5), 0.25)
+        let words = ["New Game", "Take Back", "Flip Board"]
+        for k in 0..DenButtons
+            let (bx, by, bw, bh) = button_rect(k)
+            let lit = k == hover_button
+            rect(bx, by, bw, bh, den_rgb(0x003C74))
+            vgrad(bx + 1, by + 1, bw - 2, bh - 2, den_rgb(0xFFFFFF), den_rgb(lit ? 0xF5D58A : 0xD6D0C0))
+            if lit: rect(bx + 1, by + bh - 3, bw - 2, 2, den_rgb(0xF0A830))
+            put(bx, by, den_rgb(0xECE9D8))
+            put(bx + bw - 1, by, den_rgb(0xECE9D8))
+            put(bx, by + bh - 1, den_rgb(0xECE9D8))
+            put(bx + bw - 1, by + bh - 1, den_rgb(0xECE9D8))
+            let tw = text_width(words[k])
+            text(bx + (bw - tw) / 2, by + 8, words[k], den_rgb(0x000000))
+
+    fn player_card(x: int, y: int, w: int, side: Side, name: str, note: str)
+        bevel(x - 1, y - 1, w + 2, 50, false)
+        rect(x, y, w, 48, den_rgb(0xF4F2E8))
+        rect(x + 4, y + 4, 40, 40, den_rgb(0x7F7F7F))
+        vgrad(x + 5, y + 5, 38, 38, den_rgb(side == White ? 0xA9764A : 0xE8CFA0), den_rgb(side == White ? 0x8A5A32 : 0xF6E4C0))
+        piece(King, side, x + 6, y + 6, 2)
+        let turn = board.side == side and outcome_of(&board) == Playing
+        text(x + 52, y + 8, name, den_rgb(0x000000), 1, true)
+        text(x + 52, y + 20, note, den_rgb(0x6A6A6A))
+        if turn: rect(x + w - 12, y + 8, 6, 6, den_rgb(side == White ? 0x3CB43C : 0xE09020))
+        let other = side.other
+        let full = [0, 8, 2, 2, 2, 1, 1]
+        var at = x + 50
+        for k in 1..6
+            var left = 0
+            for sq in 0..64
+                let p = board.squares[sq]
+                if p != NoPiece and p.side == other and p.kind as int == k: left += 1
+            for i in 0..max(full[k] - left, 0)
+                if at > x + w - 12: break
+                piece(k as Kind, other, at, y + 30, 1)
+                at += 8
+
+    fn taskbar()
+        let y = DenTaskY
+        let h = DenScreenH - y
+        vgrad(0, y, DenScreenW, h, den_rgb(0x3A80F0), den_rgb(0x1E4FC8))
+        rect(0, y, DenScreenW, 1, den_rgb(0x6AA8FF))
+        rect(0, y + 1, DenScreenW, 1, den_rgb(0x4A90F8))
+        vgrad(0, y, 98, h, den_rgb(0x4CB04C), den_rgb(0x2A8A2A))
+        for i in 0..h
+            let dy = (i - h / 2) as f32
+            let edge = (sqrt(max(225.0 - dy * dy, 0.0)) - 15.0) as int
+            rect(98 + edge, y + i, -edge, 1, den_rgb(0x2E68D8))
+        piece(Pawn, White, 6, y + 6, 1)
+        text(28, y + 8, "start", den_rgb(0x205020), 2, true, true)
+        text(27, y + 7, "start", den_rgb(0xFFFFFF), 2, true, true)
+        rect(108, y + 3, 170, h - 6, den_rgb(0x1640A8))
+        vgrad(109, y + 4, 168, h - 8, den_rgb(0x1E54C0), den_rgb(0x2A6AD8))
+        piece(Knight, White, 112, y + 6, 1)
+        text(134, y + 12, "Snail Chess 2001", den_rgb(0xFFFFFF))
+        vgrad(712, y, DenScreenW - 712, h, den_rgb(0x1EA0F0), den_rgb(0x0C7ED8))
+        rect(712, y, 1, h, den_rgb(0x0A4CB0))
+        rect(726, y + 10, 4, 8, den_rgb(0xE0E0E0))
+        for k in 0..5: rect(730, y + 8 - k / 2, 2 + k, 12 + k, den_rgb(0xE0E0E0))
+        rect(750, y + 8, 14, 11, den_rgb(0xE0E0E0))
+        rect(752, y + 10, 10, 6, den_rgb(0x2A6AD8))
+        rect(755, y + 19, 4, 3, den_rgb(0xE0E0E0))
+        rect(770, y + 9, 14, 11, den_rgb(0xE0E0E0))
+        rect(772, y + 11, 10, 6, den_rgb(0x2A6AD8))
+        rect(775, y + 20, 4, 3, den_rgb(0xE0E0E0))
+
+    fn pointer(x: int, y: int)
+        for row in 0..19
+            let line = DenPointer[row]
+            for col in 0..12
+                let c = line[col]
+                if c == '.': continue
+                let px2 = x + col
+                let py2 = y + row
+                if px2 < 0 or py2 < 0 or px2 >= DenScreenW or py2 >= DenScreenH: continue
+                shown[py2 * DenScreenW + px2] = den_rgb(c == 'o' ? 0x000000 : 0xFFFFFF)
+
+fn den_rgb(hex: u32) -> u32
+    return 0xFF000000 | ((hex & 0xFF) << 16) | (hex & 0xFF00) | ((hex >> 16) & 0xFF)
+
+fn den_mix(a: u32, b: u32, t: f32) -> u32
+    let k = clamp(t, 0.0, 1.0)
+    var out: u32 = 0xFF000000
+    for s in 0..3
+        let shift = (s * 8) as u32
+        let x = ((a >> shift) & 0xFF) as f32
+        let y = ((b >> shift) & 0xFF) as f32
+        out = out | ((((x + (y - x) * k + 0.5) as u32) & 0xFF) << shift)
+    return out
+
+fn den_grain(sq: int, x: int, y: int, light: bool) -> f32
+    let seed = (sq * 37 % 11) as f32
+    let along = light ? x as f32 : y as f32
+    let across = light ? y as f32 : x as f32
+    let wave = sin(along * 0.35 + seed + sin(across * 0.08 + seed) * 2.0) * 0.5 + 0.5
+    let fine = ((x * 13 + y * 7 + sq * 5) % 5) as f32 * 0.06
+    return floor((wave * 0.6 + fine) * 3.0) / 6.0
+
+fn den_worth(b: *Board, side: Side) -> f64
+    var v: f64 = 0.0
+    for s in 0..64
+        let p = b.squares[s]
+        if p == NoPiece: continue
+        let kind = p.kind
+        let f = (s % 8) as f64
+        let r = (s / 8) as f64
+        let centre = 3.5 - max(abs(f - 3.5), abs(r - 3.5))
+        var w: f64 = 0.0
+        if kind == Pawn: w = 100.0 + (p.side == White ? r - 1.0 : 6.0 - r) * 5.0 + centre * 2.0
+        elif kind == Knight: w = 300.0 + centre * 8.0
+        elif kind == Bishop: w = 315.0 + centre * 5.0
+        elif kind == Rook: w = 500.0
+        elif kind == Queen: w = 900.0 + centre * 2.0
+        else: w = 0.0
+        v += p.side == side ? w : -w
+    return v
+
+fn den_art(k: int, col: int, row: int) -> int
+    if col < 0 or row < 0 or col > 15 or row > 15: return 0
+    let c = DenPieceRows[k * 16 + row][col]
+    if c == '#': return 1
+    if c == 'o': return 2
+    return 0
+
+const DenPieceRows = [
+    "................",
+    "................",
+    "................",
+    "................",
+    "......####......",
+    ".....######.....",
+    ".....######.....",
+    ".....######.....",
+    "......####......",
+    ".....######.....",
+    "......####......",
+    "......####......",
+    ".....######.....",
+    "....########....",
+    "...##########...",
+    "...##########...",
+    "................",
+    ".......#.##.....",
+    "......######....",
+    ".....########...",
+    "....##o#######..",
+    "...###########..",
+    "..#############.",
+    "..####..#######.",
+    "...##...#######.",
+    ".......########.",
+    "......#########.",
+    ".....##########.",
+    ".....##########.",
+    "....###########.",
+    "...############.",
+    "...############.",
+    "................",
+    ".......##.......",
+    "......####......",
+    ".......##.......",
+    "......####......",
+    ".....###o##.....",
+    "....###o####....",
+    "....##o#####....",
+    ".....######.....",
+    "......####......",
+    ".....######.....",
+    "......####......",
+    ".....######.....",
+    "....########....",
+    "...##########...",
+    "..############..",
+    "................",
+    "................",
+    "...##.####.##...",
+    "...##########...",
+    "...##########...",
+    "....########....",
+    "....########....",
+    "....########....",
+    "....########....",
+    "....########....",
+    "....########....",
+    "...oooooooooo...",
+    "...##########...",
+    "..############..",
+    "..############..",
+    ".##############.",
+    "................",
+    ".#..#..##..#..#.",
+    ".#..#..##..#..#.",
+    ".##.##.##.##.##.",
+    ".##############.",
+    "..############..",
+    "..############..",
+    "...##########...",
+    "....########....",
+    ".....######.....",
+    "....oooooooo....",
+    ".....######.....",
+    "....########....",
+    "...##########...",
+    "..############..",
+    "..############..",
+    ".......##.......",
+    "......####......",
+    ".......##.......",
+    "...###.##.###...",
+    "..############..",
+    "..############..",
+    "..############..",
+    "...##########...",
+    "....########....",
+    ".....######.....",
+    "....oooooooo....",
+    ".....######.....",
+    "....########....",
+    "...##########...",
+    "..############..",
+    "..############..",
+]
+
+const DenPointer = [
+    "o...........",
+    "oo..........",
+    "owo.........",
+    "owwo........",
+    "owwwo.......",
+    "owwwwo......",
+    "owwwwwo.....",
+    "owwwwwwo....",
+    "owwwwwwwo...",
+    "owwwwwwwwo..",
+    "owwwwwwwwwo.",
+    "owwwwwwooooo",
+    "owwwowwo....",
+    "owwoowwo....",
+    "owo..owwo...",
+    "oo...owwo...",
+    "o.....owwo..",
+    "......owwo..",
+    ".......oo...",
+]
+
+const DenFont = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5F, 0x00, 0x00, 0x00, 0x07, 0x00, 0x07, 0x00,
+    0x14, 0x7F, 0x14, 0x7F, 0x14, 0x24, 0x2A, 0x7F, 0x2A, 0x12, 0x23, 0x13, 0x08, 0x64, 0x62,
+    0x36, 0x49, 0x55, 0x22, 0x50, 0x00, 0x05, 0x03, 0x00, 0x00, 0x00, 0x1C, 0x22, 0x41, 0x00,
+    0x00, 0x41, 0x22, 0x1C, 0x00, 0x08, 0x2A, 0x1C, 0x2A, 0x08, 0x08, 0x08, 0x3E, 0x08, 0x08,
+    0x00, 0x50, 0x30, 0x00, 0x00, 0x08, 0x08, 0x08, 0x08, 0x08, 0x00, 0x60, 0x60, 0x00, 0x00,
+    0x20, 0x10, 0x08, 0x04, 0x02, 0x3E, 0x51, 0x49, 0x45, 0x3E, 0x00, 0x42, 0x7F, 0x40, 0x00,
+    0x42, 0x61, 0x51, 0x49, 0x46, 0x21, 0x41, 0x45, 0x4B, 0x31, 0x18, 0x14, 0x12, 0x7F, 0x10,
+    0x27, 0x45, 0x45, 0x45, 0x39, 0x3C, 0x4A, 0x49, 0x49, 0x30, 0x01, 0x71, 0x09, 0x05, 0x03,
+    0x36, 0x49, 0x49, 0x49, 0x36, 0x06, 0x49, 0x49, 0x29, 0x1E, 0x00, 0x36, 0x36, 0x00, 0x00,
+    0x00, 0x56, 0x36, 0x00, 0x00, 0x08, 0x14, 0x22, 0x41, 0x00, 0x14, 0x14, 0x14, 0x14, 0x14,
+    0x00, 0x41, 0x22, 0x14, 0x08, 0x02, 0x01, 0x51, 0x09, 0x06, 0x32, 0x49, 0x79, 0x41, 0x3E,
+    0x7E, 0x11, 0x11, 0x11, 0x7E, 0x7F, 0x49, 0x49, 0x49, 0x36, 0x3E, 0x41, 0x41, 0x41, 0x22,
+    0x7F, 0x41, 0x41, 0x22, 0x1C, 0x7F, 0x49, 0x49, 0x49, 0x41, 0x7F, 0x09, 0x09, 0x01, 0x01,
+    0x3E, 0x41, 0x41, 0x51, 0x32, 0x7F, 0x08, 0x08, 0x08, 0x7F, 0x00, 0x41, 0x7F, 0x41, 0x00,
+    0x20, 0x40, 0x41, 0x3F, 0x01, 0x7F, 0x08, 0x14, 0x22, 0x41, 0x7F, 0x40, 0x40, 0x40, 0x40,
+    0x7F, 0x02, 0x04, 0x02, 0x7F, 0x7F, 0x04, 0x08, 0x10, 0x7F, 0x3E, 0x41, 0x41, 0x41, 0x3E,
+    0x7F, 0x09, 0x09, 0x09, 0x06, 0x3E, 0x41, 0x51, 0x21, 0x5E, 0x7F, 0x09, 0x19, 0x29, 0x46,
+    0x46, 0x49, 0x49, 0x49, 0x31, 0x01, 0x01, 0x7F, 0x01, 0x01, 0x3F, 0x40, 0x40, 0x40, 0x3F,
+    0x1F, 0x20, 0x40, 0x20, 0x1F, 0x7F, 0x20, 0x18, 0x20, 0x7F, 0x63, 0x14, 0x08, 0x14, 0x63,
+    0x03, 0x04, 0x78, 0x04, 0x03, 0x61, 0x51, 0x49, 0x45, 0x43, 0x00, 0x00, 0x7F, 0x41, 0x41,
+    0x02, 0x04, 0x08, 0x10, 0x20, 0x41, 0x41, 0x7F, 0x00, 0x00, 0x04, 0x02, 0x01, 0x02, 0x04,
+    0x40, 0x40, 0x40, 0x40, 0x40, 0x00, 0x01, 0x02, 0x04, 0x00, 0x20, 0x54, 0x54, 0x54, 0x78,
+    0x7F, 0x48, 0x44, 0x44, 0x38, 0x38, 0x44, 0x44, 0x44, 0x20, 0x38, 0x44, 0x44, 0x48, 0x7F,
+    0x38, 0x54, 0x54, 0x54, 0x18, 0x08, 0x7E, 0x09, 0x01, 0x02, 0x08, 0x14, 0x54, 0x54, 0x3C,
+    0x7F, 0x08, 0x04, 0x04, 0x78, 0x00, 0x44, 0x7D, 0x40, 0x00, 0x20, 0x40, 0x44, 0x3D, 0x00,
+    0x00, 0x7F, 0x10, 0x28, 0x44, 0x00, 0x41, 0x7F, 0x40, 0x00, 0x7C, 0x04, 0x18, 0x04, 0x78,
+    0x7C, 0x08, 0x04, 0x04, 0x78, 0x38, 0x44, 0x44, 0x44, 0x38, 0x7C, 0x14, 0x14, 0x14, 0x08,
+    0x08, 0x14, 0x14, 0x18, 0x7C, 0x7C, 0x08, 0x04, 0x04, 0x08, 0x48, 0x54, 0x54, 0x54, 0x20,
+    0x04, 0x3F, 0x44, 0x40, 0x20, 0x3C, 0x40, 0x40, 0x20, 0x7C, 0x1C, 0x20, 0x40, 0x20, 0x1C,
+    0x3C, 0x40, 0x30, 0x40, 0x3C, 0x44, 0x28, 0x10, 0x28, 0x44, 0x0C, 0x50, 0x50, 0x50, 0x3C,
+    0x44, 0x64, 0x54, 0x4C, 0x44, 0x00, 0x08, 0x36, 0x41, 0x00, 0x00, 0x00, 0x7F, 0x00, 0x00,
+    0x00, 0x41, 0x36, 0x08, 0x00, 0x10, 0x08, 0x08, 0x10, 0x08,
+]
+
+fn den_hash(h: u64, v: u64) -> u64
+    return (h ^ v) * 0x100000001B3
+
+fn den_add_square(t: *ShortText, sq: int)
+    t.add(('a' as int + sq % 8) as u8)
+    t.add(('1' as int + sq / 8) as u8)

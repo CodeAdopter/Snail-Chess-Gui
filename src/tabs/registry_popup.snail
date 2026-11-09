@@ -1,0 +1,254 @@
+use engine/desktop/desktop_app
+use engine/ui/ui_edit
+use src/engines/trust_score
+use src/engines/ccrl_ratings
+use src/views/fact_row
+use src/views/stat_tile
+use src/views/rail
+
+const RegistryRowHeight: f32 = 34.0
+const RegistryListWidth: f32 = 320.0
+const RegistryRatingWidth: f32 = 34.0
+const NearMost: i64 = 120
+
+struct RegistryPopup
+    shown: bool
+    search: UiEditText
+    results: [..]int
+    made_query: [256]u8
+    made_len: int
+    made_version: int = -1
+    chosen: int = -1
+    install_wanted: int = -1
+    ratings: CcrlRatings
+    rated: [..]int
+    linked_version: int = -1
+    linked_ratings: int = -1
+
+    fn open(registry: *Registry, data: *DataFolder)
+        shown = true
+        registry.load(data)
+        if registry.due(): registry.refresh()
+        ratings.load(data)
+        if ratings.due(): ratings.refresh()
+
+    fn draw(app: *DesktopApp, registry: *Registry, theme: *GuiTheme, fonts: *GuiFonts)
+        if not shown: return
+        let ui = &app.ui
+        refresh_results(registry)
+        link_ratings(registry)
+        let w = clamp(ui.width - 80.0, 720.0, 1160.0)
+        let h = clamp(ui.height - 220.0, 320.0, 660.0)
+        var line: [200]u8
+        var sheet = sheet_popup(ui, theme, fonts, "registry", ref shown, w, h, RegistryListWidth)
+        with sheet.header("Add from the registry", status_text(registry, &line))
+            if ui.button(registry.fetching ? "Fetching" : "Refresh") and not registry.fetching
+                registry.refresh()
+                ratings.refresh()
+        with sheet.rail()
+            ui.text_field("registrysearch", &search, "Search engine names, languages and descriptions", UiNode(width: UiSize.grow()))
+            if registry.failure_len > 0
+                let kept = registry.catalog.engines.len > 0 ? " Showing the cached catalog." : ""
+                ui.paragraph(format(&line, "{registry.failure_text()}{kept}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.warn), UiNode(width: UiSize.grow()))
+            list(ui, registry, theme, fonts)
+        with sheet.body(Vec4(0.0, 0.0, 0.0, 0.0), 0.0)
+            with ui.scroll_area("registrydetails", gap: 10.0, node: UiNode(key: chosen, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(28.0, 22.0, 28.0, 24.0)))
+                details(ui, registry, theme, fonts)
+        sheet.end()
+        if sheet.closed: shown = false
+
+    fn refresh_results(registry: *Registry)
+        let query = search.text()
+        if registry.version == made_version and query == str(made_query[0..made_len]): return
+        made_version = registry.version
+        made_len = min(query.len, 256) as int
+        for k in 0..made_len
+            made_query[k] = query[k]
+        registry.search(query, &results)
+        chosen = results.len > 0 ? results[0] : -1
+
+    fn link_ratings(registry: *Registry)
+        if registry.version == linked_version and ratings.version == linked_ratings: return
+        linked_version = registry.version
+        linked_ratings = ratings.version
+        let c = &registry.catalog
+        rated.resize(c.engines.len)
+        for i in 0..c.engines.len
+            rated[i] = ratings.table.find(c.text(c.engines[i].id))
+
+    fn long_rating(i: int) -> i64
+        if i < 0 or i >= rated.len or rated[i] < 0: return -1
+        return ratings.table.entries[rated[i]].long.rating
+
+    fn list(ui: *UiCanvas, registry: *Registry, theme: *GuiTheme, fonts: *GuiFonts)
+        let c = &registry.catalog
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        if c.engines.len == 0: ui.paragraph(registry.fetching ? "Loading catalog..." : "No catalog loaded. Click Refresh to download it.", note)
+        elif results.len == 0: ui.paragraph("No matching engines.", note)
+        var number: [24]u8
+        with v = ui.virtual_list("registryrows", results.len as int, RegistryRowHeight)
+            for r in v.first..v.last
+                let i = results[r]
+                let e = &c.engines[i]
+                with ui.open(UiNode(key: i, width: UiSize.grow(), height: UiSize.fixed(RegistryRowHeight)))
+                    let clicked = open_place(ui, theme, "project", i, RailPlaceTall, i == chosen)
+                    ui.label(c.text(e.name), UiTextStyle(face: i == chosen ? fonts.strong : fonts.text, size: 13.0, color: e.gone ? theme.muted : theme.ink), UiNode(width: UiSize.grow(), clip: true))
+                    ui.label(c.text(e.language), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+                    let rating = long_rating(i)
+                    ui.label(rating >= 0 ? format(&number, "{rating}") : "", UiTextStyle(face: fonts.strong, size: 11.5, color: theme.ink), UiNode(width: UiSize.fixed(RegistryRatingWidth)))
+                    ui.close()
+                    if clicked: chosen = i
+
+    fn details(ui: *UiCanvas, registry: *Registry, theme: *GuiTheme, fonts: *GuiFonts)
+        let c = &registry.catalog
+        if chosen < 0 or chosen >= c.engines.len: return
+        let e = &c.engines[chosen]
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        var line: [300]u8
+        ui.label(c.text(e.name), UiTextStyle(face: fonts.serif, size: 26.0, color: theme.ink))
+        if e.gone: ui.paragraph("The GitHub repository is no longer available. This engine cannot be installed.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn))
+        elif e.archived: ui.paragraph("This repository is archived and is no longer accepting updates.", note)
+        if e.description.len > 0: ui.paragraph(c.text(e.description), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+        strength(ui, theme, fonts)
+        let t = trust_of(c, e)
+        github_tiles(ui, c, e, &t, theme, fonts)
+        fact(ui, fonts, theme, "Language", e.language.len > 0 ? c.text(e.language) : "Not known")
+        fact(ui, fonts, theme, "Licence", e.license.len > 0 ? c.text(e.license) : "Not stated")
+        fact(ui, fonts, theme, "Repository", format(&line, "{c.text(e.repository)} on {e.codeberg ? "Codeberg" : "GitHub"}"))
+        if e.aliases.len > 0: fact(ui, fonts, theme, "Also known as", c.text(e.aliases))
+        if e.notes.len > 0: fact(ui, fonts, theme, "Notes", c.text(e.notes))
+        near(ui, c, theme, fonts)
+        if t.level() == TrustLow
+            var warning: [300]u8
+            ui.paragraph(low_trust_text(&t, &warning), UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, padding: Vec4(0.0, 6.0, 0.0, 0.0)))
+            if not e.gone and ui.button("Install", true)
+                install_wanted = chosen
+                shown = false
+            if e.repository_url.len > 0 and ui.button("Open the repository"): open_link(c.text(e.repository_url))
+            if e.documentation_url.len > 0 and ui.button("Documentation"): open_link(c.text(e.documentation_url))
+            if e.license_url.len > 0 and ui.button("Licence"): open_link(c.text(e.license_url))
+        if not e.gone: ui.paragraph("Click Install to view releases. Compatible builds are listed with the recommended build selected.", note)
+
+    fn strength(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+        let t = &ratings.table
+        var line: [200]u8
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, padding: Vec4(0.0, 4.0, 0.0, 0.0), align: Vec2(0.0, 0.5)))
+            ui.label("CCRL Rating", UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink))
+            let said = t.entries.len == 0 ? (ratings.fetching ? "fetching the ratings" : "no ratings fetched yet") : format(&line, "Open-source engines on one CPU · Ratings from {t.text(t.long_day)} and {t.text(t.blitz_day)}")
+            ui.label(said, UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted), UiNode(width: UiSize.grow(), clip: true))
+            if ui.button("CCRL"): open_link(RatingsHome)
+        let at = chosen < rated.len ? rated[chosen] : -1
+        var none: CcrlRating
+        let r = at >= 0 ? &t.entries[at] : null
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0))
+            rating_tile(ui, "40/15", r != null ? &r.long : &none, t, theme, fonts)
+            rating_tile(ui, "Blitz", r != null ? &r.blitz : &none, t, theme, fonts)
+
+    fn rating_tile(ui: *UiCanvas, list: str, r: *CcrlRating, t: *CcrlTable, theme: *GuiTheme, fonts: *GuiFonts)
+        var value: [40]u8
+        var detail: [200]u8
+        if r.rating < 0
+            stat_tile(ui, fonts, theme, list, "Not rated", "not on this list", theme.muted)
+            return
+        let margin = r.margin >= 0 ? format(&value, "±{r.margin}  ·  ") : ""
+        let shown = format(&detail, "{margin}{t.text(r.version)}")
+        stat_tile(ui, fonts, theme, list, format(&value, "{r.rating}"), shown, theme.ink)
+
+    fn github_tiles(ui: *UiCanvas, c: *Catalog, e: *RegistryEngine, t: *Trust, theme: *GuiTheme, fonts: *GuiFonts)
+        if not t.known
+            fact(ui, fonts, theme, "Trust", e.codeberg ? "Unavailable: statistics cover GitHub projects only." : "No GitHub statistics are available in the catalog.")
+            return
+        let s = &e.stats
+        var a: [40]u8
+        var b: [60]u8
+        var line: [300]u8
+        ui.label(format(&line, "GitHub statistics · Checked {c.text(s.checked)}"), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink), UiNode(padding: Vec4(0.0, 4.0, 0.0, 0.0)))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0))
+            let level = t.level()
+            stat_tile(ui, fonts, theme, "Trust", format(&a, "{t.score()}"), trust_word(level), level == TrustLow ? theme.warn : theme.ink)
+            stat_tile(ui, fonts, theme, "Stars", short_count(s.stars, &a), counted(s.forks, "fork", "forks", &b), theme.ink)
+            let year = s.commits_year >= 0 ? format(&b, "{s.commits_year} this year") : ""
+            stat_tile(ui, fonts, theme, "Commits", short_count(s.commits, &a), year, theme.ink)
+            let months = months_between(c.text(s.created), c.text(s.checked))
+            let since = s.created.len > 0 ? format(&b, "since {c.text(s.created)[0..4]}") : ""
+            stat_tile(ui, fonts, theme, "Age", age_words(months, &a), since, theme.ink)
+        var d: [60]u8
+        let pushed = s.pushed.len > 0 ? format(&a, ", last pushed {c.text(s.pushed)}") : ""
+        fact(ui, fonts, theme, "Activity", format(&line, "{counted(s.contributors, "contributor", "contributors", &b)}, {counted(s.releases, "release", "releases", &d)}{pushed}"))
+
+    fn near(ui: *UiCanvas, c: *Catalog, theme: *GuiTheme, fonts: *GuiFonts)
+        let at = chosen < rated.len ? rated[chosen] : -1
+        if at < 0: return
+        let mine = &ratings.table.entries[at]
+        let blitz = mine.long.rating < 0
+        let own = blitz ? mine.blitz.rating : mine.long.rating
+        var best: [3]int
+        var gap: [3]i64
+        var n = 0
+        for j in 0..rated.len
+            if j == chosen or rated[j] < 0: continue
+            let other = &ratings.table.entries[rated[j]]
+            let r = blitz ? other.blitz.rating : other.long.rating
+            if r < 0: continue
+            let d = r > own ? r - own : own - r
+            if d > NearMost or (n == 3 and d >= gap[2]): continue
+            var k = n < 3 ? n : 2
+            while k > 0 and gap[k - 1] > d
+                best[k] = best[k - 1]
+                gap[k] = gap[k - 1]
+                k -= 1
+            best[k] = j as int
+            gap[k] = d
+            if n < 3: n += 1
+        if n == 0: return
+        var line: [120]u8
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5), clip: true))
+            ui.label(blitz ? "Similar blitz" : "Similar strength", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.fixed(96.0)))
+            for k in 0..n
+                let other = &ratings.table.entries[rated[best[k]]]
+                let r = blitz ? other.blitz.rating : other.long.rating
+                if ui.button(format(&line, "{c.text(c.engines[best[k]].name)}  {r}")): chosen = best[k]
+
+    fn release()
+        results.free()
+        rated.free()
+        ratings.release()
+
+fn open_link(url: str)
+    var buf: [2100]u8
+    SDL_OpenURL(format(&buf, "{url}").ptr as cstr)
+
+fn short_count(n: i64, buf: *[40]u8) -> str
+    if n < 0: return format(buf, "Not counted")
+    if n < 10000: return format(buf, "{n}")
+    if n < 100000: return format(buf, "{n / 1000}.{n / 100 % 10}k")
+    return format(buf, "{n / 1000}k")
+
+fn age_words(months: int, buf: *[40]u8) -> str
+    if months < 0: return format(buf, "Not known")
+    if months < 1: return format(buf, "New")
+    if months == 1: return format(buf, "1 month")
+    if months < 24: return format(buf, "{months} months")
+    return format(buf, "{months / 12} years")
+
+fn counted(n: i64, one: str, many: str, buf: *[60]u8) -> str
+    if n < 0: return format(buf, "{many} not counted")
+    if n == 1: return format(buf, "1 {one}")
+    return format(buf, "{n} {many}")
+
+fn status_text(registry: *Registry, line: *[200]u8) -> str
+    if registry.fetching
+        let (got, total) = registry.fetch.progress()
+        return format(line, "Fetching the catalog, {got / 1024} KB")
+    let n = registry.catalog.engines.len
+    if n == 0: return format(line, "")
+    var age: [40]u8
+    return format(line, "{n} engines · Catalog updated {registry.catalog.text(registry.catalog.updated)} · Downloaded {age_text(wall_ns() - registry.fetched_ns, &age)}")
+
+fn age_text(ns: i64, buf: *[40]u8) -> str
+    let s = ns / 1000000000
+    if s < 60: return format(buf, "just now")
+    if s < 3600: return s < 120 ? format(buf, "a minute ago") : format(buf, "{s / 60} minutes ago")
+    if s < 172800: return s < 7200 ? format(buf, "an hour ago") : format(buf, "{s / 3600} hours ago")
+    return format(buf, "{s / 86400} days ago")

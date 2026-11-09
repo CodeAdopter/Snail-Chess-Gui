@@ -1,0 +1,173 @@
+use src/tabs/history_view
+use src/tabs/overview_view
+use src/tabs/fast_history
+use src/views/stat_tile
+use engine/desktop/command_bar
+use src/views/rail
+
+const ProfileSections = ["Overview", "All games", "Bullet", "Blitz", "Rapid", "Classical", "Infinite", "Tournaments", "FastChess"]
+const ProfileWords = ["overview", "games", "bullet", "blitz", "rapid", "classical", "infinite", "tournaments", "fastchess"]
+const ProfileAbout = ["Your evaluated positions, ratings, results, best wins and biggest upsets.", "Your games against engines and on Lichess, newest first.", "Games with an effective time of under 3 minutes for 40 moves.", "Games with an effective time of 3 to under 8 minutes for 40 moves.", "Games with an effective time of 8 to under 25 minutes for 40 moves.", "Games with an effective time of 25 minutes or more for 40 moves.", "Games without a clock or with a fixed search depth or node count. These games are unrated.", "Your tournaments and matches between engines.", "Your fastchess matches and SPRT tests, newest first."]
+const ProfileGroups = ["YOU", "GAMES", "RECORDS"]
+const ProfileGroupStarts = [0, 1, 7]
+const ProfileIcons = [IconPerson, IconList, IconBullet, IconBolt, IconClock, IconHourglass, IconInfinity, IconTrophy, IconChip]
+const SectionOverview = 0
+const SectionAllGames = 1
+const SectionFirstSpeed = 2
+const SectionTournaments = 7
+const SectionFastRuns = 8
+
+const ProfileRailWidth: f32 = 232.0
+const ProfileTop: f32 = 28.0
+const ProfileHeader: f32 = 92.0
+const BestShown = 5
+
+fn profile_section_named(word: str) -> int
+    for i in 0..ProfileWords.len
+        if ProfileWords[i] == word: return i as int
+    let (n, ok) = uci_number(word)
+    if ok: return clamp(n as int, 0, ProfileSections.len as int - 1)
+    return SectionOverview
+
+fn profile_group(section: int) -> int
+    var g = 0
+    for k in 0..ProfileGroupStarts.len
+        if section >= ProfileGroupStarts[k]: g = k as int
+    return g
+
+struct ProfilePage
+    section: int
+    history: HistoryView
+    overview_view: OverviewView
+    fast_history: FastHistory
+    open_cloud: bool
+    kit: SettingsKit
+    icons: LineIcons
+    counts: [6]int
+    best: [..]int
+    upsets: [..]int
+    made_for: u64
+
+    fn draw(app: *DesktopApp, desk: *DesktopLook, look: *BoardLook, record: *PlayerRecord, events: []*EventRunner, played: *PlayedIndex, person: str, sharing: bool)
+        let ui = &app.ui
+        if section != SectionFastRuns: fast_history.read_done = false
+        let top = TabRowHeight + CommandBarHeight
+        if played.version != made_for
+            made_for = played.version
+            gather(played)
+        let x = places_width(ui, ProfileRailWidth)
+        command_bar_rail(app, desk, x, PageCurve)
+        rail(ui, look, top, x)
+        let w = max(ui.width - x, 1.0)
+        let h = max(ui.height - top, 1.0)
+        let side = w < 640.0 ? 20.0 : 40.0
+        let inner = max(w - side * 2.0, 1.0)
+        let g = profile_group(section)
+        kit = SettingsKit(ui, look.theme, look.fonts, min(inner, KitColumn), 0, 0.0)
+        if section == SectionOverview
+            look.sheet.prepare(&app.gpu, &app.ui_gpu, look.set, max(floor(HighlightBoard / 8.0 * app.scale) as int, 8), look.costume)
+            with ui.open(UiNode(name: "profilebody", floating: true, offset: Vec2(x, top), width: UiSize.fixed(w), height: UiSize.fixed(h), clip: true))
+                with ui.scroll_area("profilescroll", node: UiNode(key: section, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(side, ProfileTop, side, 40.0)))
+                    with ui.open(UiNode(name: "profilecolumn", width: UiSize.fixed(kit.width), gap: 8.0))
+                        kit.title(ProfileGroups[g], person, ProfileAbout[section])
+                        evals_card(ui, look, sharing)
+                        overview_view.draw(ui, look, record, played, &kit, best, upsets)
+            if overview_view.opened >= 0: history.analyse_at = overview_view.opened
+            overview_view.opened = -1
+            return
+        history.only = section == SectionTournaments ? HistoryEvents : HistoryGames
+        history.speed = section >= SectionFirstSpeed and section < SectionTournaments ? section - SectionFirstSpeed : -1
+        with ui.open(UiNode(name: "profilebody", floating: true, offset: Vec2(x, top), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(side, ProfileTop, side, 40.0), gap: 8.0, clip: true))
+            with ui.open(UiNode(width: UiSize.grow(), height: UiSize.fixed(ProfileHeader), clip: true))
+                kit.title(ProfileGroups[g], ProfileSections[section], ProfileAbout[section])
+            if section < SectionTournaments
+                look.sheet.prepare(&app.gpu, &app.ui_gpu, look.set, max(floor(card_board(inner) / 8.0 * app.scale) as int, 8), look.costume)
+                history.draw(ui, look, events, played, inner)
+            elif section == SectionFastRuns: fast_history.draw(ui, look, inner)
+            else: history.draw(ui, look, events, played, inner)
+
+    fn evals_card(ui: *UiCanvas, look: *BoardLook, sharing: bool)
+        let theme = look.theme
+        let fonts = look.fonts
+        let r = eval_recorder
+        let c = cloud_db
+        let counts = r ? r.counts() : EvalTally()
+        var a: [48]u8
+        var b: [48]u8
+        var e: [48]u8
+        var line: [200]u8
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        with ui.open(UiNode(name: "evalscard", flow: FlowRow, width: UiSize.grow(), padding: Vec4(20.0, 16.0, 20.0, 16.0), gap: 18.0, align: Vec2(0.0, 0.5), box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(10.0), border: 1.0, border_color: theme.line))))
+            with ui.open(UiNode(name: "evalsmark", width: UiSize.fixed(46.0), height: UiSize.fixed(46.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.14)), radius: Vec4.splat(23.0))))
+                icons.show(ui, IconCloud, 24.0, theme.accent)
+            with ui.open(UiNode(name: "evalswords", width: UiSize.grow(), gap: 2.0, clip: true))
+                with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
+                    ui.label("CLOUD CONTRIBUTIONS", UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8))
+                    card_chip(ui, theme, fonts, sharing ? "SHARING" : "OFF", sharing ? theme.gain() : theme.muted)
+                let shared = c ? c.lines_shared : 0
+                with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 1.0)))
+                    ui.label(group_digits(shared, &a), UiTextStyle(face: fonts.serif, size: 30.0, color: theme.ink))
+                    ui.label(shared == 1 ? "line" : "lines", note, UiNode(padding: Vec4(0.0, 0.0, 0.0, 6.0)))
+                if sharing: ui.paragraph(format(&line, "{group_digits(counts.positions, &b)} positions evaluated on this computer  ·  {group_digits(counts.unshared, &e)} lines waiting"), note, UiNode(width: UiSize.grow()))
+                elif counts.unshared > 0: ui.paragraph(format(&line, "{group_digits(counts.positions, &b)} positions evaluated on this computer  ·  {group_digits(counts.unshared, &e)} lines ready to share once you opt in"), note, UiNode(width: UiSize.grow()))
+                else: ui.paragraph(format(&line, "{group_digits(counts.positions, &b)} positions evaluated on this computer. Opt in to share your engines' lines with the cloud."), note, UiNode(width: UiSize.grow()))
+            if sharing
+                if ui.button("Manage"): open_cloud = true
+            elif ui.button("Enable", true): open_cloud = true
+
+    fn rail(ui: *UiCanvas, look: *BoardLook, top: f32, wide: f32)
+        let theme = look.theme
+        let fonts = look.fonts
+        let folded = wide < ProfileRailWidth
+        var n: [16]u8
+        with rail_room(ui, "profilerail", wide)
+            for g in 0..ProfileGroups.len
+                rail_group(ui, theme, fonts, g as int, ProfileGroups[g], g == 0, folded)
+                let last = g + 1 < ProfileGroups.len ? ProfileGroupStarts[g + 1] : ProfileSections.len as int
+                for i in ProfileGroupStarts[g]..last
+                    let games = i >= SectionAllGames and i < SectionTournaments
+                    let aside = games ? format(&n, "{counts[i - SectionAllGames]}") : ""
+                    if rail_icon_place(ui, theme, fonts, &icons, "profilesection", i as int, ProfileIcons[i], ProfileSections[i], aside, i == section, folded): section = i
+
+    fn gather(played: *PlayedIndex)
+        for k in 0..6
+            counts[k] = 0
+        var wins: [..]RankedGame
+        defer wins.free()
+        var above: [..]RankedGame
+        defer above.free()
+        for i in 0..played.games.len
+            let g = &played.games[i]
+            if g.person < 0: continue
+            counts[0] += 1
+            counts[1 + g.speed] += 1
+            if played.outcome(g) != 1 or g.opponent_elo <= 0 or g.person_elo <= 0: continue
+            wins.push(RankedGame(i as int, g.opponent_elo))
+            if g.opponent_elo > g.person_elo: above.push(RankedGame(i as int, g.opponent_elo - g.person_elo))
+        top_games(wins, &best)
+        top_games(above, &upsets)
+
+    fn release()
+        icons.release()
+        history.release()
+        overview_view.release()
+        fast_history.release()
+        best.free()
+        upsets.free()
+
+struct RankedGame
+    game: int
+    score: int
+
+fn top_games(all: [..]RankedGame, into: *[..]int)
+    into.clear()
+    var list = all
+    for i in 1..list.len
+        var k = i as int
+        while k > 0 and list[k].score > list[k - 1].score
+            let held = list[k]
+            list[k] = list[k - 1]
+            list[k - 1] = held
+            k -= 1
+    for k in 0..min(list.len as int, BestShown)
+        into.push(list[k].game)

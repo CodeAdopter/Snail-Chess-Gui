@@ -1,0 +1,245 @@
+use src/play/time_control
+use src/engines/engine_library
+
+enum EventFormat: u8
+    RoundRobin
+    Gauntlet
+    HeadToHead
+
+enum EventBook: u8
+    NoEventBook
+    CollectionBook
+    ConsensusBook
+
+struct Entrant
+    engine_id: int
+    profile_id: int
+    changes: EngineProfile
+    name: [..]u8
+
+    fn name_text() -> str
+        return str(name[0..name.len])
+
+    fn release()
+        changes.release()
+        name.free()
+
+struct Adjudication
+    resign: bool = true
+    resign_cp: int = 1000
+    resign_moves: int = 3
+    draw: bool = true
+    draw_cp: int = 10
+    draw_moves: int = 8
+    draw_after: int = 40
+
+struct EventConfig
+    name: [..]u8
+    format: EventFormat
+    challenger: int
+    entrants: [..]Entrant
+    games_per_pairing: int = 2
+    control: TimeControl
+    at_once: int = 1
+    margin_ms: i64 = 100
+    adjudication: Adjudication
+    seed: u64
+    reuse_openings: bool = true
+    threads: int
+    hash_mb: int
+    book: EventBook
+    book_id: int
+    book_made: i64
+    book_name: [..]u8
+
+    fn name_text() -> str
+        return str(name[0..name.len])
+
+    fn book_name_text() -> str
+        return str(book_name[0..book_name.len])
+
+    fn use_consensus(id: int, made: i64, shown: str)
+        use_book(id, made, shown)
+        book = ConsensusBook
+        reuse_openings = true
+
+    fn use_book(id: int, made: i64, shown: str)
+        book = CollectionBook
+        book_id = id
+        book_made = made
+        set_text(&book_name, shown)
+
+    fn set_name(s: str)
+        set_text(&name, s)
+
+    fn add_entrant(engine_id: int, profile_id: int, shown: str) -> *Entrant
+        let e = entrants.add()
+        e.engine_id = engine_id
+        e.profile_id = profile_id
+        set_text(&e.name, shown)
+        return e
+
+    fn all_engines(option: str) -> int
+        if option == "Threads": return threads
+        if option == "Hash": return hash_mb
+        return 0
+
+    fn overrides(k: int, entry: *EngineEntry, into: *EngineProfile)
+        into.clear_values()
+        var t: [16]u8
+        for option in ["Threads", "Hash"]
+            let n = all_engines(option)
+            if n > 0 and entry and entry.option_index(option) >= 0: into.put(option, format(&t, "{n}"))
+        for v in entrants[k].changes.values
+            into.put(v.name_text(), v.value_text())
+
+    fn problem() -> str
+        if entrants.len < 2: return "Choose at least two engines."
+        if format == HeadToHead and entrants.len != 2: return "Head-to-head format requires exactly two engines."
+        if format == Gauntlet and (challenger < 0 or challenger >= entrants.len): return "Choose the challenger."
+        if games_per_pairing < 2 or games_per_pairing % 2 != 0: return "Games per pairing must be even, so every opening is played with both colours."
+        if at_once < 1: return "Concurrent games must be at least 1."
+        if control.kind == NoClock: return "Engines need a time control."
+        if book == CollectionBook and book_id <= 0: return "Choose an opening book or select No book."
+        return ""
+
+    fn write(out: *[..]u8)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.object()
+        doc.set(root, "name", doc.text(name_text()))
+        doc.set(root, "format", doc.text(format_word(format)))
+        doc.set(root, "challenger", doc.number(challenger as f64))
+        doc.set(root, "games_per_pairing", doc.number(games_per_pairing as f64))
+        doc.set(root, "at_once", doc.number(at_once as f64))
+        doc.set(root, "margin_ms", doc.number(margin_ms as f64))
+        var hex: [24]u8
+        doc.set(root, "seed", doc.text(format(&hex, "{seed:016X}")))
+        doc.set(root, "reuse_openings", doc.boolean(reuse_openings))
+        doc.set(root, "threads", doc.number(threads as f64))
+        doc.set(root, "hash_mb", doc.number(hash_mb as f64))
+        let b = doc.object()
+        doc.set(b, "kind", doc.text(BookWords[book as int]))
+        doc.set(b, "id", doc.number(book_id as f64))
+        doc.set(b, "made", doc.number(book_made as f64))
+        doc.set(b, "name", doc.text(book_name_text()))
+        doc.set(root, "book", b)
+        let t = doc.object()
+        doc.set(t, "kind", doc.text(clock_word(control.kind)))
+        doc.set(t, "base_ms", doc.number(control.base_ms as f64))
+        doc.set(t, "increment_ms", doc.number(control.increment_ms as f64))
+        doc.set(t, "moves", doc.number(control.moves as f64))
+        doc.set(t, "move_ms", doc.number(control.move_ms as f64))
+        doc.set(t, "depth", doc.number(control.depth as f64))
+        doc.set(t, "nodes", doc.number(control.nodes as f64))
+        doc.set(root, "time", t)
+        let a = doc.object()
+        let r = &adjudication
+        doc.set(a, "resign", doc.boolean(r.resign))
+        doc.set(a, "resign_cp", doc.number(r.resign_cp as f64))
+        doc.set(a, "resign_moves", doc.number(r.resign_moves as f64))
+        doc.set(a, "draw", doc.boolean(r.draw))
+        doc.set(a, "draw_cp", doc.number(r.draw_cp as f64))
+        doc.set(a, "draw_moves", doc.number(r.draw_moves as f64))
+        doc.set(a, "draw_after", doc.number(r.draw_after as f64))
+        doc.set(root, "adjudication", a)
+        let list = doc.array()
+        for e in entrants
+            let v = doc.object()
+            doc.set(v, "engine", doc.number(e.engine_id as f64))
+            doc.set(v, "profile", doc.number(e.profile_id as f64))
+            doc.set(v, "name", doc.text(e.name_text()))
+            let changes = doc.object()
+            for c in e.changes.values
+                doc.set(changes, c.name_text(), doc.text(c.value_text()))
+            doc.set(v, "changes", changes)
+            doc.push(list, v)
+        doc.set(root, "entrants", list)
+        doc.write(root, out)
+
+    fn read(text: str) -> bool
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(text)
+        if not doc.is(root, JsonObject): return false
+        let list = doc.get(root, "entrants")
+        if not doc.is(list, JsonArray): return false
+        set_name(json_text(&doc, root, "name"))
+        format = format_named(json_text(&doc, root, "format"))
+        challenger = doc.num_at(root, "challenger", 0.0) as int
+        games_per_pairing = doc.num_at(root, "games_per_pairing", 2.0) as int
+        at_once = doc.num_at(root, "at_once", 1.0) as int
+        margin_ms = doc.num_at(root, "margin_ms", 100.0) as i64
+        seed = parse_hex(json_text(&doc, root, "seed")) as u64
+        reuse_openings = json_flag(&doc, root, "reuse_openings")
+        threads = doc.num_at(root, "threads", 0.0) as int
+        hash_mb = doc.num_at(root, "hash_mb", 0.0) as int
+        let b = doc.get(root, "book")
+        if doc.is(b, JsonObject)
+            let kind = json_text(&doc, b, "kind")
+            for i in 0..BookWords.len
+                if BookWords[i] == kind: book = i as EventBook
+            book_id = doc.num_at(b, "id", 0.0) as int
+            book_made = doc.num_at(b, "made", 0.0) as i64
+            set_text(&book_name, json_text(&doc, b, "name"))
+        let t = doc.get(root, "time")
+        if doc.is(t, JsonObject)
+            control.kind = clock_named(json_text(&doc, t, "kind"))
+            control.base_ms = doc.num_at(t, "base_ms", 300000.0) as i64
+            control.increment_ms = doc.num_at(t, "increment_ms", 0.0) as i64
+            control.moves = doc.num_at(t, "moves", 40.0) as int
+            control.move_ms = doc.num_at(t, "move_ms", 1000.0) as i64
+            control.depth = doc.num_at(t, "depth", 10.0) as int
+            control.nodes = doc.num_at(t, "nodes", 100000.0) as i64
+        let a = doc.get(root, "adjudication")
+        if doc.is(a, JsonObject)
+            let r = &adjudication
+            r.resign = json_flag(&doc, a, "resign")
+            r.resign_cp = doc.num_at(a, "resign_cp", 1000.0) as int
+            r.resign_moves = doc.num_at(a, "resign_moves", 3.0) as int
+            r.draw = json_flag(&doc, a, "draw")
+            r.draw_cp = doc.num_at(a, "draw_cp", 10.0) as int
+            r.draw_moves = doc.num_at(a, "draw_moves", 8.0) as int
+            r.draw_after = doc.num_at(a, "draw_after", 40.0) as int
+        var v = doc.first(list)
+        while v >= 0
+            if doc.is(v, JsonObject)
+                let e = add_entrant(doc.num_at(v, "engine", 0.0) as int, doc.num_at(v, "profile", 0.0) as int, json_text(&doc, v, "name"))
+                let changes = doc.get(v, "changes")
+                if doc.is(changes, JsonObject)
+                    var c = doc.first(changes)
+                    while c >= 0
+                        if doc.is(c, JsonString): e.changes.put(doc.key_of(c), doc.str_of(c))
+                        c = doc.next(c)
+            v = doc.next(v)
+        return true
+
+    fn release()
+        for i in 0..entrants.len
+            entrants[i].release()
+        entrants.free()
+        name.free()
+        book_name.free()
+
+fn format_word(f: EventFormat) -> str
+    match f
+        Gauntlet: return "gauntlet"
+        HeadToHead: return "head-to-head"
+    return "round-robin"
+
+fn format_named(w: str) -> EventFormat
+    if w == "gauntlet": return Gauntlet
+    if w == "head-to-head": return HeadToHead
+    return RoundRobin
+
+const BookWords = ["none", "collection", "consensus"]
+
+const ClockWords = ["none", "increment", "moves-in-time", "time-per-move", "depth", "nodes"]
+
+fn clock_word(k: ClockKind) -> str
+    return ClockWords[k as int]
+
+fn clock_named(w: str) -> ClockKind
+    for i in 0..ClockWords.len
+        if ClockWords[i] == w: return i as ClockKind
+    return BaseIncrement

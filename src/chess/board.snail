@@ -1,0 +1,51 @@
+use chess/attacks
+use chess/pawns
+
+struct Board
+    bb: [PieceLimit]Bitboard
+    squares: [64]Piece
+    side: Side
+    castling: u8
+    en_passant: Square = Square.none
+    clock: int
+    fullmove: int = 1
+    key: u64
+
+    @inline
+    fn pieces(side: Side, kind: Kind) -> Bitboard
+        return bb[kind << 1 | side]
+
+    @inline
+    fn occupancy(side: Side) -> Bitboard
+        return bb[side]
+
+    @inline
+    fn occupied() -> Bitboard
+        return bb[White] | bb[Black]
+
+    @inline
+    fn bishops_queens(side: Side) -> Bitboard
+        return pieces(side, Bishop) | pieces(side, Queen)
+
+    @inline
+    fn rooks_queens(side: Side) -> Bitboard
+        return pieces(side, Rook) | pieces(side, Queen)
+
+    @inline
+    fn king_square(side: Side) -> Square
+        return pieces(side, King).first
+
+    fn in_check() -> bool
+        return is_attacked[side](king_square(side), occupied())
+
+    @inline
+    fn is_attacked[us: Side](sq: Square, occupied: Bitboard) -> bool
+        const them = us.other
+        let target = sq.bit
+        let leapers = (capture_west(target) | capture_east(target)) & pieces(them, Pawn) | knight_attacks(sq) & pieces(them, Knight) | king_attacks(sq) & pieces(them, King)
+        if leapers: return true
+
+        let diagonal = bishops_queens(them)
+        if bishop_reach(sq) & diagonal and bishop_attacks(sq, occupied) & diagonal: return true
+        let straight = rooks_queens(them)
+        return rook_reach(sq) & straight and rook_attacks(sq, occupied) & straight

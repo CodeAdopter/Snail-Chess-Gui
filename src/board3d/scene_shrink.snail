@@ -1,0 +1,43 @@
+use engine/gpu/capture
+use engine/gpu/frame
+use engine/math/vec4
+
+struct SceneShrink
+    pipeline: *Pipeline
+    sampler: *SDL_GPUSampler
+
+    fn run(gpu: *Gpu, frame: *Frame, big: *Texture, small: *Texture)
+        if pipeline == null
+            var desc: PipelineDesc
+            desc.vertex = shader("engine/shaders/post.hlsl", vertex: "fullscreen_vs")
+            desc.fragment = shader("shaders/shrink3d.hlsl", fragment: "shrink_ps")
+            desc.color_format = CaptureFormat
+            pipeline = gpu.pipeline(&desc)
+            sampler = gpu.sampler(false, false)
+        let sizes = Vec4(big.width as f32, big.height as f32, big.width as f32 / small.width as f32, big.height as f32 / small.height as f32)
+        var pass = frame.pass_to(small, Color.rgb(0.0, 0.0, 0.0), null)
+        pass.bind(pipeline)
+        pass.fragment_texture(0, big, sampler)
+        pass.fragment_uniforms(0, &sizes, sizeof(Vec4))
+        pass.draw(3)
+        pass.end()
+
+    fn release(gpu: *Gpu)
+        if pipeline: gpu.release_pipeline(pipeline)
+        if sampler: gpu.release_sampler(sampler)
+        pipeline = null
+        sampler = null
+
+fn fit_target(gpu: *Gpu, t: *Texture, w: int, h: int) -> bool
+    if t.handle and t.width == w and t.height == h: return false
+    if t.handle: gpu.release_texture(t)
+    *t = gpu.render_target(w, h, CaptureFormat)
+    return true
+
+fn fit_drawn(gpu: *Gpu, shown: *Texture, big: *Texture, w: int, h: int, dw: int, dh: int) -> bool
+    if dw > w
+        let a = fit_target(gpu, shown, w, h)
+        let b = fit_target(gpu, big, dw, dh)
+        return a or b
+    if big.handle: gpu.release_texture(big)
+    return fit_target(gpu, shown, dw, dh)

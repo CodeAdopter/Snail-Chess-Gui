@@ -1,0 +1,19 @@
+use src/game/pgn_write
+use src/database/eval_recorder
+
+fn save_played(data: *DataFolder, game: *Game) -> bool
+    var text: [..]u8
+    defer text.free()
+    write_pgn(game, &text)
+    text.push('\n')
+    if eval_recorder: eval_recorder.keep_game(str(text[0..text.len]), false)
+    return save_history(data, str(text[0..text.len]))
+
+fn save_history(data: *DataFolder, text: str) -> bool
+    if not data.make_folder("history"): return false
+    var path: [600]u8
+    let io = SDL_IOFromFile(data.path("history\\games.pgn", &path).ptr as cstr, "ab")
+    if not io: return false
+    let wrote = SDL_WriteIO(io, text.ptr, text.len as u64)
+    let closed = SDL_CloseIO(io)
+    return wrote == text.len as u64 and closed

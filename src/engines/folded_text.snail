@@ -1,0 +1,23 @@
+fn has_folded(text: str, part: str) -> bool
+    return find_folded(text, part) >= 0
+
+fn find_folded(text: str, part: str) -> int
+    if part.len == 0: return 0
+    if part.len > text.len: return -1
+    for at in 0..text.len - part.len + 1
+        var same = true
+        for k in 0..part.len
+            if fold_ascii(text[at + k]) != fold_ascii(part[k])
+                same = false
+                break
+        if same: return at as int
+    return -1
+
+fn ends_folded(name: str, tail: str) -> bool
+    return name.len >= tail.len and find_folded(name[name.len - tail.len..name.len], tail) == 0
+
+fn same_folded(a: str, b: str) -> bool
+    return a.len == b.len and find_folded(a, b) == 0
+
+fn fold_ascii(c: u8) -> u8
+    return c >= 'A' and c <= 'Z' ? c + 32 : c

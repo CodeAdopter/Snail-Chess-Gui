@@ -1,0 +1,236 @@
+use engine/ui/ui_gpu
+use engine/desktop/png_image
+use src/views/board_palette
+use src/theme/theme
+use src/pieces/finishes
+
+enum Backdrop: u8
+    ThemeBackdrop
+    Picture
+    Colours
+    Mist
+    Midnight
+    Paper
+    Linen
+    Concrete
+    Clouds
+
+const BackdropWords = ["theme", "picture", "colours", "mist", "midnight", "paper", "linen", "concrete", "clouds"]
+const BackdropLabels = ["Theme", "Picture", "Your colours", "Mist", "Midnight", "Paper", "Linen", "Concrete", "Above the clouds"]
+const CustomBackdrops = [1, 2]
+const BasicBackdrops = [0, 3, 4, 5, 6, 7]
+const DetailedBackdrops = [8]
+const ColourBlends = ["Solid", "Fade", "Glow"]
+const BackdropSwatches = [0x08090B, 0x0E1418, 0x1B2430, 0x2B3A4A, 0x4A6178, 0x8EA3B8, 0x10241B, 0x24452F, 0x5B8463, 0x241830, 0x4A2F5A, 0x8C5A7E, 0x2E1A12, 0x6B3A22, 0xB8733F, 0xD9B48A, 0xEDE6DA, 0xF7F5F0]
+const PicturePathBytes = 1024
+const BackdropShaders = 2
+
+const PanelPart = 0
+const SheetPart = 1
+const PagePart = 2
+const ThemeParts = 3
+const ThemedSlots = 12
+const FrontCode = 16
+
+fn backdrop_named(word: str) -> Backdrop
+    for i in 0..BackdropWords.len
+        if BackdropWords[i] == word: return i as Backdrop
+    return ThemeBackdrop
+
+fn backdrop_shader(b: Backdrop) -> (int, int)
+    match b
+        Mist: return 0, 3
+        Midnight: return 0, 4
+        Paper: return 0, 5
+        Linen: return 0, 6
+        Concrete: return 0, 7
+        Clouds: return 1, 0
+    return 0, 0
+
+fn backdrop_moves(b: Backdrop) -> bool
+    let (m, variant) = backdrop_shader(b)
+    return m > 0
+
+fn backdrop_reaches_over(b: Backdrop) -> bool
+    return b == Clouds
+
+struct Surfaces
+    renderer: *UiRenderer
+    made: bool
+    wood: u32
+    stone: u32
+    glass: u32
+    shaders: [BackdropShaders]u32
+    themed: [ThemedSlots]u32
+    themed_boards: [3]u32
+    finishes: [FinishCount]u32
+    fold: u32
+    accent: f32
+    seconds: f32
+    started: i64
+    picture: Texture
+    picture_ready: bool
+    picture_path: [PicturePathBytes]u8
+    picture_len: int
+    colour_a: u32 = 0x0E1418
+    colour_b: u32 = 0x2B3A4A
+    blend: int = 2
+
+    fn aside_material(code: ShaderCode) -> u32
+        let was = renderer.gpu.aside_on
+        renderer.gpu.build_aside(true)
+        let m = renderer.add_material(code)
+        renderer.gpu.build_aside(was)
+        return m
+
+    fn make()
+        if made or not renderer: return
+        made = true
+        wood = aside_material(shader("shaders/board_wood.hlsl", fragment: "material_ps"))
+        stone = aside_material(shader("shaders/board_stone.hlsl", fragment: "material_ps"))
+        glass = aside_material(shader("shaders/board_glass.hlsl", fragment: "material_ps"))
+
+    fn backdrop_material(k: int) -> u32
+        if shaders[k] != 0 or not renderer: return shaders[k]
+        var m: u32 = 0
+        if k == 0: m = aside_material(shader("shaders/backdrop_flat.hlsl", fragment: "material_ps"))
+        else: m = aside_material(shader("shaders/clouds.hlsl", fragment: "material_ps"))
+        shaders[k] = m
+        return m
+
+    fn theme_material(name: ThemeName, part: int) -> u32
+        let k = (name as int - BasicThemes) * ThemeParts + part
+        if k < 0 or k >= ThemedSlots: return 0
+        if themed[k] != 0 or not renderer: return themed[k]
+        var m: u32 = 0
+        if name == Goo
+            if part == PanelPart: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_panel_ps"))
+            elif part == SheetPart: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_sheet_ps"))
+            else: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_page_ps"))
+        elif name == Paper
+            if part == PanelPart: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_panel_ps"))
+            elif part == SheetPart: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_sheet_ps"))
+            else: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_page_ps"))
+        elif name == Neon
+            if part == PanelPart: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_panel_ps"))
+            elif part == SheetPart: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_sheet_ps"))
+            else: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_page_ps"))
+        themed[k] = m
+        return m
+
+    fn tick(accent_rgb: f32, now_seconds: f32)
+        accent = accent_rgb
+        seconds = now_seconds
+
+    fn themed_board(surface: BoardSurface) -> u32
+        let k = surface as int - CircuitSurface as int
+        if k < 0 or k > 2 or not renderer: return 0
+        if themed_boards[k] != 0: return themed_boards[k]
+        var m: u32 = 0
+        if surface == CircuitSurface: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_board_ps"))
+        elif surface == GooSurface: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_board_ps"))
+        else: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_board_ps"))
+        themed_boards[k] = m
+        return m
+
+    fn finish_material(f: PieceFinish) -> u32
+        let k = f as int
+        if k <= 0 or k >= FinishCount or not renderer: return 0
+        if finishes[k] != 0: return finishes[k]
+        var m: u32 = 0
+        if f == CircuitFinish: m = aside_material(shader("shaders/neon.hlsl", fragment: "neon_piece_ps"))
+        elif f == GooFinish: m = aside_material(shader("shaders/goo.hlsl", fragment: "goo_piece_ps"))
+        else: m = aside_material(shader("shaders/paper.hlsl", fragment: "paper_piece_ps"))
+        finishes[k] = m
+        return m
+
+    fn fold_material() -> u32
+        if fold == 0 and renderer: fold = aside_material(shader("shaders/paper.hlsl", fragment: "fold_piece_ps"))
+        return fold
+
+    fn finish_values() -> Vec4
+        return Vec4(accent, seconds, 0.0, 0.0)
+
+    fn board_box(c: BoardColors) -> (UiBox, bool)
+        if c.surface == FlatSurface: return UiBox(), false
+        if c.surface as int >= CircuitSurface as int
+            let t = themed_board(c.surface)
+            if t == 0: return UiBox(), false
+            return UiBox(fill: UiFill.solid(c.dark), material: t, values: Vec4(c.light_rgb as f32, c.dark_rgb as f32, accent, seconds)), true
+        make()
+        if not made: return UiBox(), false
+        let m = c.surface == WoodSurface ? wood : c.surface == GlassSurface ? glass : stone
+        return UiBox(fill: UiFill.solid(c.dark), material: m, values: Vec4(c.light_rgb as f32, c.dark_rgb as f32, c.style, 0.0)), true
+
+    fn draw_backdrop(ui: *UiCanvas, b: Backdrop, x: f32, y: f32, w: f32, h: f32, now: i64, board: Vec4, corners: Vec4 = Vec4(0.0, 0.0, 0.0, 0.0))
+        if b == ThemeBackdrop: return
+        if b == Picture
+            if not picture_ready: return
+            ui.texture(&picture, x, y, w, h, Color(1.0, 1.0, 1.0, 1.0), 0.0, picture_uv(w, h), corners: corners)
+            ui.shadow(board.x, board.y, board.z, board.z, UiShadow(color: Color(0.0, 0.0, 0.0, 0.45), y: board.z * 0.02, blur: board.z * 0.05), Vec4.splat(3.0))
+            return
+        let half = board.z * 0.5
+        var box = backdrop_box(ui, b, now, Vec2(board.x + half - x, board.y + half - y), half)
+        box.radius = corners
+        ui.box(x, y, w, h, box)
+
+    fn draw_over_board(ui: *UiCanvas, b: Backdrop, x: f32, y: f32, size: f32, now: i64)
+        if not backdrop_reaches_over(b): return
+        let box = over_board_box(ui, b, now, size)
+        if box.material != 0: ui.box(x, y, size, size, box)
+
+    fn backdrop_box(ui: *UiCanvas, b: Backdrop, now: i64, centre: Vec2, half: f32) -> UiBox
+        return material_box(ui, b, now, centre, half, false)
+
+    fn over_board_box(ui: *UiCanvas, b: Backdrop, now: i64, size: f32) -> UiBox
+        if not backdrop_reaches_over(b): return UiBox()
+        return material_box(ui, b, now, Vec2(size * 0.5, size * 0.5), size * 0.5, true)
+
+    fn material_box(ui: *UiCanvas, b: Backdrop, now: i64, centre: Vec2, half: f32, front: bool) -> UiBox
+        if b == ThemeBackdrop or b == Picture: return UiBox()
+        let (k, variant) = backdrop_shader(b)
+        let m = backdrop_material(k)
+        if m == 0: return UiBox()
+        var x: f32 = 0.0
+        var fill = Color(0.0, 0.0, 0.0, 1.0)
+        var code = variant
+        if b == Colours
+            x = colour_a as f32
+            fill = Color.hex(colour_b)
+            code = clamp(blend, 0, 2)
+        elif backdrop_moves(b)
+            if started == 0: started = now
+            x = ui.still ? 0.0 : (((now - started) % 3600000000000) as f64 / 1.0e9) as f32
+            if not ui.still: ui.wake_in(0.0)
+        let packed = clamp(half, 1.0, 8000.0) + ((code + (front ? FrontCode : 0)) as f32) * 8192.0
+        return UiBox(fill: UiFill.solid(fill), material: m, values: Vec4(x, centre.x, centre.y, packed))
+
+    fn picture_uv(w: f32, h: f32) -> Vec4
+        let pa = picture.width as f32 / max(picture.height as f32, 1.0)
+        let ba = w / max(h, 1.0)
+        if pa > ba
+            let cut = (1.0 - ba / pa) * 0.5
+            return Vec4(cut, 0.0, 1.0 - cut, 1.0)
+        let cut = (1.0 - pa / ba) * 0.5
+        return Vec4(0.0, cut, 1.0, 1.0 - cut)
+
+    fn load_picture(gpu: *Gpu, path: str) -> bool
+        if picture_ready and path == str(picture_path[0..picture_len]): return true
+        var png: PngImage
+        defer png.free_all()
+        var z: [PicturePathBytes]u8
+        if path.len == 0 or path.len >= PicturePathBytes or not png.load(format(&z, "{path}").ptr as cstr): return false
+        if picture_ready: gpu.release_texture(&picture)
+        picture = gpu.texture_mipped(png.width, png.height, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 4, png.pixels.ptr)
+        picture_ready = true
+        for i in 0..path.len: picture_path[i] = path[i]
+        picture_len = path.len as int
+        return true
+
+    fn release(gpu: *Gpu)
+        if picture_ready: gpu.release_texture(&picture)
+        picture_ready = false
+
+fn board_surface_box(s: *Surfaces, c: BoardColors) -> (UiBox, bool)
+    if not s: return UiBox(), false
+    return s.board_box(c)

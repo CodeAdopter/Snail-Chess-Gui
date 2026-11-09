@@ -1,0 +1,202 @@
+use src/tournament/schedule
+use src/tournament/journal
+
+const Z95: f64 = 1.959964
+const StreakMark = 3
+
+struct Tally
+    wins: int
+    draws: int
+    losses: int
+    pairs: [5]int
+
+    fn games() -> int
+        return wins + draws + losses
+
+    fn points() -> f64
+        return wins as f64 + draws as f64 * 0.5
+
+    fn pair_count() -> int
+        return pairs[0] + pairs[1] + pairs[2] + pairs[3] + pairs[4]
+
+    fn add(points2: int)
+        if points2 == 2: wins += 1
+        elif points2 == 1: draws += 1
+        else: losses += 1
+
+struct EloEstimate
+    elo: f64
+    error: f64
+    los: f64
+    known: bool
+    bounded: bool
+
+    fn text(buf: *[48]u8) -> str
+        if not known: return format(buf, "–")
+        if elo >= 1.0e9: return format(buf, "+∞")
+        if elo <= -1.0e9: return format(buf, "−∞")
+        let sign = elo >= 0.0 ? "+" : "−"
+        if not bounded: return format(buf, "{sign}{abs(elo):.1} ± ∞")
+        return format(buf, "{sign}{abs(elo):.1} ± {error:.1}")
+
+fn estimate_games(t: *Tally) -> EloEstimate
+    var e: EloEstimate
+    let n = t.games() as f64
+    if n == 0.0: return e
+    let s = t.points() / n
+    let variance = (t.wins as f64 * (1.0 - s) * (1.0 - s) + t.draws as f64 * (0.5 - s) * (0.5 - s) + t.losses as f64 * s * s) / n
+    return spread(s, sqrt(variance / n), los_of(t))
+
+fn estimate_pairs(t: *Tally) -> EloEstimate
+    var e: EloEstimate
+    let n = t.pair_count() as f64
+    if n == 0.0: return e
+    var mean = 0.0
+    for k in 0..5
+        mean += t.pairs[k] as f64 * (k as f64 / 4.0)
+    mean /= n
+    var variance = 0.0
+    for k in 0..5
+        let d = k as f64 / 4.0 - mean
+        variance += t.pairs[k] as f64 * d * d
+    variance /= n
+    return spread(mean, sqrt(variance / n), los_of(t))
+
+fn spread(s: f64, sigma: f64, los: f64) -> EloEstimate
+    var e: EloEstimate
+    e.known = true
+    e.los = los
+    e.elo = elo_of(s)
+    let lo = s - Z95 * sigma
+    let hi = s + Z95 * sigma
+    e.bounded = lo > 0.0 and hi < 1.0
+    if e.bounded: e.error = (elo_of(hi) - elo_of(lo)) * 0.5
+    return e
+
+fn elo_of(s: f64) -> f64
+    if s <= 0.0: return -1.0e10
+    if s >= 1.0: return 1.0e10
+    return -400.0 * log10(1.0 / s - 1.0)
+
+fn los_of(t: *Tally) -> f64
+    let decided = (t.wins + t.losses) as f64
+    if decided == 0.0: return 0.5
+    return 0.5 * (1.0 + erf_of((t.wins - t.losses) as f64 / sqrt(2.0 * decided)))
+
+fn erf_of(x: f64) -> f64
+    let a = abs(x)
+    let t = 1.0 / (1.0 + 0.3275911 * a)
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
+    let y = 1.0 - poly * exp(-a * a)
+    return x < 0.0 ? -y : y
+
+struct Standings
+    n: int
+    tallies: [..]Tally
+    cross: [..]Tally
+    order: [..]int
+    tiebreak: [..]f64
+    form: [..]u64
+    ended: [..]int
+
+    fn make(entrants: int, schedule: []ScheduledGame, records: []GameRecord)
+        n = entrants
+        tallies.clear()
+        tallies.resize(n)
+        cross.clear()
+        cross.resize(n * n)
+        form.clear()
+        form.resize(n)
+        ended.clear()
+        for i in 0..records.len
+            ended.push(-1)
+        for i in 0..min(schedule.len, records.len)
+            let r = records[i]
+            if not r.done or r.result == Unfinished: continue
+            let g = schedule[i]
+            let white = points2_of(r.result, White)
+            tallies[g.white].add(white)
+            tallies[g.black].add(2 - white)
+            cross[g.white * n + g.black].add(white)
+            cross[g.black * n + g.white].add(2 - white)
+            if r.order >= 0 and r.order < ended.len: ended[r.order] = i as int
+        for i in ended
+            if i < 0: continue
+            let g = schedule[i]
+            let white = points2_of(records[i].result, White)
+            form[g.white] = form[g.white] << 2 | (white + 1) as u64
+            form[g.black] = form[g.black] << 2 | (3 - white) as u64
+        var k = 0
+        while k + 1 < min(schedule.len, records.len)
+            let a = records[k]
+            let b = records[k + 1]
+            let g = schedule[k]
+            if a.done and b.done and a.result != Unfinished and b.result != Unfinished
+                let first = points2_of(a.result, White) + points2_of(b.result, Black)
+                tallies[g.white].pairs[first] += 1
+                tallies[g.black].pairs[4 - first] += 1
+                cross[g.white * n + g.black].pairs[first] += 1
+                cross[g.black * n + g.white].pairs[4 - first] += 1
+            k += 2
+        tiebreak.clear()
+        for i in 0..n
+            var sb = 0.0
+            for j in 0..n
+                if i != j: sb += cross[i * n + j].points() * tallies[j].points()
+            tiebreak.push(sb)
+        order.clear()
+        for i in 0..n
+            order.push(i as int)
+        for i in 1..order.len
+            var j = i as int
+            while j > 0 and ahead(order[j], order[j - 1])
+                let t = order[j]
+                order[j] = order[j - 1]
+                order[j - 1] = t
+                j -= 1
+
+    fn ahead(a: int, b: int) -> bool
+        let pa = tallies[a].points()
+        let pb = tallies[b].points()
+        if pa != pb: return pa > pb
+        if tiebreak[a] != tiebreak[b]: return tiebreak[a] > tiebreak[b]
+        if tallies[a].wins != tallies[b].wins: return tallies[a].wins > tallies[b].wins
+        return a < b
+
+    fn streak(i: int) -> int
+        if i < 0 or i >= form.len: return 0
+        let last = form[i] & 3
+        if last != 1 and last != 3: return 0
+        var rest = form[i]
+        var count = 0
+        while count < 32 and (rest & 3) == last
+            count += 1
+            rest = rest >> 2
+        return last == 3 ? count : -count
+
+    fn recent(i: int, k: int) -> int
+        if i < 0 or i >= form.len or k < 0 or k >= 32: return 0
+        return ((form[i] >> (k * 2) as u64) & 3) as int
+
+    fn mark_of(place: int) -> int
+        if place < 0 or place >= order.len: return 0
+        let s = streak(order[place])
+        if s >= StreakMark: return 1
+        if s <= -StreakMark: return -1
+        return 0
+
+    fn against(i: int, j: int) -> *Tally
+        return &cross[i * n + j]
+
+    fn release()
+        tallies.free()
+        cross.free()
+        order.free()
+        tiebreak.free()
+        form.free()
+        ended.free()
+
+fn points2_of(r: GameResult, side: Side) -> int
+    if r == Drawn: return 1
+    if r == WhiteWins: return side == White ? 2 : 0
+    return side == Black ? 2 : 0

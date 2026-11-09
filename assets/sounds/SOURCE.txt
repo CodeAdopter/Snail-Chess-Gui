@@ -1,0 +1,20 @@
+The board's sounds and the clock's for Snail Chess GUI: move.wav, capture.wav, castle.wav,
+clock_press.wav and clock_ticks.wav, a loop. The program embeds them, and tools/sounds.py made
+them from the recordings below.
+
+Free for anyone to use. These sounds and the recordings they were made from are in the public
+domain under CC0 1.0 Universal, https://creativecommons.org/publicdomain/zero/1.0/
+Use them in your own projects, free or sold, change them and share them. No credit is needed and
+there is no one to ask.
+
+The recordings are by JJTaynos, https://freesound.org/people/JJTaynos/, who released them under
+CC0 on freesound.org. tools/sounds.py reads a few seconds of each from source/, a folder not kept
+here, each named for the second of the recording it starts at:
+
+    chess-pieces-move-far-24s.wav   "Chess Pieces Move (Far)"   https://freesound.org/s/733932/
+    clock-press-close-7s.wav        "CLOCK PRESS Close-T001"    https://freesound.org/s/733930/
+    clock-press-close-41s.wav       "CLOCK PRESS Close-T001"    https://freesound.org/s/733930/
+    clock-tick-far-39s.wav          "CLOCK TICK Far-T002"       https://freesound.org/s/733929/
+
+What this project made from them, the cuts, pitches, tone, room, the capture's two knocks and the
+clock's loop, its author dedicates to the public domain under CC0 1.0 as well.

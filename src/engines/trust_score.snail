@@ -1,0 +1,115 @@
+use src/engines/registry
+
+const TrustHighFrom = 60
+const TrustLowUnder = 30
+
+enum TrustLevel: u8
+    TrustUnknown
+    TrustLow
+    TrustModerate
+    TrustHigh
+
+struct Trust
+    known: bool
+    stars: int
+    commits: int
+    contributors: int
+    age: int
+    few_stars: bool
+    few_commits: bool
+    lone: bool
+    young: bool
+
+    fn score() -> int
+        return stars + commits + contributors + age
+
+    fn level() -> TrustLevel
+        if not known: return TrustUnknown
+        let s = score()
+        if s >= TrustHighFrom: return TrustHigh
+        if s < TrustLowUnder: return TrustLow
+        return TrustModerate
+
+    fn short_of(buf: *[160]u8) -> str
+        var parts: [4]str
+        var n = 0
+        if few_stars
+            parts[n] = "few stars"
+            n += 1
+        if few_commits
+            parts[n] = "few commits"
+            n += 1
+        if lone
+            parts[n] = "one contributor"
+            n += 1
+        if young
+            parts[n] = "a repository under a year old"
+            n += 1
+        if n == 0: return format(buf, "")
+        if n == 1: return format(buf, "{parts[0]}")
+        if n == 2: return format(buf, "{parts[0]} and {parts[1]}")
+        if n == 3: return format(buf, "{parts[0]}, {parts[1]} and {parts[2]}")
+        return format(buf, "{parts[0]}, {parts[1]}, {parts[2]} and {parts[3]}")
+
+fn trust_of(c: *Catalog, e: *RegistryEngine) -> Trust
+    var t: Trust
+    let s = &e.stats
+    if not s.known: return t
+    let months = months_between(c.text(s.created), c.text(s.checked))
+    t.known = true
+    t.stars = star_points(s.stars)
+    t.commits = commit_points(s.commits)
+    t.contributors = contributor_points(s.contributors)
+    t.age = age_points(months)
+    t.few_stars = s.stars < 20
+    t.few_commits = s.commits < 200
+    t.lone = s.contributors >= 0 and s.contributors < 2
+    t.young = months >= 0 and months < 12
+    return t
+
+fn star_points(n: i64) -> int
+    if n >= 500: return 40
+    if n >= 100: return 30
+    if n >= 20: return 20
+    if n >= 5: return 10
+    return 0
+
+fn commit_points(n: i64) -> int
+    if n >= 1000: return 30
+    if n >= 200: return 20
+    if n >= 50: return 10
+    return 0
+
+fn contributor_points(n: i64) -> int
+    if n >= 20: return 15
+    if n >= 5: return 10
+    if n >= 2: return 5
+    return 0
+
+fn age_points(months: int) -> int
+    if months >= 36: return 15
+    if months >= 12: return 10
+    return 0
+
+fn trust_word(level: TrustLevel) -> str
+    match level
+        TrustHigh: return "high"
+        TrustModerate: return "moderate"
+        TrustLow: return "low"
+        TrustUnknown: return "not known"
+
+fn low_trust_text(t: *Trust, buf: *[300]u8) -> str
+    var why: [160]u8
+    return format(buf, "This project has limited public activity: {t.short_of(&why)}. Review the repository before running the engine.")
+
+fn months_between(from: str, to: str) -> int
+    if from.len != 10 or to.len != 10: return -1
+    var m = (digits(to[0..4]) - digits(from[0..4])) * 12 + digits(to[5..7]) - digits(from[5..7])
+    if digits(to[8..10]) < digits(from[8..10]): m -= 1
+    return m < 0 ? -1 : m
+
+fn digits(s: str) -> int
+    var n = 0
+    for k in 0..s.len
+        n = n * 10 + (s[k] - '0') as int
+    return n

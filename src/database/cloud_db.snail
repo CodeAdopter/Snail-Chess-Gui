@@ -1,0 +1,534 @@
+use engine/core/json
+use engine/desktop/http_get
+use engine/desktop/secret
+use src/store/data_folder
+use src/database/db_records
+
+const CloudAgent = "SnailChessGui-cloud/1"
+const CloudKeyFile = "cloud_key.bin"
+const CloudCountFile = "cloud_shared.txt"
+const CloudMinDepth = 12
+const CloudBatch = 256
+const CloudWaitingMost = 4096
+const CloudAnswersMost = 64
+const CloudSendNs: i64 = 20000000000
+const CloudRetryNs: i64 = 120000000000
+const CloudFullGapNs: i64 = 1000000000
+
+const CloudOfficial: u8 = 0
+const CloudCommunity: u8 = 1
+const CloudLichess: u8 = 2
+
+const CloudIdle = 0
+const CloudGettingKey = 1
+const CloudSendingLines = 2
+const CloudSendingPositions = 3
+
+var cloud_db: *CloudDb = null
+
+struct CloudLine
+    eval: DbEval
+    name: [64]u8
+    name_len: int
+    source: u8
+
+    fn engine_name() -> str
+        return str(name[0..name_len])
+
+struct CloudAnswer
+    key: u64
+    first: int
+    count: int
+    known: bool
+
+struct CloudOffer
+    key: u64
+    side: Side
+    fen: ShortText
+    eval: DbEval
+    name: [64]u8
+    name_len: int
+
+struct CloudAsk
+    key: u64
+    fen: ShortText
+
+struct CloudDb
+    data: *DataFolder
+    address: [..]u8
+    lookup: bool
+    share: bool
+    key: [..]u8
+    key_for: [..]u8
+    refused: bool
+    asking: HttpGet
+    asked: bool
+    asked_board: Board
+    waiting: Board
+    has_waiting: bool
+    answers: [..]CloudAnswer
+    lines: [..]CloudLine
+    version: u64
+    offers: [..]CloudOffer
+    asks: [..]CloudAsk
+    poster: HttpGet
+    send_kind: int
+    sent: int
+    send_at: i64
+    sent_ns: i64
+    url: [..]u8
+    headers: [..]u8
+    shared: [..]DbEval
+    lines_shared: i64
+    positions_shared: i64
+    count_for: [..]u8
+
+    fn start(folder: *DataFolder)
+        data = folder
+        var buf: [600]u8
+        let bytes = read_file(data.path(CloudKeyFile, &buf).ptr as cstr)
+        defer free_file(bytes)
+        var plain: [..]u8
+        defer plain.free()
+        if bytes.len > 0 and unprotect_secret(bytes, &plain)
+            var at = plain.len as int
+            while at > 0 and plain[at - 1] != '\n'
+                at -= 1
+            if at > 0 and cloud_key_shaped(str(plain[at..plain.len]))
+                cloud_keep(&key_for, str(plain[0..at - 1]))
+                cloud_keep(&key, str(plain[at..plain.len]))
+        read_counts()
+        cloud_db = self
+
+    fn sharing() -> bool
+        return share and on() and not refused
+
+    fn marks_elsewhere() -> bool
+        return on() and count_for.len > 0 and str(count_for[0..count_for.len]) != base()
+
+    fn adopt_marks()
+        lines_shared = 0
+        positions_shared = 0
+        save_counts()
+
+    fn pending() -> bool
+        return sharing() and (send_kind != CloudIdle or offers.len > 0 or asks.len > 0)
+
+    fn read_counts()
+        lines_shared = 0
+        positions_shared = 0
+        var buf: [600]u8
+        let bytes = read_file(data.path(CloudCountFile, &buf).ptr as cstr)
+        defer free_file(bytes)
+        let t = str(bytes)
+        var parts: [3]str
+        var n = 0
+        var from = 0
+        for i in 0..t.len
+            if t[i] != '\n' or n >= 3: continue
+            parts[n] = t[from..i]
+            n += 1
+            from = i as int + 1
+        if n < 3: return
+        cloud_keep(&count_for, parts[0])
+        if parts[0] != base(): return
+        lines_shared = max(parse_int(parts[1]), 0)
+        positions_shared = max(parse_int(parts[2]), 0)
+
+    fn save_counts()
+        var text: [..]u8
+        defer text.free()
+        var n: [48]u8
+        db_add(&text, base())
+        db_add(&text, format(&n, "\n{lines_shared}\n{positions_shared}\n"))
+        cloud_keep(&count_for, base())
+        var buf: [600]u8
+        save_whole(data.path(CloudCountFile, &buf), text[0..text.len])
+
+    fn configure(at: str, look_up: bool, share_lines: bool)
+        var address_now = trim(at)
+        while address_now.len > 0 and address_now[address_now.len - 1] == '/'
+            address_now = address_now[0..address_now.len - 1]
+        if address_now != base()
+            cloud_keep(&address, address_now)
+            answers.clear()
+            lines.clear()
+            has_waiting = false
+            refused = false
+            version += 1
+            if data: read_counts()
+        lookup = look_up
+        share = share_lines
+
+    fn on() -> bool
+        return address.len > 0
+
+    fn base() -> str
+        return str(address[0..address.len])
+
+    fn has_key() -> bool
+        return key.len > 0 and str(key_for[0..key_for.len]) == base()
+
+    fn asking_about(position: u64) -> bool
+        return asked and asked_board.key == position
+
+    fn answer_of(position: u64) -> int
+        for i in 0..answers.len
+            if answers[i].key == position: return i as int
+        return -1
+
+    fn want(board: *Board)
+        if not lookup or not on() or answer_of(board.key) >= 0 or asking_about(board.key): return
+        if asked
+            waiting = *board
+            has_waiting = true
+            return
+        ask(board)
+
+    fn ask(board: *Board)
+        var fen: ShortText
+        board.write_fen(&fen)
+        url.clear()
+        db_add(&url, base())
+        db_add(&url, "/v1/eval?fen=")
+        cloud_escape(&url, fen.text())
+        asked_board = *board
+        asked = asking.start(str(url[0..url.len]), CloudAgent, "Accept: application/json\n")
+
+    fn tick(now: i64) -> bool
+        var changed = false
+        if asked and asking.finished()
+            asked = false
+            if asking.done() and take_answer(asking.body_text()): changed = true
+            if has_waiting
+                has_waiting = false
+                if answer_of(waiting.key) < 0: ask(&waiting)
+        if send_kind != CloudIdle and poster.finished(): took_send(now)
+        let full = offers.len >= CloudBatch and now - sent_ns >= CloudFullGapNs
+        if send_kind == CloudIdle and sharing() and (now >= send_at or full): send_next(now)
+        return changed
+
+    fn take_answer(text: str) -> bool
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(text)
+        if not doc.is(root, JsonObject): return false
+        if answers.len >= CloudAnswersMost
+            answers.clear()
+            lines.clear()
+        var a = CloudAnswer(key: asked_board.key, first: lines.len as int)
+        let known = doc.get(root, "known")
+        a.known = doc.is(known, JsonBool) and doc.flag(known)
+        let evals = doc.get(root, "evals")
+        if doc.is(evals, JsonArray)
+            var c = doc.first(evals)
+            while c >= 0
+                take_line(&doc, c)
+                c = doc.next(c)
+        a.count = lines.len as int - a.first
+        answers.push(a)
+        version += 1
+        if not a.known and share: ask_engine(&asked_board)
+        return true
+
+    fn take_line(doc: *JsonDoc, v: int)
+        if not doc.is(v, JsonObject): return
+        var l: CloudLine
+        let name = cloud_text(doc, v, "engine")
+        l.name_len = min(name.len, 64) as int
+        for k in 0..l.name_len
+            l.name[k] = name[k]
+        let source = cloud_text(doc, v, "source")
+        l.source = source == "official" ? CloudOfficial : source == "community" ? CloudCommunity : CloudLichess
+        let e = &l.eval
+        e.key = asked_board.key
+        e.multipv = clamp(doc.num_at(v, "line", 1.0) as int, 1, 255) as u8
+        e.depth = clamp(doc.num_at(v, "depth", 0.0) as int, 0, 255) as u8
+        e.seldepth = clamp(doc.num_at(v, "seldepth", 0.0) as int, 0, 255) as u8
+        e.nodes = max(doc.num_at(v, "nodes", 0.0), 0.0) as u64
+        e.time_ms = clamp(doc.num_at(v, "timeMs", 0.0), 0.0, 4000000000.0) as u32
+        let white = asked_board.side == White
+        let mate = doc.get(v, "mate")
+        let cp = doc.get(v, "cp")
+        if doc.is(mate, JsonNumber)
+            var moves_to = doc.num(mate) as int
+            if not white: moves_to = -moves_to
+            e.score = (moves_to > 0 ? DbMateScore - moves_to : -DbMateScore - moves_to) as i32
+        elif doc.is(cp, JsonNumber)
+            let c = doc.num(cp) as int
+            e.score = (white ? c : -c) as i32
+        else: return
+        let chances = doc.get(v, "wdl")
+        if doc.is(chances, JsonArray)
+            var got: [3]int
+            var n = 0
+            var c = doc.first(chances)
+            while c >= 0 and n < 3
+                if not doc.is(c, JsonNumber): break
+                got[n] = clamp(doc.num(c) as int, 0, 1000)
+                n += 1
+                c = doc.next(c)
+            if n == 3
+                e.wdl = white ? db_wdl(got[0], got[1], got[2]) : db_wdl(got[2], got[1], got[0])
+                e.flags |= DbHasWdl
+        let pv = doc.get(v, "pv")
+        if doc.is(pv, JsonArray)
+            var m = doc.first(pv)
+            while m >= 0 and e.pv_len < DbPvMost
+                if not doc.is(m, JsonString): break
+                let (code, ok) = db_move_of_uci(doc.str_of(m))
+                if not ok: break
+                e.pv[e.pv_len] = code
+                e.pv_len += 1
+                m = doc.next(m)
+        if e.pv_len > 0: lines.push(l)
+
+    fn offer(board: *Board, name: str, e: DbEval)
+        var fen: ShortText
+        board.write_fen(&fen)
+        offer_fen(board.key, board.side, fen.text(), name, e)
+
+    fn offer_fen(position: u64, side: Side, fen: str, name: str, e: DbEval)
+        if not sharing() or e.depth < CloudMinDepth or name.len == 0 or name.len > 64: return
+        let from = send_kind == CloudSendingLines ? sent : 0
+        for i in from..offers.len
+            let o = &offers[i]
+            if o.key == position and o.eval.multipv == e.multipv and str(o.name[0..o.name_len]) == name
+                if e.depth >= o.eval.depth
+                    o.eval = e
+                    o.eval.key = position
+                return
+        if offers.len >= CloudWaitingMost
+            if send_kind == CloudSendingLines: return
+            offers.remove(0)
+        var o: CloudOffer
+        o.key = position
+        o.side = side
+        o.fen.add_str(fen)
+        o.eval = e
+        o.eval.key = position
+        o.name_len = name.len as int
+        for k in 0..name.len
+            o.name[k] = name[k]
+        offers.push(o)
+
+    fn ask_engine(board: *Board)
+        if asks.len >= CloudWaitingMost: return
+        for a in asks
+            if a.key == board.key: return
+        var a = CloudAsk(key: board.key)
+        board.write_fen(&a.fen)
+        asks.push(a)
+
+    fn send_next(now: i64)
+        send_at = now + CloudSendNs
+        sent_ns = now
+        if offers.len == 0 and asks.len == 0: return
+        if not has_key()
+            var doc: JsonDoc
+            defer doc.free_all()
+            let root = doc.object()
+            doc.set(root, "client", doc.text("Snail Chess GUI"))
+            var body: [..]u8
+            defer body.free()
+            doc.write(root, &body)
+            if poster.start(url_of("/v1/keys"), CloudAgent, "Content-Type: application/json\n", "", str(body[0..body.len])): send_kind = CloudGettingKey
+            return
+        if offers.len > 0: send_lines()
+        else: send_positions()
+
+    fn send_lines()
+        let n = min(offers.len, CloudBatch) as int
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.object()
+        let list = doc.array()
+        var move: [..]u8
+        defer move.free()
+        for i in 0..n
+            let o = &offers[i]
+            let e = &o.eval
+            let item = doc.object()
+            doc.set(item, "fen", doc.text(o.fen.text()))
+            doc.set(item, "engine", doc.text(str(o.name[0..o.name_len])))
+            doc.set(item, "line", doc.number(e.multipv as f64))
+            doc.set(item, "depth", doc.number(e.depth as f64))
+            doc.set(item, "seldepth", doc.number(e.seldepth as f64))
+            doc.set(item, "nodes", doc.number(e.nodes as f64))
+            doc.set(item, "timeMs", doc.number(e.time_ms as f64))
+            let white = o.side == White
+            let s = e.score as int
+            if s > DbMateScore - 10000 or s < -DbMateScore + 10000
+                let moves_to = s > 0 ? DbMateScore - s : -DbMateScore - s
+                doc.set(item, "mate", doc.number((white ? moves_to : -moves_to) as f64))
+            else: doc.set(item, "cp", doc.number(clamp(white ? s : -s, -30000, 30000) as f64))
+            if (e.flags & DbHasWdl) != 0
+                let sum = max(((e.wdl & 1023) + (e.wdl >> 10 & 1023) + (e.wdl >> 20 & 1023)) as f64, 1.0)
+                let w = round((e.wdl & 1023) as f64 * 1000.0 / sum)
+                let l = round((e.wdl >> 20 & 1023) as f64 * 1000.0 / sum)
+                let d = 1000.0 - w - l
+                let chances = doc.array()
+                doc.push(chances, doc.number(white ? w : l))
+                doc.push(chances, doc.number(d))
+                doc.push(chances, doc.number(white ? l : w))
+                doc.set(item, "wdl", chances)
+            let pv = doc.array()
+            for k in 0..e.pv_len
+                move.clear()
+                db_add_uci(&move, e.pv[k])
+                doc.push(pv, doc.text(str(move[0..move.len])))
+            doc.set(item, "pv", pv)
+            doc.push(list, item)
+        doc.set(root, "evals", list)
+        var body: [..]u8
+        defer body.free()
+        doc.write(root, &body)
+        if poster.start(url_of("/v1/evals"), CloudAgent, key_headers(), "", str(body[0..body.len]))
+            send_kind = CloudSendingLines
+            sent = n
+
+    fn send_positions()
+        let n = min(asks.len, CloudBatch) as int
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.object()
+        let list = doc.array()
+        for i in 0..n
+            doc.push(list, doc.text(asks[i].fen.text()))
+        doc.set(root, "fens", list)
+        var body: [..]u8
+        defer body.free()
+        doc.write(root, &body)
+        if poster.start(url_of("/v1/positions"), CloudAgent, key_headers(), "", str(body[0..body.len]))
+            send_kind = CloudSendingPositions
+            sent = n
+
+    fn took_send(now: i64)
+        let kind = send_kind
+        send_kind = CloudIdle
+        if poster.done()
+            if kind == CloudGettingKey: take_key(poster.body_text())
+            else
+                if kind == CloudSendingLines: took_lines(poster.body_text(), true)
+                drop_sent(kind)
+            send_at = kind == CloudGettingKey or offers.len >= CloudBatch or asks.len >= CloudBatch ? now : now + CloudSendNs
+            return
+        send_at = now + CloudRetryNs
+        let status = poster.status
+        if status == 401 and kind != CloudGettingKey
+            forget_key()
+            send_at = now
+        elif status == 403: refused = true
+        elif (status == 400 or status == 413) and kind != CloudGettingKey
+            if kind == CloudSendingLines: took_lines("", false)
+            drop_sent(kind)
+
+    fn took_lines(text: str, taken: bool)
+        let n = min(sent, offers.len as int)
+        for i in 0..n
+            shared.push(offers[i].eval)
+        if not taken: return
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(text)
+        let accepted = doc.is(root, JsonObject) ? doc.num_at(root, "accepted", n as f64) as i64 : n as i64
+        var positions = 0
+        for i in 0..n
+            var again = false
+            for k in 0..i
+                if offers[k].key == offers[i].key: again = true
+            if not again: positions += 1
+        lines_shared += max(accepted, 0)
+        positions_shared += positions
+        save_counts()
+
+    fn drop_sent(kind: int)
+        if kind == CloudSendingLines
+            let n = min(sent, offers.len as int)
+            for i in n..offers.len
+                offers[i - n] = offers[i]
+            offers.resize(offers.len - n)
+        elif kind == CloudSendingPositions
+            let n = min(sent, asks.len as int)
+            for i in n..asks.len
+                asks[i - n] = asks[i]
+            asks.resize(asks.len - n)
+        sent = 0
+
+    fn take_key(text: str)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let k = cloud_text(&doc, doc.parse(text), "key")
+        if not cloud_key_shaped(k): return
+        cloud_keep(&key, k)
+        cloud_keep(&key_for, base())
+        var plain: [..]u8
+        defer plain.free()
+        db_add(&plain, base())
+        db_add(&plain, "\n")
+        db_add(&plain, k)
+        var sealed: [..]u8
+        defer sealed.free()
+        var buf: [600]u8
+        if protect_secret(str(plain[0..plain.len]), &sealed): save_whole(data.path(CloudKeyFile, &buf), sealed[0..sealed.len])
+
+    fn forget_key()
+        key.clear()
+        key_for.clear()
+        var buf: [600]u8
+        save_whole(data.path(CloudKeyFile, &buf), key[0..0])
+
+    fn url_of(path: str) -> str
+        url.clear()
+        db_add(&url, base())
+        db_add(&url, path)
+        return str(url[0..url.len])
+
+    fn key_headers() -> str
+        headers.clear()
+        db_add(&headers, "Content-Type: application/json\nAuthorization: Bearer ")
+        db_add(&headers, str(key[0..key.len]))
+        db_add(&headers, "\n")
+        return str(headers[0..headers.len])
+
+    fn release()
+        if cloud_db == self: cloud_db = null
+        asking.release()
+        poster.release()
+        address.free()
+        key.free()
+        key_for.free()
+        answers.free()
+        lines.free()
+        offers.free()
+        asks.free()
+        url.free()
+        headers.free()
+        shared.free()
+        count_for.free()
+
+fn cloud_text(doc: *JsonDoc, obj: int, name: str) -> str
+    let v = doc.get(obj, name)
+    return doc.is(v, JsonString) ? doc.str_of(v) : ""
+
+fn cloud_keep(into: *[..]u8, s: str)
+    into.clear()
+    for k in 0..s.len
+        into.push(s[k])
+
+fn cloud_escape(out: *[..]u8, s: str)
+    for k in 0..s.len
+        let c = s[k]
+        if c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z' or c >= '0' and c <= '9' or c == '-' or c == '_' or c == '.' or c == '~'
+            out.push(c)
+        else
+            out.push('%')
+            out.push("0123456789ABCDEF"[c >> 4])
+            out.push("0123456789ABCDEF"[c & 15])
+
+fn cloud_key_shaped(t: str) -> bool
+    if t.len != 47 or t[0..4] != "scg_": return false
+    for k in 4..t.len
+        let c = t[k]
+        if not (c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z' or c >= '0' and c <= '9' or c == '-' or c == '_'): return false
+    return true

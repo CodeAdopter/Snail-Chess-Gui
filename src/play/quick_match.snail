@@ -1,0 +1,82 @@
+use src/uci/uci_engine
+use src/chess/random
+
+const StyleNames = ["Balanced", "Aggressive", "Passive"]
+const StyleWords = ["Balanced", "Aggressive", "Passive"]
+const OpponentNames = ["Shelly", "Escargot", "Garden Gary", "Professor Slime", "Pebble", "Moss", "Dewdrop", "Clover", "Turbo Shell", "Gambit Gus", "Spike", "Rook Rocket", "Firebrand", "Blitz Slug", "Scorch", "Viper", "The Fortress", "Hedgehog", "Stonewall", "Quiet Shell", "Tortoise", "Barnacle", "Bunker", "Old Oak"]
+const OpponentsPerStyle = 8
+const MatchEloLeast = 800
+const MatchEloMost = 2800
+const MatchFullElo = 2900
+const MatchWindowFirst = 50
+const MatchWindowMost = 150
+const RatedRevealNs: i64 = 500000000
+
+struct MatchTerms
+    quick: bool
+    rated: bool
+    chosen: bool
+    speed: int
+    elo: int
+    style: int
+    name: [32]u8
+    name_len: int
+
+    fn name_text() -> str
+        return str(name[0..name_len])
+
+    fn full() -> bool
+        return elo >= MatchFullElo
+
+enum QueueState: u8
+    QueueIdle
+    QueueSearching
+    QueueFound
+
+struct QuickMatch
+    state: QueueState
+    began_ns: i64
+    found_ns: i64
+    wait_ns: i64
+    hold_ns: i64
+    terms: MatchTerms
+    random: SplitMix64
+
+    fn searching() -> bool
+        return state != QueueIdle
+
+    fn search(now: i64, rating: f64, speed: int, rated: bool, elo: int = 0, style: int = 0)
+        if random.state == 0: random.state = now as u64
+        state = QueueSearching
+        began_ns = now
+        wait_ns = 0
+        hold_ns = rated ? RatedRevealNs : 0
+        terms = MatchTerms(quick: true, rated: rated, speed: speed)
+        let a = (random.next() % 1000) as int
+        let b = (random.next() % 1000) as int
+        let offset = (a + b - 1000) * MatchWindowMost / 1000
+        let wanted = round(rating) as int + offset
+        terms.elo = wanted > MatchEloMost + MatchWindowMost ? MatchFullElo : clamp(wanted, MatchEloLeast, MatchEloMost)
+        terms.style = (random.next() % 3) as int
+        if elo > 0
+            terms.chosen = true
+            terms.elo = elo > MatchEloMost ? MatchFullElo : clamp(elo, MatchEloLeast, MatchEloMost)
+            terms.style = clamp(style, 0, 2)
+        let name = OpponentNames[terms.style * OpponentsPerStyle + (random.next() % OpponentsPerStyle as u64) as int]
+        terms.name_len = keep_text(name, terms.name[0..32])
+
+    fn cancel()
+        state = QueueIdle
+
+    fn window(now: i64) -> int
+        let part = clamp((now - began_ns) as f64 / max(wait_ns, 1) as f64, 0.0, 1.0)
+        return MatchWindowFirst + ((MatchWindowMost - MatchWindowFirst) as f64 * part) as int / 25 * 25
+
+    fn step(now: i64) -> bool
+        if state == QueueSearching and now - began_ns >= wait_ns
+            state = QueueFound
+            found_ns = now
+        if state == QueueFound and now - found_ns >= hold_ns
+            state = QueueIdle
+            return true
+        return false

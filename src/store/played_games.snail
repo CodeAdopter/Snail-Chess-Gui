@@ -1,0 +1,292 @@
+use src/store/review_store
+use src/game/pgn_read
+use src/uci/uci_engine
+use src/play/speed_pool
+use src/chess/status
+
+struct PlayedGame
+    at: int
+    day: int
+    event: PoolSpan
+    white: PoolSpan
+    black: PoolSpan
+    clock: PoolSpan
+    result: GameResult
+    person: int = -1
+    speed: int = SpeedInfinite
+    rated: bool
+    person_elo: int
+    opponent_elo: int
+    white_elo: int
+    black_elo: int
+    change: int
+    changed: bool
+    plies: int
+    moves_at: int
+    moved: int
+    start: int = -1
+    ending: GameEnding
+    scored: bool
+    reviewed: bool
+
+enum GameEnding: u8
+    EndedUnknown
+    EndedMate
+    EndedStalemate
+    EndedDeadPosition
+    EndedFiftyMoves
+    EndedRepetition
+    EndedResigned
+    EndedAgreed
+    EndedTime
+    EndedAbandoned
+    EndedIllegal
+    EndedAdjudicated
+
+const NoPlayedScore: i16 = -32768
+const PlayedScoreCap = 3000
+
+struct PlayedIndex
+    games: [..]PlayedGame
+    pool: [..]u8
+    moves: [..]Move
+    scores: [..]i16
+    starts: [..]Board
+    size: i64 = -1
+    reviews_at: i64 = -1
+    version: u64
+
+    fn text(s: PoolSpan) -> str
+        return str(pool[s.at..s.at + s.len])
+
+    fn keep(s: str) -> PoolSpan
+        let at = pool.len as int
+        push_text(&pool, s)
+        return PoolSpan(at, s.len as int)
+
+    fn refresh(data: *DataFolder, person: str) -> bool
+        var buf: [600]u8
+        let path = data.path("history\\games.pgn", &buf)
+        var info: SDL_PathInfo
+        let size = SDL_GetPathInfo(path.ptr as cstr, &info) ? info.size as i64 : 0
+        var folder: [600]u8
+        let reviewed = modified_time(data.path("reviews", &folder).ptr as cstr)
+        if size == self.size and reviewed == reviews_at: return false
+        if size != self.size
+            self.size = size
+            let bytes = read_file(path.ptr as cstr)
+            defer free_file(bytes)
+            read(str(bytes), person)
+        reviews_at = reviewed
+        take_reviews(data)
+        version += 1
+        return true
+
+    fn take_reviews(data: *DataFolder)
+        for i in 0..games.len
+            let g = &games[i]
+            if g.scored or g.moved == 0: continue
+            let first = start_of(g)
+            if review_scores(data, line_key_of(first.key, moves_of(g)), scores[g.moves_at..g.moves_at + g.moved], PlayedScoreCap, NoPlayedScore): g.reviewed = true
+
+    fn read(text: str, person: str)
+        games.clear()
+        pool.clear()
+        moves.clear()
+        scores.clear()
+        starts.clear()
+        var begins: [..]int
+        defer begins.free()
+        scan_pgn(text, &begins, 1000000)
+        for s in begins
+            var g = PlayedGame(at: s)
+            var white_type = ""
+            var black_type = ""
+            var elos: [2]int
+            var termination = ""
+            var fen = ""
+            var changes: [2]int
+            var change_given: [2]bool
+            var lex = PgnLexer(text: text, at: s)
+            var t = lex.next()
+            while t == PgnTag
+                let name = lex.tag_name
+                let value = lex.token
+                if name == "Event": g.event = keep(value)
+                elif name == "White": g.white = keep(value)
+                elif name == "Black": g.black = keep(value)
+                elif name == "Date": g.day = day_of_text(value)
+                elif name == "WhiteType": white_type = value
+                elif name == "BlackType": black_type = value
+                elif name == "TimeControl"
+                    g.clock = keep(value)
+                    g.speed = speed_of_pgn(value)
+                elif name == "Rated": g.rated = value == "Yes"
+                elif name == "WhiteElo" or name == "BlackElo"
+                    let (n, ok) = uci_number(value)
+                    if ok: elos[name[0] == 'W' ? 0 : 1] = n as int
+                elif name == "WhiteRatingDiff" or name == "BlackRatingDiff"
+                    let (n, ok) = uci_number(value)
+                    let k = name[0] == 'W' ? 0 : 1
+                    changes[k] = n as int
+                    change_given[k] = ok
+                elif name == "Result"
+                    let (r, ok) = result_of_text(value)
+                    if ok: g.result = r
+                elif name == "Termination": termination = value
+                elif name == "FEN": fen = value
+                t = lex.next()
+            if white_type == "human": g.person = 0
+            elif black_type == "human": g.person = 1
+            elif person.len > 0 and text_of(&g, g.white) == person: g.person = 0
+            elif person.len > 0 and text_of(&g, g.black) == person: g.person = 1
+            if g.person >= 0
+                g.person_elo = elos[g.person]
+                g.opponent_elo = elos[1 - g.person]
+                g.change = changes[g.person]
+                g.changed = change_given[g.person]
+            g.white_elo = elos[0]
+            g.black_elo = elos[1]
+            read_moves(&lex, t, &g, fen, termination)
+            games.push(g)
+        version += 1
+
+    fn read_moves(lex: *PgnLexer, first: PgnToken, g: *PlayedGame, fen: str, termination: str)
+        var b: Board
+        if fen.len > 0 and b.load_fen(fen)
+            g.start = starts.len as int
+            starts.push(b)
+        else: b.load_fen(StartFen)
+        g.moves_at = moves.len as int
+        var keys: [..]u64
+        defer keys.free()
+        keys.push(b.key)
+        var legal = true
+        var depth = 0
+        var t = first
+        loop
+            if t == PgnEnd or t == PgnResult or t == PgnTag: break
+            if t == PgnOpen: depth += 1
+            elif t == PgnClose: depth -= 1
+            elif t == PgnSymbol and depth == 0
+                g.plies += 1
+                if legal
+                    let (m, ok) = parse_move(&b, lex.token)
+                    legal = ok
+                    if ok
+                        b.play(m)
+                        moves.push(m)
+                        scores.push(NoPlayedScore)
+                        keys.push(b.key)
+                        g.moved += 1
+            elif t == PgnComment and depth == 0 and legal and g.moved > 0
+                let (score, ok) = eval_in(lex.token)
+                if ok
+                    scores[scores.len - 1] = score
+                    g.scored = true
+            t = lex.next()
+        g.ending = ending_of(&b, keys[0..keys.len], g.result, termination)
+
+    fn moves_of(g: *PlayedGame) -> []Move
+        return moves[g.moves_at..g.moves_at + g.moved]
+
+    fn scores_of(g: *PlayedGame) -> []i16
+        return scores[g.moves_at..g.moves_at + g.moved]
+
+    fn start_of(g: *PlayedGame) -> Board
+        if g.start >= 0: return starts[g.start]
+        var b: Board
+        b.load_fen(StartFen)
+        return b
+
+    fn text_of(g: *PlayedGame, s: PoolSpan) -> str
+        return text(s)
+
+    fn outcome(g: *PlayedGame) -> int
+        if g.result == Drawn: return 0
+        if g.result == Unfinished or g.person < 0: return 2
+        let white_won = g.result == WhiteWins
+        return white_won == (g.person == 0) ? 1 : -1
+
+    fn release()
+        games.free()
+        pool.free()
+        moves.free()
+        scores.free()
+        starts.free()
+
+fn eval_in(comment: str) -> (i16, bool)
+    let tag = "[%eval "
+    var i = 0
+    while i + tag.len <= comment.len and comment[i..i + tag.len] != tag
+        i += 1
+    if i + tag.len > comment.len: return NoPlayedScore, false
+    i += tag.len as int
+    let mate = i < comment.len and comment[i] == '#'
+    if mate: i += 1
+    var sign = 1
+    if i < comment.len and (comment[i] == '-' or comment[i] == '+')
+        if comment[i] == '-': sign = -1
+        i += 1
+    var whole = 0
+    var cents = 0
+    var places = 0
+    var any = false
+    while i < comment.len and comment[i] >= '0' and comment[i] <= '9'
+        whole = min(whole * 10 + (comment[i] - '0') as int, 100000)
+        i += 1
+        any = true
+    if i < comment.len and comment[i] == '.'
+        i += 1
+        while i < comment.len and comment[i] >= '0' and comment[i] <= '9'
+            if places < 2
+                cents = cents * 10 + (comment[i] - '0') as int
+                places += 1
+            i += 1
+            any = true
+    if not any: return NoPlayedScore, false
+    if mate: return (sign * PlayedScoreCap) as i16, true
+    if places == 1: cents *= 10
+    return (sign * clamp(whole * 100 + cents, 0, PlayedScoreCap)) as i16, true
+
+fn ending_of(b: *Board, keys: []u64, result: GameResult, termination: str) -> GameEnding
+    if termination == "time forfeit": return EndedTime
+    if termination == "abandoned": return EndedAbandoned
+    if termination == "rules infraction": return EndedIllegal
+    if termination == "adjudication": return EndedAdjudicated
+    if result == Unfinished: return EndedUnknown
+    match outcome_of(b)
+        Checkmate: return EndedMate
+        Stalemate: return EndedStalemate
+        DeadPosition: return EndedDeadPosition
+        FiftyMoves: return EndedFiftyMoves
+    var seen = 0
+    for k in keys
+        if k == b.key: seen += 1
+    if result == Drawn: return seen >= 3 ? EndedRepetition : EndedAgreed
+    return EndedResigned
+
+fn day_of_text(s: str) -> int
+    if s.len != 10 or s[4] != '.' or s[7] != '.': return 0
+    var n = 0
+    for i in 0..10
+        if i == 4 or i == 7: continue
+        if s[i] < '0' or s[i] > '9': return 0
+        n = n * 10 + (s[i] - '0') as int
+    return n
+
+fn day_of_seconds(seconds: i64) -> int
+    var d: SDL_DateTime
+    if seconds <= 0 or not SDL_TimeToDateTime(seconds * 1000000000, &d, true): return 0
+    return d.year * 10000 + d.month * 100 + d.day
+
+fn days_of(day: int) -> int
+    var y = day / 10000
+    let m = day / 100 % 100
+    let d = day % 100
+    if m <= 2: y -= 1
+    let era = (y >= 0 ? y : y - 399) / 400
+    let yoe = y - era * 400
+    let doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468

@@ -1,0 +1,117 @@
+use src/play/quick_match
+use src/play/rating
+use src/play/speed_pool
+use src/store/settings
+
+struct PlayerRecord
+    ratings: [RatedSpeeds]Rating
+    speed: int = SpeedBlitz
+    clocks: [RatedSpeeds]int
+    infinite: bool
+    rated: bool = true
+    chosen: bool
+    chosen_elo: int = MatchFullElo
+    chosen_style: int
+    natural: bool = true
+    data: *DataFolder
+    version: u64
+
+    fn open(folder: *DataFolder)
+        data = folder
+        for i in 0..RatedSpeeds
+            clocks[i] = QuickFirst[i]
+        var buf: [600]u8
+        let bytes = read_file(data.path("player.json", &buf).ptr as cstr)
+        defer free_file(bytes)
+        if bytes.len > 0: read(str(bytes))
+        version += 1
+
+    fn read(text: str)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.parse(text)
+        if not doc.is(root, JsonObject): return
+        let rated_ones = doc.get(root, "ratings")
+        if doc.is(rated_ones, JsonObject)
+            for i in 0..RatedSpeeds
+                let v = doc.get(rated_ones, SpeedWords[i])
+                if not doc.is(v, JsonObject): continue
+                let r = &ratings[i]
+                r.rating = clamp(doc.num_at(v, "rating", RatingStart), 100.0, 4000.0)
+                r.deviation = clamp(doc.num_at(v, "deviation", DeviationStart), DeviationLeast, DeviationStart)
+                r.volatility = clamp(doc.num_at(v, "volatility", VolatilityStart), 0.01, 0.2)
+                r.games = max(doc.num_at(v, "games", 0.0) as int, 0)
+                r.wins = max(doc.num_at(v, "wins", 0.0) as int, 0)
+                r.draws = max(doc.num_at(v, "draws", 0.0) as int, 0)
+                r.losses = max(doc.num_at(v, "losses", 0.0) as int, 0)
+                r.peak = doc.num_at(v, "peak", 0.0)
+        let q = doc.get(root, "quick")
+        if doc.is(q, JsonObject)
+            speed = clamp(doc.num_at(q, "speed", SpeedBlitz as f64) as int, 0, RatedSpeeds - 1)
+            rated = flag_or(&doc, q, "rated", true)
+            infinite = flag_or(&doc, q, "infinite", false)
+            chosen = flag_or(&doc, q, "chosen", false)
+            chosen_elo = clamp(doc.num_at(q, "chosen_elo", MatchFullElo as f64) as int, MatchEloLeast, MatchFullElo)
+            chosen_style = clamp(doc.num_at(q, "chosen_style", 0.0) as int, 0, StyleNames.len as int - 1)
+            natural = flag_or(&doc, q, "natural", true)
+            for i in 0..RatedSpeeds
+                let at = doc.num_at(q, SpeedWords[i], QuickFirst[i] as f64) as int
+                if at >= 0 and at < QuickSpeed.len and QuickSpeed[at] == i: clocks[i] = at
+
+    fn write(out: *[..]u8)
+        var doc: JsonDoc
+        defer doc.free_all()
+        let root = doc.object()
+        let rated_ones = doc.object()
+        for i in 0..RatedSpeeds
+            let r = &ratings[i]
+            let v = doc.object()
+            doc.set(v, "rating", doc.number(r.rating))
+            doc.set(v, "deviation", doc.number(r.deviation))
+            doc.set(v, "volatility", doc.number(r.volatility))
+            doc.set(v, "games", doc.number(r.games as f64))
+            doc.set(v, "wins", doc.number(r.wins as f64))
+            doc.set(v, "draws", doc.number(r.draws as f64))
+            doc.set(v, "losses", doc.number(r.losses as f64))
+            doc.set(v, "peak", doc.number(r.peak))
+            doc.set(rated_ones, SpeedWords[i], v)
+        doc.set(root, "ratings", rated_ones)
+        let q = doc.object()
+        doc.set(q, "speed", doc.number(speed as f64))
+        doc.set(q, "rated", doc.boolean(rated))
+        doc.set(q, "infinite", doc.boolean(infinite))
+        doc.set(q, "chosen", doc.boolean(chosen))
+        doc.set(q, "chosen_elo", doc.number(chosen_elo as f64))
+        doc.set(q, "chosen_style", doc.number(chosen_style as f64))
+        doc.set(q, "natural", doc.boolean(natural))
+        for i in 0..RatedSpeeds
+            doc.set(q, SpeedWords[i], doc.number(clocks[i] as f64))
+        doc.set(root, "quick", q)
+        doc.write(root, out)
+
+    fn save() -> bool
+        version += 1
+        if not data: return false
+        var out: [..]u8
+        defer out.free()
+        write(&out)
+        var buf: [600]u8
+        return save_whole(data.path("player.json", &buf), out[0..out.len])
+
+    fn quick_speed() -> int
+        return infinite ? SpeedInfinite : speed
+
+    fn near(at_speed: int) -> *Rating
+        return &ratings[at_speed < RatedSpeeds ? at_speed : speed]
+
+    fn clock_at(at_speed: int) -> TimeControl
+        if at_speed >= RatedSpeeds: return TimeControl(kind: NoClock)
+        return quick_clock(clocks[at_speed])
+
+    fn clock_text_at(at_speed: int, buf: *[16]u8) -> str
+        if at_speed >= RatedSpeeds: return format(buf, "∞")
+        return quick_clock_text(clocks[at_speed], buf)
+
+    fn take(at_speed: int, r: Rating)
+        ratings[at_speed] = r
+        save()

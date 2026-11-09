@@ -1,0 +1,32 @@
+use engine/ui/ui_layout
+
+struct WrapRows
+    ui: *UiCanvas
+    width: f32
+    gap: f32
+    used: f32
+    rows: int
+    open: bool
+
+    fn next(w: f32)
+        if open and used + gap + w > width
+            ui.close()
+            open = false
+        if open
+            used += gap + w
+            return
+        ui.open(UiNode(key: rows, name: "wraprow", flow: FlowRow, width: UiSize.grow(), gap: gap, align: Vec2(0.0, 0.5)))
+        rows += 1
+        open = true
+        used = w
+
+    fn end()
+        if open: ui.close()
+        ui.close()
+
+fn wrap_rows(ui: *UiCanvas, name: str, width: f32, gap: f32) -> WrapRows
+    ui.open(UiNode(name: name, width: UiSize.grow(), gap: gap))
+    return WrapRows(ui, width, gap, 0.0, 0, false)
+
+fn button_width(ui: *UiCanvas, text: str) -> f32
+    return ui.measure(text, ui.theme.text()).x + 30.0

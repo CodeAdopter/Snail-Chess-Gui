@@ -1,0 +1,164 @@
+use src/app/gui_app
+
+const StressKinds = ["open tab", "show tab", "close tab", "move tab", "theme", "2D or 3D", "board look", "zoom", "engine on or off", "paste", "review", "play", "event", "pause or resume", "book", "engine added", "window", "quality", "font", "engine removed"]
+const StressKindCount = StressKinds.len
+const StressTabsMost = 14
+const StressOpens = [NewTab, Analysis, Analysis, Play, Tournaments, NewTournament, Engines, Books, Profile, Settings, Database]
+const StressPgn = "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7 11. c4 c6 12. cxb5 axb5 13. Nc3 Bb7 14. Bg5 b4 15. Nb1 h6 *"
+
+struct StressRun
+    on: bool
+    rng: SplitMix64
+    counts: [StressKindCount]int
+    turns: int
+    added: [..]int
+
+var stress: StressRun
+
+extend GuiApp
+    fn start_stress()
+        if not has_arg("--stress"): return
+        stress.on = true
+        let seed = arg_int("--stress-seed", 0)
+        stress.rng = SplitMix64(state: seed != 0 ? seed as u64 : now_ns() as u64)
+
+    fn stress_roll(n: int) -> int
+        return n <= 0 ? 0 : (stress.rng.next() % n as u64) as int
+
+    fn stress_step()
+        if not stress.on: return
+        app.wake_in(0.0)
+        let kind = stress_roll(StressKindCount)
+        if stress_turn(kind): stress.counts[kind] += 1
+        stress.turns += 1
+
+    fn stress_turn(kind: int) -> bool
+        let n = tabs.tabs.len as int
+        match kind
+            0
+                if n >= StressTabsMost: return false
+                open_new(StressOpens[stress_roll(StressOpens.len as int)])
+            1: tabs.active = stress_roll(n)
+            2
+                if n < 2: return false
+                close_tab(stress_roll(n))
+            3: tabs.move(stress_roll(n), stress_roll(n))
+            4
+                settings.theme = stress_roll(ThemeCount) as ThemeName
+                apply_settings()
+            5
+                settings.three_d = not settings.three_d
+                apply_settings()
+            6
+                match stress_roll(8)
+                    0: settings.palette = stress_roll(PaletteWords.len as int) as BoardPalette
+                    1: settings.pieces = stress_roll(PieceSetCount) as PieceSet
+                    2: settings.costume = stress_roll(CostumeWords.len as int) as Costume
+                    3: settings.finish = stress_roll(FinishCount) as PieceFinish
+                    4: settings.backdrop = stress_roll(BackdropWords.len as int) as Backdrop
+                    5: settings.room_style = stress_roll(RoomStyleWords.len as int) as RoomStyle
+                    6: settings.board_style = stress_roll(BoardStyleWords.len as int) as BoardStyle
+                    else: settings.set_style = stress_roll(SetStyleWords.len as int) as SetStyle
+                apply_settings()
+            7: app.zoom_to(0.8 + stress_roll(7) as f32 * 0.1)
+            8
+                let i = stress_tab_of(Analysis)
+                if i < 0: return false
+                let a = tabs.tabs[i].analysis
+                if not a: return false
+                if not a.on and library.entries.len > 0: a.switch_engine(library.entries[stress_roll(library.entries.len as int)].id)
+                a.on = not a.on
+                tabs.active = i
+            9
+                let i = stress_tab_of(Analysis)
+                if i < 0: return false
+                picker.paste(&app.ui, tabs.tabs[i].game, StressPgn)
+            10
+                let i = stress_tab_of(Analysis)
+                if i < 0: return false
+                start_review(&tabs.tabs[i])
+            11
+                let i = stress_tab_of(Play)
+                if i < 0 or not tabs.tabs[i].play or tabs.tabs[i].play.state != PlayChoosing: return false
+                start_game(&tabs.tabs[i])
+            12
+                if events.len == 0: return false
+                show_event(events[stress_roll(events.len as int)])
+            13
+                if events.len == 0: return false
+                let r = events[stress_roll(events.len as int)]
+                if r.state == EventRunning: r.pause()
+                elif r.state == EventPaused: r.resume()
+                else: return false
+            14: return stress_book()
+            15
+                let path = arg_word("--stress-engine")
+                let adding = &engines_page.adding
+                if path.len == 0 or adding.step != AddIdle: return false
+                adding.take(&app, path)
+                adding.copy_in = 1
+                adding.begin(&app.ui, &library)
+                stress.added.push(adding.id)
+            16
+                if stress_roll(8) == 0
+                    SDL_MinimizeWindow(app.window.handle)
+                    SDL_RestoreWindow(app.window.handle)
+                else: SDL_SetWindowSize(app.window.handle, 900 + stress_roll(900), 600 + stress_roll(500))
+            17
+                settings.msaa = [1, 2, 4, 8][stress_roll(4)]
+                settings.render_scale = [0.5, 0.75, 1.0, 1.5][stress_roll(4)]
+                settings.shadow_size = [1024, 2048, 4096][stress_roll(3)]
+                settings.anisotropy = [1, 4, 16][stress_roll(3)]
+                apply_settings()
+            18
+                settings.font = stress_roll(FontCount)
+                apply_settings()
+            else
+                var made: [..]int
+                defer made.free()
+                for e in library.entries
+                    for id in stress.added
+                        if e.id == id: made.push(e.id)
+                if made.len == 0 or engines_page.remove_id > 0: return false
+                engines_page.remove_id = made[stress_roll(made.len as int)]
+        return true
+
+    fn stress_book() -> bool
+        let p = &books_page
+        if stress_roll(2) == 0
+            if p.generating.asked: return false
+            p.generating.open(&library)
+            var name: [40]u8
+            p.generating.name.set(format(&name, "Stress {stress.turns}"))
+            p.generating.wanted.set("4")
+            p.generating.start(&books, library.find(library.chosen_id()))
+            p.generating.shown = false
+            return p.generating.asked != null
+        var made: [..]int
+        defer made.free()
+        for b in books.books
+            if b.name_text().len > 7 and b.name_text()[0..7] == "Stress ": made.push(b.id)
+        if made.len == 0 or p.remove_id > 0: return false
+        p.remove_id = made[stress_roll(made.len as int)]
+        return true
+
+    fn stress_tab_of(kind: TabKind) -> int
+        var found: [..]int
+        defer found.free()
+        for i in 0..tabs.tabs.len
+            if tabs.tabs[i].kind == kind: found.push(i as int)
+        if found.len == 0: return -1
+        return found[stress_roll(found.len as int)]
+
+    fn stress_report()
+        if not stress.on: return
+        print("stress turns {stress.turns}")
+        for k in 0..StressKindCount
+            print("stress {StressKinds[k]} {stress.counts[k]}")
+        for r in events
+            print("stress event {r.id} state {r.state as int} games {r.kept} of {r.schedule.len} faults {r.faults.len}")
+            for sl in r.slots
+                if not sl.busy(): continue
+                let a = &sl.seats[0].player.engine
+                let b = &sl.seats[1].player.engine
+                print("stress slot game {sl.index} ply {sl.game.nodes.len} for {(now_ns() - sl.begun_ns) / 1000000} ms, engines {a.state as int} {b.state as int} asking {sl.seats[0].player.asking} {sl.seats[1].player.asking}")

@@ -1,0 +1,215 @@
+use engine/core/text
+
+const FastNameMost = 48
+const FastNoEval: u8 = 0
+const FastEvalCp: u8 = 1
+const FastEvalMate: u8 = 2
+
+struct FastSlot
+    thread: int
+    white: [48]u8
+    white_len: int
+    black: [48]u8
+    black_len: int
+    start: [..]u8
+    moves: [..]u8
+    plies: int
+    wtime: i64 = -1
+    btime: i64 = -1
+    go_ms: i64
+    eval_kind: u8
+    eval: int
+    depth: int
+    games: int
+
+    fn white_name() -> str
+        return str(white[0..white_len])
+
+    fn black_name() -> str
+        return str(black[0..black_len])
+
+    fn set_name(black_side: bool, s: str)
+        let n = min(s.len, FastNameMost) as int
+        for i in 0..n
+            if black_side: black[i] = s[i]
+            else: white[i] = s[i]
+        if black_side: black_len = n
+        else: white_len = n
+
+    fn white_to_move() -> bool
+        let fen_black = starts_with(str(start[0..start.len]), "fen ") and find(str(start[0..start.len]), " b ") > 0
+        return (plies % 2 == 0) != fen_black
+
+    fn release()
+        start.free()
+        moves.free()
+
+struct FastLive
+    slots: [..]FastSlot
+    changed: bool
+
+    fn slot(thread: int) -> *FastSlot
+        for i in 0..slots.len
+            if slots[i].thread == thread: return &slots[i]
+        var at = slots.len as int
+        while at > 0 and slots[at - 1].thread > thread
+            at -= 1
+        slots.push(FastSlot(thread: thread))
+        var i = slots.len as int - 1
+        while i > at
+            let held = slots[i]
+            slots[i] = slots[i - 1]
+            slots[i - 1] = held
+            i -= 1
+        return &slots[at]
+
+    fn feed(line: str, now_ms: i64)
+        if not starts_with(line, "[Engine]"): return
+        let open = find(line, "] <")
+        if open < 0: return
+        var at = open + 3
+        while at < line.len and line[at] == ' '
+            at += 1
+        let from = at
+        while at < line.len and line[at] >= '0' and line[at] <= '9'
+            at += 1
+        if at >= line.len or line[at] != '>' or at == from: return
+        let thread = parse_int(line[from..at]) as int
+        let rest = line[at + 1..line.len]
+        let told = find(rest, " <--- ")
+        if told >= 0
+            told_line(slot(thread), trim(rest[0..told]), trim(rest[told + 6..rest.len]), now_ms)
+            return
+        let heard = find(rest, " ---> ")
+        if heard >= 0
+            var name = trim(rest[0..heard])
+            if starts_with(name, "<stderr> "): return
+            heard_line(slot(thread), name, trim(rest[heard + 6..rest.len]))
+
+    fn told_line(s: *FastSlot, name: str, msg: str, now_ms: i64)
+        if starts_with(msg, "position ")
+            let body = msg[9..msg.len]
+            let cut = find(body, " moves ")
+            let start = cut >= 0 ? body[0..cut] : trim(body)
+            let moves = cut >= 0 ? trim(body[cut + 7..body.len]) : ""
+            var plies = 0
+            var spaced = true
+            for i in 0..moves.len
+                if moves[i] == ' ': spaced = true
+                elif spaced
+                    plies += 1
+                    spaced = false
+            let same = str(s.start[0..s.start.len]) == start and plies >= s.plies and starts_with(moves, str(s.moves[0..s.moves.len]))
+            if not same
+                s.games += 1
+                s.eval_kind = FastNoEval
+                s.depth = 0
+                s.white_len = 0
+                s.black_len = 0
+                s.wtime = -1
+                s.btime = -1
+                s.start.clear()
+                push_text(&s.start, start)
+            s.moves.clear()
+            push_text(&s.moves, moves)
+            s.plies = plies
+            s.set_name(not s.white_to_move(), name)
+            changed = true
+        elif starts_with(msg, "go ")
+            var words: [16]str
+            let n = min(split_words(msg, words[0..16]), 16)
+            s.wtime = -1
+            s.btime = -1
+            for i in 1..n - 1
+                if words[i] == "wtime": s.wtime = parse_int(words[i + 1])
+                if words[i] == "btime": s.btime = parse_int(words[i + 1])
+            s.go_ms = now_ms
+            changed = true
+
+    fn heard_line(s: *FastSlot, name: str, msg: str)
+        if not starts_with(msg, "info ") or find(msg, " score ") < 0: return
+        var words: [24]str
+        let n = min(split_words(msg, words[0..24]), 24)
+        var kind = FastNoEval
+        var value = 0
+        var depth = 0
+        for i in 1..n - 1
+            if words[i] == "depth": depth = parse_int(words[i + 1]) as int
+            if words[i] == "score" and i + 2 < n
+                if words[i + 1] == "cp": kind = FastEvalCp
+                if words[i + 1] == "mate": kind = FastEvalMate
+                value = parse_int(words[i + 2]) as int
+        if kind == FastNoEval: return
+        let white = s.white_to_move()
+        let mover = white ? s.white_name() : s.black_name()
+        if mover.len > 0 and mover != name: return
+        s.eval_kind = kind
+        s.eval = white ? value : -value
+        s.depth = depth
+        changed = true
+
+    fn write(into: *[..]u8, now_ms: i64)
+        into.clear()
+        var head: [48]u8
+        push_text(into, format(&head, "live\t{now_ms}\n"))
+        for i in 0..slots.len
+            let s = &slots[i]
+            var line: [160]u8
+            push_text(into, format(&line, "slot\t{s.thread}\t{s.games}\t{s.white_name()}\t{s.black_name()}\t{s.wtime}\t{s.btime}\t{s.go_ms}\t{s.eval_kind as int}\t{s.eval}\t{s.depth}\t"))
+            push_text(into, str(s.start[0..s.start.len]))
+            into.push('\t')
+            push_text(into, str(s.moves[0..s.moves.len]))
+            into.push('\n')
+
+    fn read(text: str) -> i64
+        var stamp: i64 = -1
+        var from = 0
+        var count = 0
+        for i in 0..text.len
+            if text[i] != '\n': continue
+            let line = text[from..i]
+            from = i as int + 1
+            var fields: [13]str
+            let n = fast_fields(line, fields[0..13])
+            if n == 2 and fields[0] == "live": stamp = parse_int(fields[1])
+            if n != 13 or fields[0] != "slot": continue
+            let s = slot(parse_int(fields[1]) as int)
+            s.games = parse_int(fields[2]) as int
+            s.set_name(false, fields[3])
+            s.set_name(true, fields[4])
+            s.wtime = parse_int(fields[5])
+            s.btime = parse_int(fields[6])
+            s.go_ms = parse_int(fields[7])
+            s.eval_kind = parse_int(fields[8]) as u8
+            s.eval = parse_int(fields[9]) as int
+            s.depth = parse_int(fields[10]) as int
+            s.start.clear()
+            push_text(&s.start, fields[11])
+            s.moves.clear()
+            push_text(&s.moves, fields[12])
+            var plies = 0
+            var spaced = true
+            for k in 0..fields[12].len
+                if fields[12][k] == ' ': spaced = true
+                elif spaced
+                    plies += 1
+                    spaced = false
+            s.plies = plies
+            count += 1
+        changed = count > 0
+        return stamp
+
+    fn release()
+        for i in 0..slots.len
+            slots[i].release()
+        slots.free()
+
+fn fast_fields(line: str, fields: []str) -> int
+    var n = 0
+    var from = 0
+    for i in 0..line.len + 1
+        if i < line.len and line[i] != '\t': continue
+        if n < fields.len: fields[n] = line[from..i]
+        n += 1
+        from = i as int + 1
+    return n as int

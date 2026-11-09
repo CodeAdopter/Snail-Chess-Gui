@@ -1,0 +1,4 @@
+Letters pieces, Snail Chess GUI's own, drawn by tools/piece_sets/minimal.py. The letters are
+glyphs of Outfit (assets/fonts/outfit), by the Outfit Project Authors, under the SIL Open Font
+License 1.1. Dedicated to the public
+domain under CC0 1.0 Universal, https://creativecommons.org/publicdomain/zero/1.0/

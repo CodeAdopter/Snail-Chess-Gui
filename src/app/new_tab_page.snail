@@ -1,0 +1,378 @@
+use src/app/tabs
+use src/store/player_record
+use src/store/played_games
+use src/lichess/lichess_play
+
+const HomeWidth: f32 = 1040.0
+const HeroTall: f32 = 404.0
+const SideWide: f32 = 320.0
+const SideTall: f32 = 150.0
+const StackBelow: f32 = 960.0
+const ActionTall: f32 = 52.0
+const RecentShown = 4
+const RecentScrolled = 8
+const RecentWide: f32 = 250.0
+const MoreCount = 8
+const MoreNames = ["events", "tour", "engines", "books", "database", "profile", "settings", "contribute"]
+const MoreTitles = ["Tournaments", "New tournament", "Engines", "Books", "Database", "Profile", "Settings", "Contribute"]
+const MoreLines = ["View running, paused and completed tournaments.", "Set up an engine tournament.", "Manage installed engines and browse the registry.", "Import, download or generate opening books.", "Search games and stored engine evaluations.", "View your ratings and game history.", "Customise appearance and app settings.", "Run an engine through positions the cloud is missing and share its lines."]
+const MoreIcons = [IconTrophy, IconBracket, IconChip, IconBook, IconDatabase, IconPerson, IconGear, IconCloud]
+const RingNs: i64 = 1500000000
+const RatedModes = ["Rated", "Casual"]
+const OpponentModes = ["Auto", "Custom"]
+const CardCurve: f32 = 8.0
+const ControlCurve: f32 = 6.0
+
+struct HomeAsks
+    lichess: bool
+    search: bool
+    cancel: bool
+    engine: bool
+    open_game: int = -1
+    changed: bool
+
+fn draw_new_tab_page(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, icons: *LineIcons, record: *PlayerRecord, quick: *QuickMatch, played: *PlayedIndex, person: str, lichess: *LichessPlay, asks: *HomeAsks) -> TabKind
+    let ui = &app.ui
+    var chosen = NewTab
+    let top = TabRowHeight + CommandBarHeight
+    let w = min(ui.width - 48.0, HomeWidth)
+    let stacked = w < StackBelow
+    let heading = UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8)
+    var line: [120]u8
+    with ui.open(UiNode(name: "newtabpage", floating: true, offset: Vec2(0.0, top), width: UiSize.fixed(ui.width), height: UiSize.fixed(max(ui.height - top, 1.0))))
+        with ui.scroll_area("newtabscroll", node: UiNode(width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(0.0, 30.0, 0.0, 30.0), align: Vec2(0.5, 0.0)))
+            with ui.open(UiNode(name: "newtab", width: UiSize.fixed(w), gap: 14.0))
+                with ui.open(UiNode(name: "newtabtitle", width: UiSize.grow(), gap: 4.0, padding: Vec4(2.0, 0.0, 0.0, 4.0)))
+                    ui.label("SNAIL CHESS", heading)
+                    ui.label(format(&line, "Ready to play, {person}?"), UiTextStyle(face: fonts.serif, size: 30.0, color: theme.ink))
+                lichess_hero(app, theme, fonts, lichess, stacked, asks)
+                with ui.open(UiNode(flow: stacked ? FlowColumn : FlowRow, width: UiSize.grow(), gap: 14.0))
+                    hero(app, theme, fonts, record, quick, asks)
+                    let abreast = stacked and w >= 520.0
+                    let tall = stacked ? (abreast ? SideTall : SideTall * 2.0 + 14.0) : HeroTall
+                    with ui.open(UiNode(flow: abreast ? FlowRow : FlowColumn, width: stacked ? UiSize.grow() : UiSize.fixed(SideWide), height: UiSize.fixed(tall), gap: 14.0))
+                        if side_card(ui, theme, fonts, "engineanalysis", "Engine analysis", "Analyze a game or position with Snail Chess. Paste a game or set up the board.", "Analyze"): asks.engine = true
+                        if side_card(ui, theme, fonts, "customgame", "Custom game", "Choose an installed engine, your colour and a time control. Custom games are unrated.", "Set up"): chosen = Play
+                recent(ui, theme, fonts, played, heading, stacked, asks)
+                ui.label("MORE", heading, UiNode(padding: Vec4(2.0, 6.0, 0.0, 0.0)))
+                let across = w >= 860.0 ? 3 : w >= 520.0 ? 2 : 1
+                var at = 0
+                while at < MoreCount
+                    with ui.open(UiNode(name: "morerow", key: at, flow: FlowRow, width: UiSize.grow(), gap: 10.0))
+                        for k in 0..across
+                            let i = at + k as int
+                            if i >= MoreCount: ui.leaf(UiNode(key: i, width: UiSize.grow()))
+                            elif card(ui, theme, fonts, icons, MoreNames[i], MoreIcons[i], MoreTitles[i], MoreLines[i]): chosen = more_kind(i)
+                    at += across
+    return chosen
+
+fn lichess_hero(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, lp: *LichessPlay, stacked: bool, asks: *HomeAsks)
+    let ui = &app.ui
+    let small = UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8)
+    let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    let big = UiTextStyle(face: fonts.serif, size: 22.0, color: theme.ink)
+    var line: [120]u8
+    var clock: [16]u8
+    let glow = theme.surface.lerp(theme.accent, theme.dark ? 0.14 : 0.08)
+    let ready = lp.state == LichessReady or lp.state == LichessOver
+    let searching = lp.state == LichessSearching
+    let now = now_ns()
+    with ui.open(UiNode(name: "lichesshero", width: UiSize.grow(), padding: Vec4(24.0, 14.0, 24.0, 14.0), gap: 10.0, clip: true, box: theme.wear(UiBox(fill: UiFill.linear(glow, theme.surface, 200.0), radius: Vec4.splat(CardCurve), border: 1.0, border_color: theme.line, shadow: UiShadow(Color(0.0, 0.0, 0.0, theme.dark ? 0.28 : 0.08), 0.0, 6.0, 24.0, 0.0, false)))))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 14.0, align: Vec2(0.0, 0.5)))
+            if searching: rings(ui, theme, now - lp.searched_ns)
+            with ui.open(UiNode(width: UiSize.grow(), gap: 3.0, clip: true))
+                ui.label("PLAY ON LICHESS", small)
+                if not lp.signed_in()
+                    ui.label("Real opponents, rapid and classical", big)
+                    ui.label("Play on Lichess against real players, on the 2D board or the 3D table.", note)
+                elif lp.playing()
+                    let g = &lp.game
+                    ui.label("Game in progress", big)
+                    ui.label(format(&line, "Against {lp.white ? g.black.name.text() : g.white.name.text()}  ·  {g.initial_ms / 60000}+{g.increment_ms / 1000}"), note)
+                elif searching
+                    ui.label(format(&line, "Finding a {lp.seek_rated ? "rated" : "casual"} {lp.seek_minutes}+{lp.seek_increment} game"), big)
+                    let t = (now - lp.searched_ns) / 1000000000
+                    ui.label(format(&clock, "{t / 60}:{t % 60:02}"), UiTextStyle(face: fonts.mono, size: 12.5, color: theme.muted))
+                else
+                    ui.label(lp.name.text(), big)
+                    ui.label(format(&line, "Rapid {lp.rapid}  ·  Classical {lp.classical}"), note)
+            if not lp.signed_in()
+                if play_button(ui, theme, fonts, lp.state == LichessChecking ? "Signing in…" : "Set up Lichess"): asks.lichess = true
+            elif lp.playing()
+                if play_button(ui, theme, fonts, "Back to the game"): asks.lichess = true
+            elif searching
+                if ui.button("Cancel"): lp.cancel_queue()
+                ui.wake_in(0.0)
+            elif not stacked: lichess_seek_row(ui, theme, fonts, lp)
+        if ready and stacked
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 14.0, align: Vec2(0.0, 0.5)))
+                ui.spacer()
+                lichess_seek_row(ui, theme, fonts, lp)
+        if lp.problem.len > 0 and lp.state != LichessSignedOut: ui.label(lp.problem.text(), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.loss()))
+
+fn lichess_seek_row(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, lp: *LichessPlay)
+    var line: [120]u8
+    with ui.open(UiNode(flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5)))
+        for i in 0..LichessPresets.len
+            if clock_chip(ui, theme, fonts, 50 + i as int, LichessPresets[i], lp.preset == i): lp.preset = i as int
+    var mode = lp.rated ? 0 : 1
+    var kit = SettingsKit(ui, theme, fonts, 320.0, 0, 0.0)
+    if kit.segments("lichesshomemode", RatedModes, ref mode): lp.rated = mode == 0
+    let (minutes, increment) = lp.clock_chosen()
+    if play_button(ui, theme, fonts, format(&line, "Play {minutes}+{increment}")): lp.queue()
+
+fn more_kind(i: int) -> TabKind
+    if i == 0: return Tournaments
+    if i == 1: return NewTournament
+    if i == 2: return Engines
+    if i == 3: return Books
+    if i == 4: return Database
+    if i == 5: return Profile
+    if i == 6: return Settings
+    return Contribute
+
+fn hero(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, record: *PlayerRecord, quick: *QuickMatch, asks: *HomeAsks)
+    let ui = &app.ui
+    let speed = record.speed
+    let r = &record.ratings[speed]
+    let small = UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8)
+    let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    var n: [16]u8
+    var line: [120]u8
+    let glow = theme.surface.lerp(theme.accent, theme.dark ? 0.14 : 0.08)
+    with ui.open(UiNode(name: "hero", width: UiSize.grow(), height: UiSize.fixed(HeroTall), padding: Vec4(24.0, 20.0, 24.0, 22.0), gap: 12.0, clip: true, box: theme.wear(UiBox(fill: UiFill.linear(glow, theme.surface, 200.0), radius: Vec4.splat(CardCurve), border: 1.0, border_color: theme.line, shadow: UiShadow(Color(0.0, 0.0, 0.0, theme.dark ? 0.28 : 0.08), 0.0, 6.0, 24.0, 0.0, false)))))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), align: Vec2(0.0, 0.5)))
+            ui.label("QUICK MATCH", small)
+            ui.spacer()
+            var mode = record.rated and not record.infinite ? 0 : 1
+            var kit = SettingsKit(ui, theme, fonts, 320.0, 0, 0.0)
+            if not quick.searching() and kit.segments("quickmode", RatedModes, ref mode)
+                record.rated = mode == 0
+                if record.rated: record.infinite = false
+                asks.changed = true
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 6.0))
+            for i in 0..RatedSpeeds
+                if speed_tab(ui, theme, fonts, i as int, &record.ratings[i], i == speed) and not quick.searching()
+                    record.speed = i as int
+                    asks.changed = true
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 18.0, align: Vec2(0.0, 1.0)))
+            ui.label(format(&n, "{r.shown()}"), UiTextStyle(face: fonts.serif, size: 66.0, color: theme.ink))
+            with ui.open(UiNode(gap: 4.0, padding: Vec4(0.0, 0.0, 0.0, 12.0)))
+                ui.label(r.provisional() ? format(&line, "{SpeedNames[speed]} rating, provisional") : format(&line, "{SpeedNames[speed]} rating"), UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink))
+                if r.games == 0: ui.label("No games yet. Your rating will adjust quickly during your first few games.", note)
+                else: ui.label(format(&line, "{r.games} games  ·  {r.wins} won  ·  {r.draws} drawn  ·  {r.losses} lost  ·  best {round(r.peak) as int}"), note)
+        opponent(ui, theme, fonts, record, quick, asks)
+        ui.spacer()
+        if quick.searching(): queue(app, theme, fonts, record, quick, asks)
+        else
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(ActionTall), gap: 6.0, align: Vec2(0.0, 0.5)))
+                for i in 0..QuickSpeed.len
+                    if QuickSpeed[i] != speed: continue
+                    if clock_chip(ui, theme, fonts, i as int, quick_clock_text(i as int, &n), i == record.clocks[speed] and not record.infinite)
+                        record.clocks[speed] = i as int
+                        record.infinite = false
+                        asks.changed = true
+                if clock_chip(ui, theme, fonts, QuickSpeed.len as int, "∞", record.infinite, 18.0)
+                    record.infinite = true
+                    asks.changed = true
+                ui.spacer()
+                let text = record.infinite ? "Play infinite" : format(&line, "Play {record.rated ? "rated" : "casual"} {SpeedWords[speed]}")
+                if play_button(ui, theme, fonts, text): asks.search = true
+
+fn opponent(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, record: *PlayerRecord, quick: *QuickMatch, asks: *HomeAsks)
+    let small = UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8)
+    let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    let still = quick.searching()
+    var n: [16]u8
+    var line: [120]u8
+    var kit = SettingsKit(ui, theme, fonts, 320.0, 0, 0.0)
+    with ui.open(UiNode(name: "opponent", width: UiSize.grow(), padding: Vec4(14.0, 10.0, 12.0, 10.0), gap: 8.0, box: UiBox(fill: UiFill.solid(theme.sunken.with_alpha(0.75)), radius: Vec4.splat(ControlCurve), border: 1.0, border_color: theme.line.with_alpha(0.8))))
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5)))
+            ui.label("OPPONENT", small)
+            var mode = record.chosen ? 1 : 0
+            if kit.segments("opponentmode", OpponentModes, ref mode) and not still
+                record.chosen = mode == 1
+                asks.changed = true
+            ui.spacer()
+            ui.label("Natural move timing", UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+            var natural = record.natural
+            if ui.toggle("", ref natural, UiNode(name: "naturalreply", width: UiSize.fixed(40.0))) and not still
+                record.natural = natural
+                asks.changed = true
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(32.0), gap: 12.0, align: Vec2(0.0, 0.5)))
+            let pace = not record.natural ? "The engine uses a fixed response time." : record.infinite ? "Without a clock, the engine uses a longer thinking time." : "The engine manages its thinking time based on the clock."
+            if not record.chosen: ui.label(format(&line, "Match with an opponent near your rating, with a random playing style. {pace}"), note)
+            else
+                var v = record.chosen_elo as f32
+                with ui.open(UiNode(width: UiSize.grow(), align: Vec2(0.0, 0.5)))
+                    if ui.slider_track("opponentelo", ref v, MatchEloLeast as f32, MatchFullElo as f32, 50.0) and not still
+                        record.chosen_elo = v as int
+                        asks.changed = true
+                let full = record.chosen_elo > MatchEloMost
+                ui.label(full ? "Max" : format(&n, "{record.chosen_elo}"), UiTextStyle(face: fonts.strong, size: 14.0, color: full ? theme.accent : theme.ink), UiNode(width: UiSize.fixed(40.0)))
+                var style = record.chosen_style
+                if kit.segments("opponentstyle", StyleNames, ref style) and not still
+                    record.chosen_style = style
+                    asks.changed = true
+
+fn speed_tab(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, i: int, r: *Rating, chosen: bool) -> bool
+    var n: [16]u8
+    let o = ui.open(UiNode(name: "speedtab", key: i, width: UiSize.grow(), padding: Vec4(14.0, 9.0, 14.0, 10.0), gap: 2.0, hit: true, focusable: true))
+    let h = ui.interact(o.id)
+    let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 20.0)
+    let on = ui.spring(o.id, 1, chosen ? 1.0 : 0.0, 20.0)
+    let fill = theme.sunken.lerp(theme.line, 0.35 * lit).lerp(theme.accent_soft, on)
+    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(ControlCurve), border: 1.0, border_color: theme.line.lerp(theme.accent, on))
+    ui.label(SpeedNames[i], UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted.lerp(theme.ink, on)))
+    ui.label(r.text(&n), UiTextStyle(face: fonts.strong, size: 16.0, color: theme.ink))
+    ui.close()
+    return h.clicked
+
+fn clock_chip(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, i: int, text: str, chosen: bool, size: f32 = 13.0) -> bool
+    let o = ui.open(UiNode(name: "clockchip", key: i, height: UiSize.fixed(34.0), padding: Vec4(14.0, 0.0, 14.0, 0.0), align: Vec2(0.5, 0.5), hit: true, focusable: true))
+    let h = ui.interact(o.id)
+    let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 20.0)
+    let on = ui.spring(o.id, 1, chosen ? 1.0 : 0.0, 20.0)
+    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.sunken.lerp(theme.line, 0.35 * lit).lerp(theme.surface.lerp(theme.line, 0.7), on)), radius: Vec4.splat(ControlCurve), border: 1.0, border_color: theme.line)
+    ui.label(text, UiTextStyle(face: on > 0.5 ? fonts.strong : fonts.text, size: size, color: theme.muted.lerp(theme.ink, max(on, lit))))
+    ui.close()
+    return h.clicked
+
+fn play_button(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, text: str) -> bool
+    let o = ui.open(UiNode(name: "quickplay", width: UiSize.fit(220.0), height: UiSize.fixed(ActionTall), padding: Vec4(28.0, 0.0, 28.0, 0.0), align: Vec2(0.5, 0.5), hit: true, focusable: true))
+    let h = ui.interact(o.id)
+    let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 20.0)
+    let fill = theme.accent.lerp(theme.ink, 0.12 * lit)
+    ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(CardCurve), shadow: UiShadow(theme.accent.with_alpha(0.25 + 0.2 * lit), 0.0, 4.0, 16.0 + 6.0 * lit, 0.0, false))
+    ui.label(text, UiTextStyle(face: fonts.strong, size: 14.5, color: theme.accent_ink))
+    ui.close()
+    return h.clicked
+
+fn queue(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, record: *PlayerRecord, quick: *QuickMatch, asks: *HomeAsks)
+    let ui = &app.ui
+    let now = now_ns()
+    let t = &quick.terms
+    let r = record.near(t.speed)
+    let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+    var line: [120]u8
+    var clock: [16]u8
+    with ui.open(UiNode(name: "queue", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(ActionTall), gap: 14.0, align: Vec2(0.0, 0.5)))
+        if quick.state == QueueSearching
+            rings(ui, theme, now - quick.began_ns)
+            with ui.open(UiNode(gap: 3.0))
+                ui.label(format(&line, "Finding {t.speed == SpeedInfinite ? "an" : "a"} {SpeedWords[t.speed]} opponent"), UiTextStyle(face: fonts.strong, size: 14.0, color: theme.ink))
+                ui.label(format(&line, "Within {quick.window(now)} of {r.shown()}  ·  {t.rated ? "rated" : "casual"}  ·  {record.clock_text_at(t.speed, &clock)}"), note)
+            ui.spacer()
+            let s = (now - quick.began_ns) / 1000000000
+            ui.label(format(&line, "0:{s:02}"), UiTextStyle(face: fonts.mono, size: 13.0, color: theme.muted))
+            if ui.button("Cancel"): asks.cancel = true
+        else
+            avatar(ui, theme, fonts, t)
+            with ui.open(UiNode(gap: 3.0))
+                with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
+                    ui.label(t.name_text(), UiTextStyle(face: fonts.strong, size: 15.0, color: theme.ink))
+                    ui.label(t.full() ? "Full strength" : format(&line, "{t.elo}"), UiTextStyle(face: fonts.strong, size: 15.0, color: theme.muted))
+                    style_tag(ui, theme, fonts, t.style)
+                var drawn: [16]u8
+                var lost: [16]u8
+                if t.rated: ui.label(format(&line, "Win {signed(r.change(t.elo as f64, 1.0), &clock)}  ·  draw {signed(r.change(t.elo as f64, 0.5), &drawn)}  ·  loss {signed(r.change(t.elo as f64, 0.0), &lost)}"), note)
+                else: ui.label("Casual game · Does not affect your rating", note)
+            ui.spacer()
+            ui.label(t.chosen ? "Your opponent" : "Opponent found", UiTextStyle(face: fonts.strong, size: 13.0, color: theme.accent))
+    ui.wake_in(0.0)
+
+fn rings(ui: *UiCanvas, theme: *GuiTheme, since: i64)
+    let room: f32 = 44.0
+    with ui.open(UiNode(name: "rings", width: UiSize.fixed(room), height: UiSize.fixed(room)))
+        for k in 0..3
+            let t = ((since + k as i64 * RingNs / 3) % RingNs) as f32 / RingNs as f32
+            let s = 10.0 + (room - 10.0) * t
+            ui.leaf(UiNode(key: k as int, floating: true, offset: Vec2((room - s) * 0.5, (room - s) * 0.5), width: UiSize.fixed(s), height: UiSize.fixed(s), box: UiBox(radius: Vec4.splat(s * 0.5), border: 2.0, border_color: theme.accent.with_alpha((1.0 - t) * 0.9))))
+        ui.leaf(UiNode(key: 3, floating: true, offset: Vec2(room * 0.5 - 6.0, room * 0.5 - 6.0), width: UiSize.fixed(12.0), height: UiSize.fixed(12.0), box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(6.0))))
+
+fn avatar(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, t: *MatchTerms)
+    let name = t.name_text()
+    with ui.open(UiNode(name: "avatar", width: UiSize.fixed(44.0), height: UiSize.fixed(44.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(style_color(theme, t.style)), radius: Vec4.splat(22.0))))
+        ui.label(name.len > 0 ? name[0..1] : "?", UiTextStyle(face: fonts.serif, size: 20.0, color: theme.accent_ink))
+
+fn style_tag(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, style: int)
+    let c = style_color(theme, style)
+    with ui.open(UiNode(name: "styletag", padding: Vec4(8.0, 2.0, 8.0, 3.0), box: UiBox(fill: UiFill.solid(c.with_alpha(0.18)), radius: Vec4.splat(5.0))))
+        ui.label(StyleNames[style], UiTextStyle(face: fonts.strong, size: 11.0, color: c))
+
+fn style_color(theme: *GuiTheme, style: int) -> Color
+    if style == 1: return theme.warn
+    if style == 2: return theme.muted
+    return theme.accent
+
+fn signed(n: int, buf: *[16]u8) -> str
+    return format(buf, "{n > 0 ? "+" : ""}{n}")
+
+fn icon_tile(ui: *UiCanvas, theme: *GuiTheme, icons: *LineIcons, icon: LineIcon, size: f32, lit: f32)
+    with ui.open(UiNode(name: "icontile", width: UiSize.fixed(size), height: UiSize.fixed(size), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.accent_soft.lerp(theme.accent, 0.14 * lit)), radius: Vec4.splat(ControlCurve), border: 1.0, border_color: theme.accent.with_alpha(theme.dark ? 0.18 : 0.12))))
+        icons.show(ui, icon, size * 0.56, theme.accent)
+
+fn side_card(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name: str, title: str, line: str, action: str) -> bool
+    let o = ui.open(UiNode(name: name, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(20.0, 18.0, 20.0, 16.0), gap: 6.0, hit: true, focusable: true, clip: true))
+    let h = ui.interact(o.id)
+    let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 20.0)
+    ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.35 * lit)), radius: Vec4.splat(CardCurve), border: 1.0, border_color: theme.line.lerp(theme.muted, 0.3 * lit)))
+    ui.label(title, UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink))
+    ui.paragraph(line, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.grow()))
+    ui.spacer()
+    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 4.0, align: Vec2(0.0, 0.5)))
+        ui.label(action, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.accent.lerp(theme.ink, 0.3 * lit)))
+        ui.leaf(UiNode(width: UiSize.fixed(4.0 * lit)))
+        ui.mark(MarkRight, 14.0, theme.accent.lerp(theme.ink, 0.3 * lit))
+    ui.close()
+    return h.clicked
+
+fn recent(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, played: *PlayedIndex, heading: UiTextStyle, scrolls: bool, asks: *HomeAsks)
+    if played.games.len == 0: return
+    var line: [120]u8
+    var n: [16]u8
+    ui.label("RECENT GAMES", heading, UiNode(padding: Vec4(2.0, 6.0, 0.0, 0.0)))
+    let row = scrolls ? UiNode(name: "recentrow", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(72.0), padding: Vec4(0.0, 0.0, 0.0, 10.0), gap: 10.0, scroll_x: true, fade: 18.0) : UiNode(name: "recentrow", flow: FlowRow, width: UiSize.grow(), gap: 10.0)
+    let count = scrolls ? min(played.games.len as int, RecentScrolled) : RecentShown
+    with ui.open(row)
+        for each in 0..count
+            let k = each as int
+            let i = played.games.len as int - 1 - k
+            if i < 0
+                ui.leaf(UiNode(key: k, width: UiSize.grow()))
+                continue
+            let g = &played.games[i]
+            let o = played.outcome(g)
+            let c = o == 1 ? theme.gain() : o == -1 ? theme.loss() : theme.muted
+            let opponent = g.person == 1 ? played.text(g.white) : played.text(g.black)
+            let h = ui.open(UiNode(name: "recentgame", key: k, flow: FlowRow, width: scrolls ? UiSize.fixed(RecentWide) : UiSize.grow(), height: UiSize.fixed(62.0), padding: Vec4(12.0, 0.0, 12.0, 0.0), gap: 12.0, align: Vec2(0.0, 0.5), hit: true, focusable: true, clip: true))
+            let hit = ui.interact(h.id)
+            let lit = ui.spring(h.id, 0, hit.hovered or hit.focused and ui.keyboard_nav ? 1.0 : 0.0, 20.0)
+            ui.elements[h.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.35 * lit)), radius: Vec4.splat(CardCurve), border: 1.0, border_color: theme.line.lerp(theme.muted, 0.3 * lit)))
+            let letter = o == 1 ? "W" : o == 0 ? "D" : o == -1 ? "L" : "–"
+            with ui.open(UiNode(name: "result", width: UiSize.fixed(32.0), height: UiSize.fixed(32.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(c.with_alpha(theme.dark ? 0.2 : 0.14)), radius: Vec4.splat(ControlCurve))))
+                ui.label(letter, UiTextStyle(face: fonts.strong, size: 13.5, color: c))
+            with ui.open(UiNode(width: UiSize.grow(), gap: 3.0, clip: true))
+                ui.label(opponent, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink))
+                let said = o == 1 ? "Won" : o == 0 ? "Drawn" : o == -1 ? "Lost" : "Unfinished"
+                var clock: [24]u8
+                ui.label(format(&line, "{SpeedNames[g.speed]} {g.speed != SpeedInfinite ? clock_of_pgn(played.text(g.clock), &clock) : ""}  ·  {said}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+            if g.changed
+                let cc = g.change > 0 ? theme.gain() : g.change < 0 ? theme.loss() : theme.muted
+                with ui.open(UiNode(name: "change", padding: Vec4(8.0, 3.0, 8.0, 4.0), box: UiBox(fill: UiFill.solid(cc.with_alpha(theme.dark ? 0.18 : 0.12)), radius: Vec4.splat(5.0))))
+                    ui.label(signed(g.change, &n), UiTextStyle(face: fonts.strong, size: 13.0, color: cc))
+            ui.close()
+            if hit.clicked: asks.open_game = g.at
+
+fn card(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, icons: *LineIcons, name: str, icon: LineIcon, title: str, line: str) -> bool
+    let o = ui.open(UiNode(name: name, flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(68.0), padding: Vec4(14.0, 0.0, 14.0, 0.0), gap: 12.0, align: Vec2(0.0, 0.5), hit: true, focusable: true, clip: true))
+    let h = ui.interact(o.id)
+    let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 20.0)
+    ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.35 * lit)), radius: Vec4.splat(CardCurve), border: 1.0, border_color: theme.line.lerp(theme.muted, 0.3 * lit), shadow: UiShadow(Color(0.0, 0.0, 0.0, (theme.dark ? 0.16 : 0.04) * (0.5 + 0.5 * lit)), 0.0, 2.0, 10.0, 0.0, false)))
+    icon_tile(ui, theme, icons, icon, 38.0, lit)
+    with ui.open(UiNode(width: UiSize.grow(), gap: 3.0, clip: true))
+        ui.label(title, UiTextStyle(face: fonts.strong, size: 13.5, color: theme.ink))
+        ui.label(line, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+    ui.mark(MarkRight, 14.0, theme.muted.lerp(theme.ink, lit))
+    ui.close()
+    return h.clicked

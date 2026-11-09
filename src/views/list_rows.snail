@@ -1,0 +1,96 @@
+use engine/ui/ui_input
+use src/theme/fonts
+use src/theme/theme
+
+const RowTall: f32 = 60.0
+const RowLead: f32 = 78.0
+const RowCurve: f32 = 8.0
+
+struct RowList
+    ui: *UiCanvas
+    theme: *GuiTheme
+    fonts: *GuiFonts
+    v: UiVirtual
+    view: f32
+    width: f32
+    shift: f32
+    lead_w: f32
+    acts_w: f32
+    fill: Color
+    ruled: bool
+    hovered: bool
+    clicked: bool
+
+    fn first() -> int
+        return v.first
+
+    fn last() -> int
+        return v.last
+
+    fn slides() -> bool
+        return width > view + 0.5
+
+    fn row(k: int, key: int, chosen: bool = false) -> UiOpen
+        let o = ui.open(UiNode(key: key, name: "listrow", flow: FlowRow, width: UiSize.fixed(width), height: UiSize.fixed(RowTall), padding: Vec4(lead_w, 0.0, acts_w + 14.0, 0.0), gap: 4.0, align: Vec2(0.0, 0.5), hit: true))
+        let h = ui.interact(o.id)
+        hovered = h.hovered
+        clicked = h.clicked
+        let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 20.0)
+        fill = theme.surface.lerp(theme.line, 0.3 * lit).lerp(theme.accent_soft, chosen ? 1.0 : 0.0)
+        ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(fill))
+        ruled = k > 0
+        rule(shift + 14.0, view - 28.0)
+        return o
+
+    fn rule(x: f32, w: f32)
+        if ruled: ui.leaf(UiNode(name: "rowrule", floating: true, offset: Vec2(x, 0.0), width: UiSize.fixed(max(w, 1.0)), height: UiSize.fixed(1.0), box: UiBox(fill: UiFill.solid(theme.line.with_alpha(0.6)))))
+
+    fn middle() -> UiOpen
+        return ui.open(UiNode(name: "rowmiddle", width: UiSize.grow(), gap: 5.0, clip: true))
+
+    fn line() -> UiOpen
+        return ui.open(UiNode(name: "rowline", flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5)))
+
+    fn note(text: str)
+        ui.label(text, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+
+    fn lead(big: str, small: str, color: Color, size: f32 = 17.0)
+        lead_in(big, small, color, UiBox(fill: UiFill.solid(color.with_alpha(theme.dark ? 0.16 : 0.11)), radius: Vec4.splat(6.0)), size)
+
+    fn lead_in(big: str, small: str, color: Color, tile: UiBox, size: f32 = 17.0)
+        with ui.open(UiNode(name: "rowlead", floating: true, offset: Vec2(shift, 0.0), width: UiSize.fixed(lead_w), height: UiSize.fixed(RowTall), padding: Vec4(12.0, 9.0, 10.0, 9.0), box: UiBox(fill: UiFill.solid(fill))))
+            with ui.open(UiNode(width: UiSize.grow(), height: UiSize.grow(), gap: 1.0, align: Vec2(0.5, 0.5), box: tile))
+                ui.label(big, UiTextStyle(face: fonts.strong, size: size, color: color))
+                if small.len > 0: ui.label(small, UiTextStyle(face: fonts.strong, size: 9.5, color: color.with_alpha(0.8), tracking: 0.7))
+            rule(14.0, lead_w - 14.0)
+            if slides(): ui.leaf(UiNode(floating: true, anchor: Vec2(1.0, 0.0), pivot: Vec2(1.0, 0.0), width: UiSize.fixed(1.0), height: UiSize.fixed(RowTall), box: UiBox(fill: UiFill.solid(theme.line.with_alpha(shift > 0.5 ? 0.9 : 0.0)))))
+
+    fn actions() -> UiOpen
+        let o = ui.open(UiNode(name: "rowacts", floating: true, anchor: Vec2(1.0, 0.5), pivot: Vec2(1.0, 0.5), offset: Vec2(shift + view - width, 0.0), flow: FlowRow, width: UiSize.fixed(acts_w + 14.0), height: UiSize.fixed(RowTall), padding: Vec4(8.0, 0.0, 12.0, 0.0), gap: 6.0, align: Vec2(1.0, 0.5), box: UiBox(fill: UiFill.solid(fill))))
+        rule(0.0, acts_w)
+        if slides(): ui.leaf(UiNode(floating: true, width: UiSize.fixed(1.0), height: UiSize.fixed(RowTall), box: UiBox(fill: UiFill.solid(theme.line.with_alpha(shift < width - view - 0.5 ? 0.9 : 0.0)))))
+        return o
+
+    fn end()
+        v.end()
+
+fn row_list(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name: str, key: int, count: int, view: f32, least: f32, acts: f32, whole: bool = false, lead: f32 = RowLead) -> RowList
+    let inside = max(view - 2.0, 1.0)
+    let tall = count as f32 * RowTall + 12.0
+    let v = ui.virtual_list(name, count, RowTall, UiNode(key: key, width: UiSize.grow(), height: whole ? UiSize.fixed(tall) : UiSize.grow(1.0, 0.0, tall), padding: Vec4(1.0, 6.0, 1.0, 6.0), scroll_x: true, box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(RowCurve), border: 1.0, border_color: theme.line))))
+    let s = ui.memory(v.id).scroll.x
+    let shift = round(s * ui.density) / ui.density
+    return RowList(ui, theme, fonts, v, inside, max(inside, least), shift, lead, acts, theme.surface, false, false, false)
+
+fn player_tag(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, key: int, name: str, elo: int, white: bool)
+    var n: [16]u8
+    with ui.open(UiNode(key: key, name: "player", flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5)))
+        ui.leaf(UiNode(width: UiSize.fixed(9.0), height: UiSize.fixed(9.0), box: UiBox(fill: UiFill.solid(white ? Color.hex(0xF2EFE8) : Color.hex(0x222222)), radius: Vec4.splat(4.5), border: 1.0, border_color: theme.muted.with_alpha(0.7))))
+        ui.label(name.len > 0 ? name : "?", UiTextStyle(face: fonts.strong, size: 13.5, color: name.len > 0 ? theme.ink : theme.muted))
+        if elo > 0
+            with ui.open(UiNode(name: "elo", padding: Vec4(6.0, 1.0, 6.0, 2.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(4.0), border: 1.0, border_color: theme.line.with_alpha(0.8))))
+                ui.label(format(&n, "{elo}"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))
+
+fn versus(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
+    ui.label("vs", UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(padding: Vec4(4.0, 0.0, 4.0, 0.0)))
+

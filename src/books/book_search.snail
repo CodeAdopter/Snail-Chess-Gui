@@ -1,0 +1,189 @@
+use src/database/eval_recorder
+
+const BookSearchNs: i64 = 600000000000
+
+enum SearchStep: u8
+    SearchIdle
+    SearchScoring
+    SearchRoot
+    SearchReference
+    SearchChild
+    SearchDone
+    SearchFailed
+
+fn score_value(kind: ScoreKind, score: int) -> int
+    if kind == MateIn: return score > 0 ? 100000 - score : -100000 - score
+    if kind == NoScore: return 0
+    return score
+
+struct BookSearcher
+    player: EnginePlayer
+    engine_id: int
+    step: SearchStep
+    game: *Game
+    node: int
+    depth: int
+    margin: int
+    best_only: bool
+    rng: *SplitMix64
+    best: Move
+    best_value: int
+    kind: ScoreKind
+    score: int
+    order: [MaxMoves]Move
+    order_count: int
+    at: int
+    picked: Move
+    asked_ns: i64
+    failure: [240]u8
+    failure_len: int
+
+    fn set_up(lib: *EngineLibrary, id: int, profile_id: int, changes: *EngineProfile)
+        engine_id = id
+        let p = &player
+        p.wanted.clear_values()
+        let entry = lib.find(id)
+        let profile = entry ? entry.profile(profile_id) : null
+        if profile: p.wanted.copy_values(profile)
+        if changes
+            for v in changes.values
+                p.wanted.put(v.name_text(), v.value_text())
+        var t: [8]u8
+        p.wanted.put("MultiPV", format(&t, "{PlayerLines}"))
+        p.multipv_owned = true
+        p.on = true
+
+    fn failure_text() -> str
+        return str(failure[0..failure_len])
+
+    fn busy() -> bool
+        return step == SearchScoring or step == SearchRoot or step == SearchReference or step == SearchChild
+
+    fn new_candidate()
+        player.new_game()
+        step = SearchIdle
+
+    fn score_at(g: *Game, at_node: int, d: int)
+        game = g
+        node = at_node
+        depth = d
+        step = SearchScoring
+        ask(node, depth)
+
+    fn pick(g: *Game, at_node: int, d: int, within: int, best_wanted: bool, r: *SplitMix64)
+        game = g
+        node = at_node
+        depth = d
+        margin = within
+        best_only = best_wanted
+        rng = r
+        step = SearchRoot
+        ask(node, depth)
+
+    fn ask(n: int, d: int)
+        var go: [40]u8
+        player.ask(game, n, format(&go, "go depth {max(d, 1)}"))
+        asked_ns = now_ns()
+
+    fn update(app: *DesktopApp, lib: *EngineLibrary)
+        var path: [600]u8
+        let exe = lib.exe_path(engine_id, &path)
+        player.update(app, exe, folder_of(exe))
+        if not busy(): return
+        if player.engine.state == EngineFailed
+            fail(player.engine.failure_text())
+            return
+        if not player.has_best
+            if now_ns() - asked_ns > BookSearchNs: fail("The engine search timed out after 10 minutes.")
+            return
+        player.has_best = false
+        if eval_recorder and not player.illegal: eval_recorder.keep_player(&player)
+        if player.illegal
+            var why: [120]u8
+            fail(format(&why, "The engine returned an illegal move: {player.best_text()}."))
+            return
+        let heard = player.heard
+        match step
+            SearchScoring
+                kind = heard.kind
+                score = heard.score
+                step = SearchDone
+            SearchRoot
+                best = player.best
+                kind = heard.kind
+                score = heard.score
+                best_value = score_value(kind, score)
+                if best_only: done(best)
+                elif player.line_count > 1: pick_line()
+                else
+                    var list: MoveList = undefined
+                    list.fill(&game.nodes[node].board)
+                    order_count = list.count
+                    for i in 0..list.count
+                        order[i] = list.items[i]
+                    var k = order_count - 1
+                    while k > 0
+                        let j = (rng.next() % (k + 1) as u64) as int
+                        let held = order[k]
+                        order[k] = order[j]
+                        order[j] = held
+                        k -= 1
+                    at = 0
+                    let child = game.add_move(node, best)
+                    if not has_any_move(&game.nodes[child].board): done(best)
+                    else
+                        step = SearchReference
+                        ask(child, depth - 1)
+            SearchReference
+                best_value = -score_value(heard.kind, heard.score)
+                next_child()
+            SearchChild
+                let v = -score_value(heard.kind, heard.score)
+                if v >= best_value - margin: done(order[at - 1])
+                else: next_child()
+
+    fn pick_line()
+        let p = &player
+        var within = 0
+        for i in 0..p.line_count
+            if score_value(p.lines[i].kind, p.lines[i].score) >= best_value - margin: within += 1
+        var n = (rng.next() % max(within, 1) as u64) as int
+        for i in 0..p.line_count
+            if score_value(p.lines[i].kind, p.lines[i].score) < best_value - margin: continue
+            if n == 0
+                done(p.lines[i].move)
+                return
+            n -= 1
+        done(best)
+
+    fn next_child()
+        while at < order_count
+            let m = order[at]
+            at += 1
+            if m == best
+                done(best)
+                return
+            let child = game.add_move(node, m)
+            let b = &game.nodes[child].board
+            if not has_any_move(b)
+                let v = b.in_check() ? 100000 : 0
+                if v >= best_value - margin
+                    done(m)
+                    return
+                continue
+            step = SearchChild
+            ask(child, depth - 1)
+            return
+        done(best)
+
+    fn done(m: Move)
+        picked = m
+        step = SearchDone
+
+    fn fail(why: str)
+        failure_len = keep_text(why, failure[0..240])
+        player.cancel()
+        step = SearchFailed
+
+    fn release()
+        player.release()

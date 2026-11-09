@@ -1,0 +1,144 @@
+use chess/moves
+use chess/fen
+
+fn write_san(board: *Board, move: Move, out: *ShortText)
+    if move.kind == CastleKingside
+        out.add_str("O-O")
+    elif move.kind == CastleQueenside
+        out.add_str("O-O-O")
+    else
+        let kind = board.squares[move.from].kind
+        if kind == Pawn
+            if move.is_capture
+                out.add('a' + move.from.file)
+                out.add('x')
+        else
+            out.add(kind_letter(kind))
+            write_disambiguation(board, move, kind, out)
+            if move.is_capture: out.add('x')
+        write_square(move.to, out)
+        if move.is_promotion
+            out.add('=')
+            out.add(kind_letter(move.promotion))
+    var after = *board
+    after.play(move)
+    if after.in_check: out.add(has_any_move(&after) ? '+' : '#')
+
+fn write_disambiguation(board: *Board, move: Move, kind: Kind, out: *ShortText)
+    var list: MoveList = undefined
+    list.fill(board)
+    var rivals = false
+    var same_file = false
+    var same_rank = false
+    for i in 0..list.count
+        let other = list.items[i]
+        if other.to != move.to or other.from == move.from or board.squares[other.from].kind != kind: continue
+        rivals = true
+        if other.from.file == move.from.file: same_file = true
+        if other.from.rank == move.from.rank: same_rank = true
+    if not rivals: return
+    if not same_file
+        out.add('a' + move.from.file)
+    elif not same_rank
+        out.add('1' + move.from.rank)
+    else
+        write_square(move.from, out)
+
+fn write_uci(move: Move, out: *ShortText)
+    write_square(move.from, out)
+    write_square(move.to, out)
+    if move.is_promotion: out.add(kind_letter(move.promotion) + 32)
+
+fn parse_move(board: *Board, text: str) -> (Move, bool)
+    var end = text.len
+    while end > 0 and move_suffix(text[end - 1])
+        end -= 1
+    var start = 0
+    while start < end and text[start] == ' '
+        start += 1
+    let t = text[start..end]
+
+    var list: MoveList = undefined
+    list.fill(board)
+    if t == "O-O" or t == "0-0": return find_kind(&list, CastleKingside)
+    if t == "O-O-O" or t == "0-0-0": return find_kind(&list, CastleQueenside)
+    if is_uci_text(t): return find_uci(&list, t)
+    return find_san(board, &list, t)
+
+fn move_suffix(c: u8) -> bool
+    return c == '+' or c == '#' or c == '!' or c == '?' or c == ' '
+
+fn find_kind(list: *MoveList, kind: MoveKind) -> (Move, bool)
+    for i in 0..list.count
+        if list.items[i].kind == kind: return list.items[i], true
+    return NoMove, false
+
+fn is_uci_text(t: str) -> bool
+    if t.len != 4 and t.len != 5: return false
+    if not square_text(t[0..2]) or not square_text(t[2..4]): return false
+    return t.len == 4 or promotion_kind(t[4]) != NoKind
+
+fn find_uci(list: *MoveList, t: str) -> (Move, bool)
+    let from = Square(t[0] - 'a', t[1] - '1')
+    let to = Square(t[2] - 'a', t[3] - '1')
+    let promotion = t.len == 5 ? promotion_kind(t[4]) : NoKind
+    for i in 0..list.count
+        let m = list.items[i]
+        if m.from != from or m.to != to: continue
+        let made = m.is_promotion ? m.promotion : NoKind
+        if made == promotion: return m, true
+    return NoMove, false
+
+fn promotion_kind(c: u8) -> Kind
+    match c
+        'N', 'n': return Knight
+        'B', 'b': return Bishop
+        'R', 'r': return Rook
+        'Q', 'q': return Queen
+    return NoKind
+
+fn find_san(board: *Board, list: *MoveList, t: str) -> (Move, bool)
+    var rest = t
+    var kind = Pawn
+    if rest.len > 0 and san_piece(rest[0]) != NoKind
+        kind = san_piece(rest[0])
+        rest = rest[1..rest.len]
+
+    var promotion = NoKind
+    if rest.len > 2 and promotion_kind(rest[rest.len - 1]) != NoKind
+        promotion = promotion_kind(rest[rest.len - 1])
+        rest = rest[0..rest.len - 1]
+        if rest.len > 0 and rest[rest.len - 1] == '=': rest = rest[0..rest.len - 1]
+    if rest.len < 2 or not square_text(rest[rest.len - 2..rest.len]): return NoMove, false
+    let to = Square(rest[rest.len - 2] - 'a', rest[rest.len - 1] - '1')
+
+    var from_file = -1
+    var from_rank = -1
+    for i in 0..rest.len - 2
+        let c = rest[i]
+        if c >= 'a' and c <= 'h': from_file = c - 'a'
+        elif c >= '1' and c <= '8': from_rank = c - '1'
+        elif c != 'x' and c != ':' and c != '-': return NoMove, false
+
+    var found = NoMove
+    var matches = 0
+    for i in 0..list.count
+        let m = list.items[i]
+        if m.to != to or board.squares[m.from].kind != kind: continue
+        if from_file >= 0 and m.from.file != from_file: continue
+        if from_rank >= 0 and m.from.rank != from_rank: continue
+        let made = m.is_promotion ? m.promotion : NoKind
+        if made != promotion: continue
+        found = m
+        matches += 1
+    return found, matches == 1
+
+fn san_piece(c: u8) -> Kind
+    match c
+        'N': return Knight
+        'B': return Bishop
+        'R': return Rook
+        'Q': return Queen
+        'K': return King
+        'P': return Pawn
+    return NoKind

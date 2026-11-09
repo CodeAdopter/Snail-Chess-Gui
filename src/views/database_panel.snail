@@ -1,0 +1,602 @@
+use src/database/eval_recorder
+use src/views/analysis_panel
+use src/tabs/registry_popup
+
+const DbPanelTop: f32 = 8.0
+const DbPanelFoot: f32 = 10.0
+const DbHeadHeight: f32 = 30.0
+const DbNameHeight: f32 = 20.0
+const DbBlockGap: f32 = 8.0
+const DbPanelMost = 10
+const DbPanelFew = 3
+const DbModeFew = 0
+const DbModeShort = 1
+const DbModeAll = 2
+const DbModeWords = ["Top 3", "Top 10", "All lines"]
+const DbSortRank = 0
+const DbSortWhite = 1
+const DbSortBlack = 2
+const DbSortWords = ["Rank", "White", "Black"]
+const DbMarkNone = 0
+const DbMarkCloud = 1
+const DbMarkReady = 2
+const DbMarkSending = 3
+const DbMarkShared = 4
+const DbSuggestMost = 6
+const DbSearchMost: f32 = 170.0
+const DbSearchLeast: f32 = 84.0
+const DbWdlMoveWidth: f32 = 72.0
+const DbWdlBarHeight: f32 = 18.0
+const DbWdlPartLeast: f32 = 38.0
+
+struct DbEngine
+    cloud: bool
+    source: u8
+    mark: int
+    engine: u16
+    at: int
+    rating: int
+    depth: int
+    name_at: int
+    name_len: int
+
+struct DbBlock
+    engine: int
+    first: int
+    count: int
+
+struct DatabasePanel
+    pv: PvLines
+    shown: Board
+    read_key: u64
+    read_version: u64
+    read_cloud: u64
+    read_find: u32
+    read_mode: int
+    read_sharing: bool
+    read_sort: int
+    read_any: bool
+    mode: int = DbModeShort
+    show_wdl: bool
+    sort: int
+    find: UiEditText
+    evals: [..]DbEval
+    lines: [..]PvLine
+    wdls: [..]u32
+    wdl_given: [..]bool
+    found: [..]DbEngine
+    blocks: [..]DbBlock
+    names: [..]u8
+    matches: int
+    more_lines: bool
+    rated: bool
+
+    fn name_of(e: *DbEngine) -> str
+        return str(names[e.name_at..e.name_at + e.name_len])
+
+    fn query() -> str
+        return trim(find.text())
+
+    fn read(board: *Board)
+        let r = eval_recorder
+        let c = cloud_db
+        let version = r ? r.version : 0
+        let cloud_version = c ? c.version : 0
+        let find_hash = id_hash(query())
+        let sharing = c and c.sharing()
+        if read_any and board.key == read_key and version == read_version and cloud_version == read_cloud and mode == read_mode and find_hash == read_find and sharing == read_sharing and sort == read_sort: return
+        read_any = true
+        read_key = board.key
+        read_version = version
+        read_cloud = cloud_version
+        read_find = find_hash
+        read_mode = mode
+        read_sharing = sharing
+        read_sort = sort
+        shown = *board
+        evals.clear()
+        lines.clear()
+        wdls.clear()
+        wdl_given.clear()
+        found.clear()
+        blocks.clear()
+        names.clear()
+        matches = 0
+        more_lines = false
+        rated = false
+        var name: [..]u8
+        defer name.free()
+        if r
+            r.db.evals_at(board.key, &evals)
+            let lichess = r.db.store.known_id(r.db.engines, DbCloudName) as u16
+            for i in 0..evals.len
+                let e = &evals[i]
+                if e.multipv != 1: continue
+                r.db.engine_name(e.engine, &name)
+                var mark = DbMarkNone
+                if (e.flags & DbShared) != 0: mark = DbMarkShared
+                elif e.depth >= CloudMinDepth and e.pv_len > 0 and e.engine != lichess: mark = sharing ? DbMarkSending : DbMarkReady
+                add_engine(DbEngine(engine: e.engine, mark: mark, at: i as int, rating: r.rating_of(e.engine), depth: e.depth as int), str(name[0..name.len]))
+        var answer = -1
+        if c and c.lookup and c.on()
+            c.want(board)
+            answer = c.answer_of(board.key)
+            if answer >= 0
+                let a = c.answers[answer]
+                for i in a.first..a.first + a.count
+                    let l = &c.lines[i]
+                    if l.eval.multipv != 1: continue
+                    let named = l.engine_name()
+                    add_engine(DbEngine(cloud: true, source: l.source, mark: DbMarkCloud, at: i as int, rating: r ? r.rating_named(named) : -1, depth: l.eval.depth as int), named)
+        keep_once()
+        let q = query()
+        for k in 0..found.len
+            let f = &found[k]
+            if q.len > 0 and not db_name_holds(name_of(f), q): continue
+            matches += 1
+            if blocks.len >= (mode == DbModeFew ? DbPanelFew : DbPanelMost): continue
+            var b = DbBlock(engine: k as int, first: lines.len as int)
+            if f.cloud: add_cloud_lines(c, answer, f)
+            else: add_stored_lines(f)
+            b.count = lines.len as int - b.first
+            if b.count == 0: continue
+            if f.rating >= 0: rated = true
+            blocks.push(b)
+        if sort != DbSortRank: order_by_side()
+        pv.make(&shown, lines[0..lines.len])
+
+    fn order_by_side()
+        let sign = sort == DbSortWhite ? 1 : -1
+        for i in 1..blocks.len
+            var k = i as int
+            while k > 0 and sign * db_white_value(&shown, &lines[blocks[k].first]) > sign * db_white_value(&shown, &lines[blocks[k - 1].first])
+                let held = blocks[k]
+                blocks[k] = blocks[k - 1]
+                blocks[k - 1] = held
+                k -= 1
+        for b in blocks
+            for i in b.first + 1..b.first + b.count
+                var k = i as int
+                while k > b.first and sign * db_white_value(&shown, &lines[k]) > sign * db_white_value(&shown, &lines[k - 1])
+                    let held = lines[k]
+                    lines[k] = lines[k - 1]
+                    lines[k - 1] = held
+                    let held_wdl = wdls[k]
+                    wdls[k] = wdls[k - 1]
+                    wdls[k - 1] = held_wdl
+                    let held_given = wdl_given[k]
+                    wdl_given[k] = wdl_given[k - 1]
+                    wdl_given[k - 1] = held_given
+                    k -= 1
+
+    fn add_engine(e: DbEngine, name: str)
+        var f = e
+        f.name_at = names.len as int
+        f.name_len = min(name.len, 64) as int
+        for k in 0..f.name_len
+            names.push(name[k])
+        found.push(f)
+        var k = found.len as int - 1
+        while k > 0 and db_ranks_above(found[k].rating, found[k].depth, found[k - 1].rating, found[k - 1].depth)
+            let held = found[k]
+            found[k] = found[k - 1]
+            found[k - 1] = held
+            k -= 1
+
+    fn keep_once()
+        var kept = 0
+        for k in 0..found.len
+            var seen = false
+            for j in 0..kept
+                if db_same_name(name_of(&found[j]), name_of(&found[k])): seen = true
+            if seen: continue
+            found[kept] = found[k]
+            kept += 1
+        found.resize(kept)
+
+    fn add_stored_lines(f: *DbEngine)
+        add_line(&evals[f.at])
+        var others: [..]int
+        defer others.free()
+        for i in 0..evals.len
+            if evals[i].engine == f.engine and evals[i].multipv > 1: others.push(i as int)
+        if others.len == 0: return
+        more_lines = true
+        if mode != DbModeAll: return
+        for i in 1..others.len
+            var k = i as int
+            while k > 0 and evals[others[k]].multipv < evals[others[k - 1]].multipv
+                let held = others[k]
+                others[k] = others[k - 1]
+                others[k - 1] = held
+                k -= 1
+        for i in others: add_line(&evals[i])
+
+    fn add_cloud_lines(c: *CloudDb, answer: int, f: *DbEngine)
+        let lead = &c.lines[f.at]
+        add_line(&lead.eval)
+        let a = c.answers[answer]
+        let name = lead.engine_name()
+        for j in a.first..a.first + a.count
+            let l = &c.lines[j]
+            if l.eval.multipv <= 1 or l.source != f.source or l.engine_name() != name: continue
+            more_lines = true
+            if mode == DbModeAll: add_line(&l.eval)
+
+    fn add_line(e: *DbEval)
+        var l: PvLine
+        l.depth = e.depth as int
+        l.seldepth = e.seldepth as int
+        l.nodes = e.nodes as i64
+        l.bound = ExactScore
+        let s = e.score as int
+        l.kind = Centipawns
+        l.score = s
+        if s > DbMateScore - 10000
+            l.kind = MateIn
+            l.score = DbMateScore - s
+        elif s < -DbMateScore + 10000
+            l.kind = MateIn
+            l.score = -DbMateScore - s
+        var b = shown
+        for i in 0..e.pv_len
+            let (m, ok) = db_find_move(&b, e.pv[i])
+            if not ok: break
+            l.moves[l.count] = m
+            l.count += 1
+            b.play(m)
+        l.filled = l.count > 0
+        if not l.filled: return
+        lines.push(l)
+        wdls.push(e.wdl)
+        wdl_given.push((e.flags & DbHasWdl) != 0)
+
+    fn height(ui: *UiCanvas) -> f32
+        var content = DbNameHeight
+        if blocks.len > 0
+            content = 0.0
+            let all = mode == DbModeAll
+            for b in blocks
+                if all: content += DbNameHeight + PvRowGap + DbBlockGap
+                content += b.count as f32 * (PvRowHeight + PvRowGap)
+            content -= all ? PvRowGap + DbBlockGap : PvRowGap
+        let want = DbPanelTop + DbHeadHeight + PanelGap + content + DbPanelFoot
+        return ui.spring(id_hash("databaseheight"), 0, want, 18.0)
+
+    fn least_height() -> f32
+        return DbPanelTop + DbHeadHeight + PanelGap + PvRowHeight + DbPanelFoot
+
+    fn draw(app: *DesktopApp, look: *BoardLook, x: f32, y: f32, w: f32, h: f32, flipped: bool) -> (int, int)
+        let ui = &app.ui
+        let theme = look.theme
+        var clicked_line = -1
+        var clicked_ply = -1
+        if w < 1.0 or h < 1.0: return clicked_line, clicked_ply
+        pv.begin()
+        with ui.open(UiNode(name: "database", floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(h), padding: Vec4(14.0, DbPanelTop, 10.0, DbPanelFoot), gap: PanelGap, clip: true))
+            head(app, look, w - 24.0)
+            let note = UiTextStyle(face: look.fonts.text, size: 12.5, color: theme.muted)
+            let all = mode == DbModeAll
+            with ui.open(UiNode(name: "dblines", width: UiSize.grow(), height: UiSize.grow(), gap: all ? DbBlockGap : PvRowGap, scroll_y: true))
+                if blocks.len == 0
+                    var said: [160]u8
+                    let q = query()
+                    if not eval_recorder: ui.paragraph("Stored evaluations are open in another window.", note)
+                    elif q.len > 0 and found.len > 0: ui.paragraph(format(&said, "No engine matching “{q}” has evaluated this position."), note)
+                    elif cloud_db and cloud_db.asking_about(shown.key): ui.paragraph("Asking the cloud…", note)
+                    else: ui.paragraph("No evaluations of this position yet.", note)
+                else
+                    for i in 0..blocks.len
+                        let (line, ply) = all ? block(app, look, i as int, w) : row(app, look, i as int, w)
+                        if line >= 0
+                            clicked_line = line
+                            clicked_ply = ply
+        pv.hover_board(app, look, &shown, lines[0..lines.len], flipped)
+        return clicked_line, clicked_ply
+
+    fn head(app: *DesktopApp, look: *BoardLook, inner: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let small = UiTextStyle(face: look.fonts.text, size: 12.0, color: theme.muted)
+        let title = UiTextStyle(face: look.fonts.strong, size: 13.5, color: theme.ink)
+        let searchable = found.len > 1 or query().len > 0
+        let word = DbModeWords[clamp(mode, 0, 2)]
+        var n: [48]u8
+        var count = ""
+        if query().len > 0: count = matches == 1 ? "1 match" : format(&n, "{matches} matches")
+        elif found.len > blocks.len: count = format(&n, "top {blocks.len} of {found.len}")
+        elif found.len == 1: count = "1 engine"
+        elif found.len > 1: count = format(&n, "{found.len} engines")
+        var room = inner - ui.measure("Evaluations", title).x - 8.0
+        room -= ui.measure("All lines", small).x + 36.0
+        room -= ui.measure("WDL", small).x + 30.0
+        room -= ui.measure("White", small).x + 44.0
+        let count_w = count.len > 0 ? ui.measure(count, small).x + 8.0 : 0.0
+        if searchable and room - count_w < DbSearchLeast + 8.0: count = ""
+        elif count.len > 0: room -= count_w
+        with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(DbHeadHeight), gap: 8.0, align: Vec2(0.0, 0.5)))
+            ui.label("Evaluations", title)
+            if count.len > 0: ui.label(count, small)
+            ui.spacer()
+            if searchable: search(app, look, clamp(room - 8.0, DbSearchLeast, DbSearchMost))
+            if sort_chip(ui, look): sort = (clamp(sort, 0, 2) + 1) % 3
+            if wdl_chip(ui, look): show_wdl = not show_wdl
+            if ui.button(word, false, UiNode(name: "dbmode", width: UiSize.fixed(ui.measure("All lines", small).x + 30.0), height: UiSize.fixed(ControlHeight))): mode = (clamp(mode, 0, 2) + 1) % 3
+            ui.tooltip("Show the top 3, the top 10, or every line of the top 10")
+
+    fn search(app: *DesktopApp, look: *BoardLook, w: f32)
+        let ui = &app.ui
+        let theme = look.theme
+        let t = &ui.theme
+        var offered: [DbSuggestMost]int
+        var n = 0
+        with ui.open(UiNode(name: "dbfind", width: UiSize.fixed(w), height: UiSize.fixed(ControlHeight)))
+            ui.text_field("dbsearch", &find, "Find engine", UiNode(width: UiSize.grow(), height: UiSize.fixed(ControlHeight), padding: Vec4(9.0, 5.0, 9.0, 5.0)))
+            let field = ui.last_widget
+            let q = query()
+            if ui.editing == field and q.len > 0
+                for step in 0..2
+                    for k in 0..found.len
+                        if n >= DbSuggestMost: break
+                        let name = name_of(&found[k])
+                        if db_same_name(name, q) or not db_name_holds(name, q): continue
+                        if db_name_begins(name, q) != (step == 0): continue
+                        offered[n] = k as int
+                        n += 1
+            if n > 0 and app.pointer.pressed(Enter)
+                find.set(name_of(&found[offered[0]]))
+                n = 0
+            if n > 0
+                with ui.open(UiNode(name: "dbsuggest", floating: true, anchor: Vec2(0.0, 1.0), pivot: Vec2(0.0, 0.0), offset: Vec2(0.0, 4.0), layer: 6, width: UiSize.fixed(max(w, 200.0)), padding: Vec4.splat(4.0), gap: 1.0, box: UiBox(fill: UiFill.solid(t.raised), radius: Vec4.splat(t.radius), border: 1.0, border_color: t.line, shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.18), 0.0, 8.0, 22.0, 0.0, false))))
+                    for i in 0..n
+                        let f = &found[offered[i]]
+                        let o = ui.open(UiNode(key: i as int, name: "dbsuggestion", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(26.0), padding: Vec4(8.0, 0.0, 8.0, 0.0), gap: 8.0, align: Vec2(0.0, 0.5), hit: true))
+                        let h = ui.interact(o.id, false)
+                        let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 22.0)
+                        ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.12 * lit)), radius: Vec4.splat(4.0))
+                        ui.label(name_of(f), UiTextStyle(face: look.fonts.text, size: 12.5, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
+                        var d: [16]u8
+                        ui.label(format(&d, "d{f.depth}"), UiTextStyle(face: look.fonts.text, size: 11.5, color: theme.muted))
+                        ui.close()
+                        if h.clicked: find.set(name_of(f))
+
+    fn row(app: *DesktopApp, look: *BoardLook, i: int, w: f32) -> (int, int)
+        let ui = &app.ui
+        let theme = look.theme
+        let b = &blocks[i]
+        let f = &found[b.engine]
+        let line = b.first
+        let l = &lines[line]
+        var clicked = -1
+        var ply = -1
+        let name_w = clamp(w * 0.24, 72.0, 150.0)
+        var fill = i % 2 == 0 ? theme.sunken : theme.surface
+        var edge: f32 = 0.0
+        if f.mark == DbMarkSending
+            fill = fill.lerp(theme.accent, 0.16)
+            edge = 1.0
+        with ui.open(UiNode(key: db_engine_key(name_of(f)), name: "pv", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(PvRowHeight), align: Vec2(0.0, 0.5), clip: true, animate: true, box: UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(4.0), border: edge, border_color: theme.accent.with_alpha(0.45))))
+            var eval: [24]u8
+            ui.label(score_text(l.kind, l.score, shown.side, &eval), UiTextStyle(face: look.fonts.strong, size: 12.5, color: theme.ink), UiNode(width: UiSize.fixed(PvEvalWidth), padding: Vec4(8.0, 0.0, 4.0, 0.0)))
+            with ui.open(UiNode(name: "dbname", flow: FlowRow, width: UiSize.fixed(name_w), height: UiSize.grow(), gap: 5.0, align: Vec2(0.0, 0.5), hit: true, clip: true))
+                ui.label(name_of(f), UiTextStyle(face: look.fonts.strong, size: 12.0, color: theme.ink), UiNode(clip: true))
+                mark_dot(ui, look, f)
+                var tip: [200]u8
+                ui.tooltip(engine_tip(f, &tip))
+            var d: [16]u8
+            ui.label(format(&d, "d{f.depth}"), UiTextStyle(face: look.fonts.text, size: 11.5, color: theme.muted), UiNode(width: UiSize.fixed(30.0)))
+            let p = show_wdl ? wdl_view(app, look, line, w - 24.0 - PvEvalWidth - name_w - 30.0) : pv.moves(app, look, line)
+            if p >= 0
+                clicked = line
+                ply = p
+        return clicked, ply
+
+    fn block(app: *DesktopApp, look: *BoardLook, i: int, w: f32) -> (int, int)
+        let ui = &app.ui
+        let theme = look.theme
+        let b = &blocks[i]
+        let f = &found[b.engine]
+        let small = UiTextStyle(face: look.fonts.text, size: 12.0, color: theme.muted)
+        var clicked = -1
+        var ply = -1
+        let sending = f.mark == DbMarkSending
+        with ui.open(UiNode(key: db_engine_key(name_of(f)), name: "dbengine", width: UiSize.grow(), gap: PvRowGap, animate: true))
+            with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(DbNameHeight), gap: 8.0, align: Vec2(0.0, 0.5)))
+                var t: [40]u8
+                ui.label(format(&t, "{i + 1}"), small, UiNode(width: UiSize.fixed(14.0)))
+                with ui.open(UiNode(name: "dbname", flow: FlowRow, width: UiSize.grow(), height: UiSize.grow(), gap: 5.0, align: Vec2(0.0, 0.5), hit: true, clip: true))
+                    ui.label(name_of(f), UiTextStyle(face: look.fonts.strong, size: 12.5, color: theme.ink), UiNode(clip: true))
+                    mark_dot(ui, look, f)
+                    var tip: [200]u8
+                    ui.tooltip(engine_tip(f, &tip))
+                if f.cloud: ui.label(cloud_source_text(f.source), UiTextStyle(face: look.fonts.text, size: 12.0, color: theme.accent))
+                if f.rating >= 0: rating_link(app, look, f.rating)
+                ui.label(format(&t, "depth {f.depth}"), small)
+            for k in 0..b.count
+                let line = b.first + k
+                let l = &lines[line]
+                var fill = k % 2 == 0 ? theme.sunken : theme.surface
+                if sending: fill = fill.lerp(theme.accent, 0.16)
+                with ui.open(UiNode(key: line, name: "pv", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(PvRowHeight), align: Vec2(0.0, 0.5), clip: true, box: UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(4.0))))
+                    var eval: [24]u8
+                    ui.label(score_text(l.kind, l.score, shown.side, &eval), UiTextStyle(face: look.fonts.strong, size: 12.5, color: theme.ink), UiNode(width: UiSize.fixed(PvEvalWidth), padding: Vec4(8.0, 0.0, 4.0, 0.0)))
+                    let p = show_wdl ? wdl_view(app, look, line, w - 24.0 - PvEvalWidth) : pv.moves(app, look, line)
+                    if p >= 0
+                        clicked = line
+                        ply = p
+        return clicked, ply
+
+    fn sort_chip(ui: *UiCanvas, look: *BoardLook) -> bool
+        let theme = look.theme
+        let t = &ui.theme
+        let s = clamp(sort, 0, 2)
+        let o = ui.open(UiNode(name: "dbsort", flow: FlowRow, width: UiSize.fixed(ui.measure("White", UiTextStyle(face: look.fonts.strong, size: 12.0)).x + 38.0), height: UiSize.fixed(ControlHeight), padding: Vec4(9.0, 0.0, 9.0, 0.0), gap: 6.0, align: Vec2(0.5, 0.5), hit: true, focusable: true))
+        let h = ui.interact(o.id)
+        let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 24.0)
+        let ring = ui.ring_of(o.id)
+        ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(t.surface.lerp(t.raised, lit)), radius: Vec4.splat(t.radius), border: 1.0 + ring, border_color: t.line.lerp(t.focus, ring))
+        if s == DbSortRank: ui.leaf(UiNode(width: UiSize.fixed(9.0), height: UiSize.fixed(9.0), box: UiBox(fill: UiFill.solid(Color(0.93, 0.93, 0.91, 1.0)), radius: Vec4(4.5, 0.0, 0.0, 4.5), border: 1.0, border_color: theme.muted)))
+        else: ui.leaf(UiNode(width: UiSize.fixed(9.0), height: UiSize.fixed(9.0), box: UiBox(fill: UiFill.solid(s == DbSortWhite ? Color(0.93, 0.93, 0.91, 1.0) : Color(0.11, 0.11, 0.12, 1.0)), radius: Vec4.splat(4.5), border: 1.0, border_color: theme.muted)))
+        ui.label(DbSortWords[s], UiTextStyle(face: look.fonts.strong, size: 12.0, color: theme.muted.lerp(theme.ink, max(lit, s == DbSortRank ? 0.0 : 0.8))))
+        ui.tooltip(s == DbSortRank ? "Ordered by engine rank. Click for best for White first." : s == DbSortWhite ? "Best for White first. Click for best for Black first." : "Best for Black first. Click for engine rank.")
+        ui.close()
+        return h.clicked
+
+    fn wdl_chip(ui: *UiCanvas, look: *BoardLook) -> bool
+        let theme = look.theme
+        let t = &ui.theme
+        let o = ui.open(UiNode(name: "dbwdl", flow: FlowRow, height: UiSize.fixed(ControlHeight), padding: Vec4(10.0, 0.0, 10.0, 0.0), align: Vec2(0.5, 0.5), hit: true, focusable: true))
+        let h = ui.interact(o.id)
+        let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 24.0)
+        let on = ui.spring(o.id, 1, show_wdl ? 1.0 : 0.0, 24.0)
+        let ring = ui.ring_of(o.id)
+        ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(t.surface.lerp(t.raised, lit).lerp(theme.accent.with_alpha(0.18), on)), radius: Vec4.splat(t.radius), border: 1.0 + ring, border_color: t.line.lerp(theme.accent, on).lerp(t.focus, ring))
+        ui.label("WDL", UiTextStyle(face: look.fonts.strong, size: 12.0, color: theme.muted.lerp(theme.ink, max(on, lit)).lerp(theme.accent, on * 0.6)))
+        ui.tooltip(show_wdl ? "Show the lines' moves" : "Show win, draw and loss chances")
+        ui.close()
+        return h.clicked
+
+    fn wdl_view(app: *DesktopApp, look: *BoardLook, line: int, room: f32) -> int
+        let ui = &app.ui
+        let theme = look.theme
+        let l = &lines[line]
+        let given = wdl_given[line]
+        var w = 0
+        var d = 0
+        var x = 0
+        if given
+            w = (wdls[line] & 1023) as int
+            d = (wdls[line] >> 10 & 1023) as int
+            x = (wdls[line] >> 20 & 1023) as int
+        else
+            let (ew, ed, el) = db_estimate_wdl(&shown, l.kind, l.score)
+            w = ew
+            d = ed
+            x = el
+        if shown.side == Black
+            let held = w
+            w = x
+            x = held
+        let total = max(w + d + x, 1)
+        let fade: f32 = given ? 1.0 : 0.45
+        var ply = -1
+        with ui.open(UiNode(name: "wdlmove", flow: FlowRow, width: UiSize.fixed(DbWdlMoveWidth), height: UiSize.grow(), align: Vec2(0.0, 0.5), clip: true))
+            ply = pv.moves(app, look, line, 1)
+        let bar_w = max(room - DbWdlMoveWidth - 8.0, DbWdlPartLeast * 3.0)
+        let spare = bar_w - DbWdlPartLeast * 3.0
+        let values = [w, d, x]
+        let fills = [Color(0.93, 0.93, 0.91, fade), Color(0.50, 0.50, 0.53, fade), Color(0.11, 0.11, 0.12, fade)]
+        let inks = [Color(0.12, 0.12, 0.13, given ? 1.0 : 0.75), Color(0.97, 0.97, 0.97, given ? 1.0 : 0.8), Color(0.88, 0.88, 0.88, given ? 1.0 : 0.75)]
+        let corners = [Vec4(5.0, 0.0, 0.0, 5.0), Vec4(0.0, 0.0, 0.0, 0.0), Vec4(0.0, 5.0, 5.0, 0.0)]
+        with ui.open(UiNode(name: "wdlbar", flow: FlowRow, width: UiSize.fixed(bar_w), height: UiSize.fixed(DbWdlBarHeight), hit: true, box: UiBox(radius: Vec4.splat(5.0), border: 1.0, border_color: theme.line)))
+            for k in 0..3
+                var pct: [16]u8
+                let part = DbWdlPartLeast + spare * values[k] as f32 / total as f32
+                with ui.open(UiNode(key: k as int, width: UiSize.fixed(part), height: UiSize.grow(), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(fills[k]), radius: corners[k])))
+                    ui.label(wdl_percent(values[k], &pct), UiTextStyle(face: look.fonts.strong, size: 11.0, color: inks[k]))
+            ui.tooltip(given ? "White wins · draws · Black wins, from the engine" : "White wins · draws · Black wins, estimated from the score")
+        return ply
+
+    fn engine_tip(f: *DbEngine, buf: *[200]u8) -> str
+        var rating: [32]u8
+        let rated_text = f.rating >= 0 ? format(&rating, "  ·  CCRL Rating {f.rating}") : ""
+        return format(buf, "{name_of(f)}{rated_text}  ·  depth {f.depth}  ·  {mark_text(f.mark, f.source)}")
+
+    fn mark_dot(ui: *UiCanvas, look: *BoardLook, f: *DbEngine)
+        let theme = look.theme
+        if f.mark == DbMarkNone or f.mark == DbMarkSending: return
+        let c = f.mark == DbMarkCloud ? theme.accent : f.mark == DbMarkShared ? theme.gain() : theme.muted.with_alpha(0.7)
+        ui.leaf(UiNode(name: "dbmark", width: UiSize.fixed(7.0), height: UiSize.fixed(7.0), box: UiBox(fill: UiFill.solid(c), radius: Vec4.splat(3.5))))
+
+    fn rating_link(app: *DesktopApp, look: *BoardLook, rating: int)
+        let ui = &app.ui
+        let theme = look.theme
+        let o = ui.open(UiNode(name: "dbrating", hit: true))
+        let h = ui.interact(o.id, false)
+        var t: [24]u8
+        ui.label(format(&t, "CCRL {rating}"), UiTextStyle(face: look.fonts.text, size: 12.0, color: h.hovered ? theme.accent : theme.muted))
+        ui.tooltip("CCRL Rating. Opens the CCRL site.")
+        ui.close()
+        if h.hovered: app.cursor = SDL_SYSTEM_CURSOR_POINTER
+        if h.clicked: open_link(RatingsHome)
+
+    fn release()
+        pv.release()
+        evals.free()
+        lines.free()
+        wdls.free()
+        wdl_given.free()
+        found.free()
+        blocks.free()
+        names.free()
+
+fn cloud_source_text(source: u8) -> str
+    return source == CloudOfficial ? "cloud · official" : source == CloudCommunity ? "cloud · community" : "cloud · lichess"
+
+fn db_white_value(shown: *Board, l: *PvLine) -> int
+    var v = l.score
+    if l.kind == MateIn: v = l.score > 0 ? 1000000 - l.score : -1000000 - l.score
+    return shown.side == White ? v : -v
+
+fn wdl_percent(v: int, buf: *[16]u8) -> str
+    if v <= 0: return format(buf, "0%")
+    let p = (v + 5) / 10
+    if p == 0: return format(buf, "<1%")
+    if p >= 100 and v < 1000: return format(buf, ">99%")
+    return format(buf, "{p}%")
+
+fn mark_text(mark: int, source: u8) -> str
+    if mark == DbMarkCloud: return cloud_source_text(source)
+    if mark == DbMarkShared: return "shared with the cloud"
+    if mark == DbMarkSending: return "on its way to the cloud"
+    if mark == DbMarkReady: return "on this computer, not shared"
+    return "on this computer"
+
+fn db_estimate_wdl(b: *Board, kind: ScoreKind, score: int) -> (int, int, int)
+    if kind == MateIn
+        if score > 0: return 1000, 0, 0
+        return 0, 0, 1000
+    var material = 0
+    for sq in 0..64
+        let p = b.squares[sq]
+        if p == NoPiece: continue
+        let k = p.kind
+        if k == Pawn: material += 1
+        elif k == Knight or k == Bishop: material += 3
+        elif k == Rook: material += 5
+        elif k == Queen: material += 9
+    let m = clamp(material, 17, 78) as f32 / 58.0
+    let a = ((-37.45051876 * m + 121.19101539) * m - 132.78783573) * m + 420.70576692
+    let s = ((90.26261072 * m - 137.26549898) * m + 71.10130540) * m + 51.35259597
+    let v = score as f32 * a / 100.0
+    let w = (0.5 + 1000.0 / (1.0 + exp((a - v) / s))) as int
+    let l = (0.5 + 1000.0 / (1.0 + exp((a + v) / s))) as int
+    return w, max(1000 - w - l, 0), l
+
+fn db_engine_key(name: str) -> int
+    var k: u32 = 2166136261
+    for c in name as []u8
+        k = (k ^ db_lower(c) as u32) * 16777619
+    return (k & 0x3FFFFFFF) as int
+
+fn db_ranks_above(a: int, da: int, b: int, db: int) -> bool
+    if a != b: return a > b
+    return da > db
+
+fn db_lower(c: u8) -> u8
+    return c >= 'A' and c <= 'Z' ? c + 32 : c
+
+fn db_same_name(a: str, b: str) -> bool
+    if a.len != b.len: return false
+    for i in 0..a.len
+        if db_lower(a[i]) != db_lower(b[i]): return false
+    return true
+
+fn db_name_begins(name: str, q: str) -> bool
+    return q.len <= name.len and db_same_name(name[0..q.len], q)
+
+fn db_name_holds(name: str, q: str) -> bool
+    if q.len > name.len: return false
+    for at in 0..name.len - q.len + 1
+        if db_same_name(name[at..at + q.len], q): return true
+    return false

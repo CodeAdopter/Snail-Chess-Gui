@@ -1,0 +1,46 @@
+use src/books/book_read
+use src/game/pgn_write
+use src/store/data_folder
+
+fn export_openings(openings: str, as_pgn: bool, name: str, path: str) -> int
+    var out: [..]u8
+    defer out.free()
+    var start: Board
+    var moves: [..]Move
+    defer moves.free()
+    var game: Game
+    defer free_game(&game)
+    var n = 0
+    var from = 0
+    for i in 0..openings.len
+        if openings[i] != '\n': continue
+        let line = openings[from..i]
+        from = i as int + 1
+        if not read_opening(line, &start, &moves): continue
+        n += 1
+        if as_pgn
+            game.reset(&start)
+            for m in moves
+                game.play(m)
+            var round: [16]u8
+            game.set_tag("Event", name)
+            game.set_tag("Round", format(&round, "{n}"))
+            write_pgn(&game, &out)
+            out.push('\n')
+            continue
+        let end = opening_end(&start, moves[0..moves.len])
+        var fen: ShortText
+        end.write_fen(&fen)
+        let text = fen.text()
+        var spaces = 0
+        for k in 0..text.len
+            if text[k] == ' ': spaces += 1
+            if spaces == 4: break
+            out.push(text[k])
+        let ops = opening_ops(line)
+        if ops.len > 0
+            out.push(' ')
+            push_text(&out, ops)
+        out.push('\n')
+    if not save_whole(path, out[0..out.len]): return -1
+    return n

@@ -1,0 +1,143 @@
+use src/views/engine_picker
+use src/views/rail
+use src/views/eval_range
+
+const GenerateRail: f32 = 280.0
+
+struct BookGeneratePopup
+    shown: bool
+    name: UiEditText
+    wanted: UiEditText
+    band_low: UiEditText
+    band_high: UiEditText
+    margin: UiEditText
+    tries: UiEditText
+    engine_id: int
+    profile_id: int
+    depth: int = 10
+    plies_low: int = 8
+    plies_high: int = 12
+    both: bool = true
+    picker: EnginePicker
+    problem: str
+    asked: *BookEntry
+
+    fn open(lib: *EngineLibrary)
+        shown = true
+        problem = ""
+        name.set("New book")
+        wanted.set("50")
+        band_low.set("-30")
+        band_high.set("30")
+        margin.set("30")
+        tries.set("200")
+        both = true
+        engine_id = lib.chosen_id()
+        profile_id = 0
+
+    fn draw(app: *DesktopApp, books: *BookLibrary, choices: *EngineChoices, look: *BoardLook)
+        if not shown: return
+        let ui = &app.ui
+        let theme = look.theme
+        let fonts = look.fonts
+        let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
+        let picking = picker.shown
+        let entry = choices.lib ? choices.lib.find(engine_id) : null
+        let profile = entry ? entry.profile(profile_id) : null
+        let w = clamp(ui.width - 80.0, 720.0, 980.0)
+        let tall = clamp(ui.height - 220.0, 360.0, 600.0)
+        var sheet = sheet_popup(ui, theme, fonts, "bookgenerate", ref shown, w, tall, GenerateRail)
+        let head = sheet.header("Generate a book", "Generate opening lines with an engine and keep those within your evaluation range.")
+        head.end()
+        with sheet.rail()
+            ui.paragraph("Scores are from White's side. The side the range favours plays the best move each turn, and the other side may play moves within the move margin. A line is kept when its final score is in range.", note, UiNode(width: UiSize.grow(), padding: Vec4(8.0, 0.0, 8.0, 6.0)))
+            rail_group(ui, theme, fonts, 1, "GENERATION SUMMARY", false)
+            var line: [200]u8
+            var band: [80]u8
+            let (lo, _) = uci_number(band_low.text())
+            let (hi, _) = uci_number(band_high.text())
+            summary_line(ui, theme, fonts, 2, format(&line, "{wanted.text()} openings, {plies_low} to {plies_high} plies"))
+            summary_line(ui, theme, fonts, 3, format(&line, "{entry ? entry.display_name() : "No engine"} at depth {depth}"))
+            summary_line(ui, theme, fonts, 4, band_words(lo as int, hi as int, both, &band))
+            ui.spacer()
+            if problem.len > 0: ui.paragraph(problem, UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn), UiNode(width: UiSize.grow(), padding: Vec4(8.0, 0.0, 8.0, 4.0)))
+            if ui.button("Start", true, UiNode(width: UiSize.grow())): start(books, entry)
+            if ui.button("Cancel", false, UiNode(width: UiSize.grow())): shown = false
+        with sheet.body(Vec4(0.0, 0.0, 0.0, 0.0), 0.0)
+            with ui.scroll_area("genbody", node: UiNode(width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(24.0, 14.0, 24.0, 22.0)))
+                var kit = SettingsKit(ui, theme, fonts, w - GenerateRail - 50.0, 0, 0.0)
+                let field = UiNode(width: UiSize.fixed(120.0))
+                with kit.card(1, "Book")
+                    with kit.row(10, "Name", "")
+                        ui.text_field("genname", &name, "Name", UiNode(width: UiSize.fixed(KitControl)))
+                    with kit.row(11, "Openings", "Number of opening lines to generate.")
+                        ui.text_field("genwanted", &wanted, "50", field)
+                with kit.card(2, "Engine")
+                    with kit.row(20, "Engine", "Use the options from the selected engine profile.")
+                        if not entry: ui.label("No engine available. Add one in the Engines tab.", note)
+                        elif engine_choice_button(ui, look, "genengine", 0, entry.display_name(), profile ? profile.name_text() : "", picker.shown, UiNode(width: UiSize.fixed(KitControl))): picker.open()
+                    kit.count(21, "Depth", "Search depth for each move.", ref depth, 1, 40)
+                with kit.card(3, "Opening lines")
+                    band_rows(&kit, 30, "gen", &band_low, &band_high, ref both)
+                    kit.count(32, "Shortest line", "Length in half-moves (plies).", ref plies_low, 1, 40)
+                    kit.count(33, "Longest line", "Length in half-moves (plies).", ref plies_high, 1, 40)
+                    with kit.row(34, "Move margin (cp)", "Maximum score difference from the best move allowed for the other side, in centipawns.")
+                        ui.text_field("genmargin", &margin, "30", field)
+                    with kit.row(35, "Maximum failed attempts", "Stop after this many consecutive attempts without a new line.")
+                        ui.text_field("gentries", &tries, "200", field)
+        sheet.end()
+        if sheet.closed: shown = false
+        if picker.draw(ui, look, choices.lib, engine_id, profile_id)
+            engine_id = picker.picked_engine
+            profile_id = picker.picked_profile
+        if picking: shown = true
+
+    fn summary_line(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, key: int, text: str)
+        with ui.open(UiNode(key: key, flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5), padding: Vec4(12.0, 3.0, 8.0, 3.0)))
+            ui.leaf(UiNode(width: UiSize.fixed(6.0), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(3.0))))
+            ui.paragraph(text, UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(width: UiSize.grow()))
+
+    fn start(books: *BookLibrary, entry: *EngineEntry)
+        let (n, n_ok) = uci_number(wanted.text())
+        let (low, low_ok) = uci_number(band_low.text())
+        let (high, high_ok) = uci_number(band_high.text())
+        let (m, m_ok) = uci_number(margin.text())
+        let (t, t_ok) = uci_number(tries.text())
+        let shown_name = trim(name.text())
+        problem = ""
+        if not entry: problem = "Choose an engine."
+        elif shown_name.len == 0: problem = "Enter a book name."
+        elif books.named(shown_name): problem = "A book with this name already exists. Choose another name."
+        elif not n_ok or n < 1 or n > 100000: problem = "Openings must be a number from 1 to 100000."
+        elif not low_ok or not high_ok or low > high: problem = "Enter two numbers for the evaluation range, lowest first."
+        elif not m_ok or m < 0: problem = "Enter the move margin as a number of centipawns."
+        elif not t_ok or t < 1: problem = "Maximum failed attempts must be at least 1."
+        elif plies_low > plies_high: problem = "The shortest line cannot be longer than the longest."
+        if problem.len > 0: return
+        let e = new BookEntry
+        set_text(&e.name, shown_name)
+        e.kind = BookEngine
+        e.engine_id = engine_id
+        set_text(&e.engine_name, entry.display_name())
+        e.profile_id = profile_id
+        let p = entry.profile(profile_id)
+        set_text(&e.profile_name, p ? p.name_text() : "Default")
+        e.depth = depth
+        e.set_band(low as int, high as int, both)
+        e.plies_low = plies_low
+        e.plies_high = plies_high
+        e.margin = m as int
+        e.wanted = n as int
+        e.tries = t as int
+        var r = SplitMix64(state: now_ns() as u64)
+        e.seed = r.next()
+        e.state = BookMaking
+        var text: [300]u8
+        set_text(&e.origin, format(&text, "Generated by {e.engine_name_text()} using profile {e.profile_name_text()}"))
+        var stamp: SDL_Time
+        if SDL_GetCurrentTime(&stamp): e.made = stamp / 1000000000
+        asked = e
+        shown = false
+
+    fn release()
+        picker.release()

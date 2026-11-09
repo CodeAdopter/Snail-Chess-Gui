@@ -1,0 +1,99 @@
+use src/game/pgn_read
+
+const MostPastedGames = 500
+
+enum PasteKind: u8
+    PasteNothing
+    PastePosition
+    PasteGame
+    PasteGames
+
+struct PasteOutcome
+    kind: PasteKind
+    bad: str
+    games: int
+
+fn read_paste(text: str, game: *Game, spare: *Game, starts: *[..]int) -> PasteOutcome
+    var out: PasteOutcome
+    let t = trimmed(text)
+    if t.len == 0: return out
+    if looks_like_fen(t)
+        var b: Board
+        var full: [160]u8
+        if not b.load_fen(fen_with_defaults(t, &full))
+            out.bad = first_word(t)
+            return out
+        spare.reset(&b)
+        take_game(game, spare)
+        out.kind = PastePosition
+        return out
+    scan_pgn(t, starts, MostPastedGames)
+    if starts.len > 1
+        out.kind = PasteGames
+        out.games = starts.len as int
+        return out
+    let r = read_pgn(t, 0, spare)
+    if not r.ok or r.moves == 0 and spare.tags.len == 0
+        out.bad = r.ok ? first_word(t) : r.bad
+        return out
+    spare.to_end()
+    take_game(game, spare)
+    out.kind = PasteGame
+    out.games = 1
+    return out
+
+fn take_pasted_game(text: str, start: int, game: *Game, spare: *Game) -> PasteOutcome
+    var out: PasteOutcome
+    let r = read_pgn(text, start, spare)
+    if not r.ok
+        out.bad = r.bad
+        return out
+    spare.to_end()
+    take_game(game, spare)
+    out.kind = PasteGame
+    out.games = 1
+    return out
+
+fn take_game(game: *Game, spare: *Game)
+    let old = *game
+    *game = *spare
+    *spare = old
+    game.version = max(old.version, game.version) + 1
+
+fn looks_like_fen(t: str) -> bool
+    let first = first_word(t)
+    var slashes = 0
+    for i in 0..first.len
+        if first[i] == '/': slashes += 1
+    return slashes == 7 and field_count(t) <= 6
+
+fn fen_with_defaults(t: str, full: *[160]u8) -> str
+    match field_count(t)
+        1: return format(full, "{t} w KQkq -")
+        2: return format(full, "{t} KQkq -")
+        3: return format(full, "{t} -")
+    return t
+
+fn field_count(t: str) -> int
+    var fields = 0
+    var inside = false
+    for i in 0..t.len
+        let space = t[i] <= 32
+        if not space and not inside: fields += 1
+        inside = not space
+    return fields
+
+fn first_word(t: str) -> str
+    var end = 0
+    while end < t.len and t[end] > 32
+        end += 1
+    return t[0..end]
+
+fn trimmed(t: str) -> str
+    var a = 0
+    var b = t.len as int
+    while a < b and t[a] <= 32
+        a += 1
+    while b > a and t[b - 1] <= 32
+        b -= 1
+    return t[a..b]

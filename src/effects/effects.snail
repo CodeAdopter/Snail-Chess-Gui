@@ -1,0 +1,160 @@
+use engine/ui/ui_gpu
+use src/effects/effect_clock
+use src/effects/piece_story
+use src/effects/sacrifice
+
+const IceLength: f32 = 2.5
+const KindleLength: f32 = 0.7
+const DustLength: f32 = 0.8
+const TrailLength: f32 = 0.75
+const BurstLength: f32 = 0.9
+const GlintLength: f32 = 0.6
+const FlameLeft: f32 = 0.3
+const FlameUp: f32 = 0.8
+const FlameDown: f32 = 0.05
+const FlameOrange: f32 = 0.0
+const FlameRed: f32 = 1.0
+const FlameGold: f32 = 2.0
+
+struct EffectFlame
+    strength: f32
+    hue: f32
+    seed: f32
+
+struct Effects
+    renderer: *UiRenderer
+    made: bool
+    clock: EffectClock
+    choices: [GuiEffectCount]EffectChoice
+    forced: bool
+    ice: u32
+    fire: u32
+    flame: u32
+    piece: u32
+    dust: u32
+    trail: u32
+    burst: u32
+
+    fn begin(now: i64, still: bool, chosen: []EffectChoice)
+        var any = false
+        for i in 0..GuiEffectCount
+            choices[i] = chosen[i]
+            if forced: choices[i].on = true
+            if choices[i].on: any = true
+        if any and not made and renderer: make()
+        clock.begin(now, still)
+
+    fn aside_material(code: ShaderCode) -> u32
+        let was = renderer.gpu.aside_on
+        renderer.gpu.build_aside(true)
+        let m = renderer.add_material(code)
+        renderer.gpu.build_aside(was)
+        return m
+
+    fn make()
+        made = true
+        ice = aside_material(shader("shaders/fx_ice.hlsl", fragment: "material_ps"))
+        fire = aside_material(shader("shaders/fx_fire.hlsl", fragment: "material_ps"))
+        flame = aside_material(shader("shaders/fx_flame.hlsl", fragment: "material_ps"))
+        piece = aside_material(shader("shaders/fx_piece.hlsl", fragment: "material_ps"))
+        dust = aside_material(shader("shaders/fx_dust.hlsl", fragment: "material_ps"))
+        trail = aside_material(shader("shaders/fx_trail.hlsl", fragment: "material_ps"))
+        burst = aside_material(shader("shaders/fx_burst.hlsl", fragment: "material_ps"))
+
+    fn on(e: GuiEffect) -> bool
+        return made and choices[e as int].on
+
+    fn intensity(e: GuiEffect) -> f32
+        return clamp(choices[e as int].intensity, 0.1, 1.0)
+
+    fn wants_story() -> bool
+        return on(HotPiece) or on(MossyPiece)
+
+    fn mark_box(mark: int, a: u64, b: u64, fill: Color, radius: f32, sample: bool = false) -> UiBox
+        var box = UiBox(fill: UiFill.solid(fill), radius: Vec4.splat(radius))
+        if mark == 0 or not on(StreakMarks): return box
+        let key = effect_key(StreakMarks, a, b)
+        let m = clock.moment(key, IceLength, true, 0.0)
+        if mark > 0
+            box.material = fire
+            box.values = Vec4(intensity(StreakMarks), (sample ? m.seconds : burning()) + 1.0, FlameOrange, (key % 1000) as f32 * 0.37)
+            return box
+        box.material = ice
+        box.values = Vec4(intensity(StreakMarks), m.seconds, 0.0, (key % 1000) as f32 * 0.37)
+        return box
+
+    fn passing(e: GuiEffect, key: u64, length: f32, still_at: f32) -> f32
+        if not on(e): return -1.0
+        let m = clock.moment(effect_key(e, key, 0), length, false, still_at)
+        return m.shows ? m.seconds : -1.0
+
+    fn burning() -> f32
+        return clock.flow()
+
+    fn burning_every(step_ns: i64) -> f32
+        return clock.flow_every(step_ns)
+
+    fn flame_on(story: *PieceStory, s: Square, check: Square, key: u64) -> EffectFlame
+        var kind = HotPiece
+        var share: f32 = 0.0
+        var hue = FlameOrange
+        var mark: u64 = 0
+        if s == check and on(CheckFlare)
+            kind = CheckFlare
+            share = 1.0
+            hue = FlameRed
+            mark = key
+        elif story and story.ready and story.heat[s as int] > 0.0 and on(HotPiece)
+            share = story.heat[s as int]
+            mark = (story.ids[s as int] + 1) as u64
+        if share <= 0.0: return EffectFlame()
+        let k = effect_key(kind, mark, 0)
+        let m = clock.moment(k, KindleLength, true, 0.0)
+        let grown = clamp(m.seconds / KindleLength, 0.0, 1.0)
+        return EffectFlame(intensity(kind) * share * (1.0 - (1.0 - grown) * (1.0 - grown)), hue, (k % 1000) as f32 * 0.37)
+
+    fn sacrifice_flame(sacrifice: *SacrificeFound) -> EffectFlame
+        if sacrifice.state == NoSacrifice or not on(SacrificeMark): return EffectFlame()
+        let confirmed = sacrifice.state == SacrificeConfirmed
+        let k = effect_key(SacrificeMark, sacrifice.key ^ (confirmed ? 2 : 1), 0)
+        let m = clock.moment(k, KindleLength, true, 0.0)
+        let grown = clamp(m.seconds / KindleLength, 0.0, 1.0)
+        return EffectFlame(intensity(SacrificeMark) * (confirmed ? 1.0 : 0.45) * grown, FlameGold, (k % 1000) as f32 * 0.37)
+
+    fn moss_on(story: *PieceStory, s: Square) -> f32
+        if not story or not story.ready or not on(MossyPiece): return 0.0
+        if story.heat[s as int] > 0.0 and on(HotPiece): return 0.0
+        return story.moss[s as int] * (0.4 + 0.6 * intensity(MossyPiece))
+
+    fn piece_flames(ui: *UiCanvas, sheet: *Texture, uv: Vec4, x: f32, y: f32, cell: f32, f: EffectFlame, time: f32, front: bool)
+        if f.strength <= 0.0: return
+        let held = ui.material
+        let held_values = ui.material_values
+        ui.shade(flame, Vec4(f.strength, time, f.hue + (front ? 4.0 : 0.0), f.seed))
+        ui.texture(sheet, x - cell * FlameLeft, y - cell * FlameUp, cell * (1.0 + FlameLeft * 2.0), cell * (1.0 + FlameUp + FlameDown), uv: uv, premultiplied: true)
+        ui.shade(held, held_values)
+
+    fn square_fire(ui: *UiCanvas, x: f32, y: f32, cell: f32, f: EffectFlame, time: f32)
+        if f.strength <= 0.0: return
+        ui.box(x, y, cell, cell, UiBox(fill: UiFill.solid(Color(0.0, 0.0, 0.0, 0.0)), material: fire, values: Vec4(f.strength, time + 1.0, f.hue, f.seed)))
+
+    fn piece_values(moss: f32, heat: f32, glint: f32, cut: f32, time: f32) -> (Vec4, bool)
+        if cut > 0.0: return Vec4(-cut, 0.0, 0.0, time), true
+        return Vec4(moss, heat, glint, time), moss > 0.0 or heat > 0.0 or glint > 0.0
+
+    fn landing_dust(ui: *UiCanvas, x: f32, y: f32, cell: f32, seconds: f32, seed: f32)
+        ui.box(x - cell, y - cell, cell * 3.0, cell * 3.0, UiBox(fill: UiFill.solid(Color(0.0, 0.0, 0.0, 0.0)), material: dust, values: Vec4(intensity(LandingDust), seconds, seed, DustLength)))
+
+    fn trail_line(ui: *UiCanvas, from: Vec2, to: Vec2, cell: f32, seconds: f32, reach: f32)
+        let held = ui.material
+        let held_values = ui.material_values
+        ui.shade(trail, Vec4(intensity(MoveTrail), seconds, reach, TrailLength))
+        ui.line(from.x, from.y, to.x, to.y, cell * 0.55, Color(1.0, 1.0, 1.0, 1.0))
+        ui.shade(held, held_values)
+
+    fn burst_embers(ui: *UiCanvas, x: f32, y: f32, cell: f32, seconds: f32, seed: f32)
+        ui.box(x - cell * 0.5, y - cell * 1.5, cell * 2.0, cell * 2.5, UiBox(fill: UiFill.solid(Color(0.0, 0.0, 0.0, 0.0)), material: burst, values: Vec4(intensity(CaptureBurst), seconds, seed, BurstLength)))
+
+    fn finish(ui: *UiCanvas)
+        let s = clock.wake_s()
+        if s >= 0.0: ui.wake_in(s)

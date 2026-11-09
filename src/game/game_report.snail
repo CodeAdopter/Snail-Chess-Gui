@@ -1,0 +1,284 @@
+use src/game/game
+use src/effects/sacrifice
+
+enum MoveMark: u8
+    Unjudged
+    Brilliant
+    Best
+    Fair
+    Inaccuracy
+    Mistake
+    Blunder
+
+const MoveMarkCount = 7
+const InaccuracyDrop: f32 = 0.1
+const MistakeDrop: f32 = 0.2
+const BlunderDrop: f32 = 0.3
+const BestLossCp = 10
+const LossCapCp = 1000
+const BrilliantFloorCp = -50
+const BrilliantOpenCp = 400
+const BrilliantSlack: f32 = 0.05
+const BrilliantLeadOpen = 3
+const BrilliantGiven = 1
+
+fn winning_chances(cp: int) -> f32
+    return 2.0 / (1.0 + exp(-0.00368208 * cp as f32)) - 1.0
+
+fn node_eval_text(n: *GameNode, buf: *[24]u8) -> str
+    if n.eval_mate > 0: return format(buf, "#{n.eval_mate}")
+    if n.eval_mate < 0: return format(buf, "#−{-n.eval_mate}")
+    let pawns = n.eval_cp as f32 / 100.0
+    if pawns > 0.0: return format(buf, "+{pawns:.1}")
+    if pawns < 0.0: return format(buf, "−{-pawns:.1}")
+    return format(buf, "0.0")
+
+fn move_accuracy(drop: f32) -> f32
+    let lost = max(drop * 50.0, 0.0)
+    return clamp(103.1668 * exp(-0.04354 * lost) - 3.1669, 0.0, 100.0)
+
+struct SideReport
+    judged: int
+    marks: [MoveMarkCount]int
+    loss: int
+    accuracy: f32
+
+    fn count(m: MoveMark) -> int
+        return marks[m as int]
+
+    fn average_loss() -> int
+        return judged > 0 ? (loss + judged / 2) / judged : 0
+
+    fn mean_accuracy() -> f32
+        return judged > 0 ? accuracy / judged as f32 : 0.0
+
+struct GameReport
+    marks: [..]MoveMark
+    sides: [2]SideReport
+    judged: int
+    key: u64
+    given: [..]u8
+    line_key: u64
+
+    fn update(game: *Game)
+        var k: u64 = 0xCBF29CE484222325 ^ game.nodes.len as u64
+        var line: u64 = k
+        var i = 0
+        while i != NoNode
+            let n = &game.nodes[i]
+            line = (line ^ (i as u64 | n.move.code() as u64 << 32)) * 0x100000001B3
+            k = (k ^ (i as u64 | (n.eval_cp as u32 as u64) << 24 | (n.eval_depth as u64) << 56)) * 0x100000001B3
+            k = (k ^ (n.eval_best.code() as u64 | (n.eval_mate as u32 as u64) << 16)) * 0x100000001B3
+            k = (k ^ (n.second_cp as u32 as u64 | (n.second_depth as u64) << 32)) * 0x100000001B3
+            k = (k ^ (n.second_best.code() as u64 | (n.second_mate as u32 as u64) << 16)) * 0x100000001B3
+            i = n.first
+        k ^= line
+        if k == key and marks.len == game.nodes.len: return
+        key = k
+        if line != line_key or given.len != game.nodes.len
+            line_key = line
+            given.clear()
+            while given.len < game.nodes.len
+                given.push(0)
+        marks.clear()
+        while marks.len < game.nodes.len
+            marks.push(Unjudged)
+        sides[0] = SideReport()
+        sides[1] = SideReport()
+        judged = 0
+        var p = 0
+        var n = game.nodes[0].first
+        while n != NoNode
+            judge(game, p, n)
+            p = n
+            n = game.nodes[n].first
+
+    fn mark(n: int) -> MoveMark
+        return n >= 0 and n < marks.len as int ? marks[n] : Unjudged
+
+    fn judge(game: *Game, p: int, n: int)
+        let (before, known_before) = white_view_of(game, p)
+        let (after, known_after) = white_view_of(game, n)
+        if not known_before or not known_after: return
+        let mover = game.nodes[p].board.side
+        let sign = mover == White ? 1 : -1
+        let own_before = before * sign
+        let own_after = after * sign
+        let loss = max(clamp(own_before, -LossCapCp, LossCapCp) - clamp(own_after, -LossCapCp, LossCapCp), 0)
+        let drop = winning_chances(own_before) - winning_chances(own_after)
+        let chosen = game.nodes[p].eval_best
+        let best = chosen != NoMove and chosen == game.nodes[n].move or loss <= BestLossCp
+        var m = Fair
+        if (best or drop <= BrilliantSlack) and brilliant(game, p, n, own_after, sign): m = Brilliant
+        elif best: m = Best
+        elif drop >= BlunderDrop: m = Blunder
+        elif drop >= MistakeDrop: m = Mistake
+        elif drop >= InaccuracyDrop: m = Inaccuracy
+        marks[n] = m
+        let s = &sides[mover as int]
+        s.judged += 1
+        s.marks[m as int] += 1
+        s.loss += loss
+        s.accuracy += move_accuracy(drop)
+        judged += 1
+
+    fn next_marked(game: *Game, side: Side, m: MoveMark) -> int
+        var first = -1
+        var passed = game.at == 0
+        var i = game.nodes[0].first
+        while i != NoNode
+            if mark(i) == m and game.nodes[game.nodes[i].parent].board.side == side
+                if passed: return i
+                if first < 0: first = i
+            if i == game.at: passed = true
+            i = game.nodes[i].first
+        return first
+
+    fn brilliant(game: *Game, p: int, n: int, own_after: int, sign: int) -> bool
+        if own_after < BrilliantFloorCp: return false
+        var legal: MoveList
+        legal.fill(&game.nodes[p].board)
+        if legal.count < 2 or not open_without(game, p, n, sign): return false
+        if given[n] == 0: given[n] = sacrifice_given(game, p, n) ? 2 : 1
+        return given[n] == 2
+
+    fn release()
+        marks.free()
+        given.free()
+
+fn white_view_of(game: *Game, i: int) -> (int, bool)
+    let n = &game.nodes[i]
+    if n.eval_depth > 0: return n.eval_cp as int, true
+    var legal: MoveList
+    legal.fill(&n.board)
+    if legal.count > 0: return 0, false
+    if not n.board.in_check(): return 0, true
+    return n.board.side == White ? -EvalMateCp : EvalMateCp, true
+
+fn open_without(game: *Game, p: int, n: int, sign: int) -> bool
+    let mates_in = game.nodes[n].eval_mate as int * sign
+    let (cp, mate, known) = other_view(game, p, n)
+    if not known: return mates_in > 0 or material_balance(&game.nodes[p].board, game.nodes[p].board.side) < BrilliantLeadOpen
+    let other = cp * sign
+    let other_mate = mate * sign
+    if other < BrilliantOpenCp: return true
+    return mates_in > 0 and (other_mate <= 0 or mates_in + 1 < other_mate)
+
+fn other_view(game: *Game, p: int, n: int) -> (int, int, bool)
+    let before = &game.nodes[p]
+    let played = game.nodes[n].move
+    if before.eval_depth > 0 and before.eval_best != NoMove and before.eval_best != played: return before.eval_cp as int, before.eval_mate as int, true
+    if before.second_depth > 0 and before.second_best != played: return before.second_cp as int, before.second_mate as int, true
+    return 0, 0, false
+
+fn sacrifice_given(game: *Game, p: int, n: int) -> bool
+    let before = &game.nodes[p].board
+    let after = &game.nodes[n].board
+    let side = before.side
+    let had = material_balance(before, side)
+    let (left, target) = material_left(before, game.nodes[n].move)
+    let offers = target != Square.none and is_piece(after.squares[target]) and had - left >= BrilliantGiven and not left_before(game, p, n, target)
+    let reply = game.nodes[n].first
+    let taken_on = reply != NoNode and game.nodes[reply].move.is_capture() ? game.nodes[reply].move.to : Square.none
+    let taken = taken_on != Square.none and is_piece(after.squares[taken_on]) and not left_before(game, p, n, taken_on)
+    if not offers and not taken: return false
+    let kept = min(had, best_left_besides(before, game.nodes[n].move))
+    let low = kept - BrilliantGiven
+    var down = false
+    var stayed = true
+    var at = reply
+    var plies = 0
+    while at != NoNode and plies <= SacrificeHorizon
+        let m = material_balance(&game.nodes[at].board, side)
+        if m <= low: down = true
+        else: stayed = false
+        if down and m >= had: return false
+        at = game.nodes[at].first
+        plies += 1
+    return offers and left <= low or taken and stayed
+
+fn left_before(game: *Game, p: int, n: int, sq: Square) -> bool
+    let q = game.nodes[p].parent
+    if q == NoNode or game.nodes[q].parent == NoNode: return false
+    let earlier = &game.nodes[game.nodes[q].parent].board
+    let (left, target) = material_left(earlier, game.nodes[q].move)
+    return target == sq and game.nodes[q].board.squares[sq] == game.nodes[n].board.squares[sq] and material_balance(earlier, earlier.side) - left >= BrilliantGiven
+
+fn is_piece(pc: Piece) -> bool
+    let k = pc.kind()
+    return pc != NoPiece and k >= Knight and k <= Queen
+
+fn material_left(b: *Board, move: Move) -> (int, Square)
+    var after = *b
+    after.play(move)
+    let (gain, sq) = best_capture_gain(&after)
+    return material_balance(&after, b.side) - gain, sq
+
+fn best_left_besides(b: *Board, played: Move) -> int
+    var legal: MoveList
+    legal.fill(b)
+    var most = -1000
+    for i in 0..legal.count
+        if legal.items[i] == played: continue
+        let (left, _) = material_left(b, legal.items[i])
+        most = max(most, left)
+    return most
+
+fn best_capture_gain(b: *Board) -> (int, Square)
+    var legal: MoveList
+    legal.fill(b)
+    var most = 0
+    var sq = Square.none
+    for i in 0..legal.count
+        if not legal.items[i].is_capture(): continue
+        let gain = exchange_gain(b, legal.items[i])
+        if gain > most
+            most = gain
+            sq = legal.items[i].to
+    return most, sq
+
+fn exchange_gain(b: *Board, first: Move) -> int
+    var gain: [34]int
+    var at = *b
+    var m = first
+    var d = 0
+    gain[0] = taken_worth(&at, m)
+    loop
+        let standing = m.is_promotion() ? piece_worth(m.promotion()) : piece_worth(at.squares[m.from].kind())
+        at.play(m)
+        let next = cheapest_capture(&at, first.to)
+        if next == NoMove or d == 32: break
+        d += 1
+        gain[d] = standing - gain[d - 1]
+        m = next
+    while d > 0
+        gain[d - 1] = -max(-gain[d - 1], gain[d])
+        d -= 1
+    return gain[0]
+
+fn taken_worth(b: *Board, m: Move) -> int
+    let taken = m.kind == EnPassant ? 1 : piece_worth(b.squares[m.to].kind())
+    return m.is_promotion() ? taken + piece_worth(m.promotion()) - 1 : taken
+
+fn cheapest_capture(b: *Board, sq: Square) -> Move
+    var legal: MoveList
+    legal.fill(b)
+    var found = NoMove
+    var least = 1000
+    for i in 0..legal.count
+        let m = legal.items[i]
+        if m.to != sq or not m.is_capture(): continue
+        let worth = piece_worth(b.squares[m.from].kind())
+        if worth < least
+            least = worth
+            found = m
+    return found
+
+fn piece_worth(k: Kind) -> int
+    match k
+        Pawn: return 1
+        Knight: return 3
+        Bishop: return 3
+        Rook: return 5
+        Queen: return 9
+    return 100

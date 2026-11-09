@@ -1,0 +1,72 @@
+use src/books/opening
+
+struct EventOpenings
+    starts: [..]Board
+    first: [..]int
+    moves: [..]Move
+
+    fn read(text: str) -> int
+        clear()
+        var b: Board
+        var line_moves: [..]Move
+        defer line_moves.free()
+        var from = 0
+        for i in 0..text.len
+            if text[i] != '\n': continue
+            let line = text[from..i]
+            from = i as int + 1
+            if not read_opening(line, &b, &line_moves): continue
+            starts.push(b)
+            first.push(moves.len as int)
+            for m in line_moves
+                moves.push(m)
+        return starts.len as int
+
+    fn count() -> int
+        return starts.len as int
+
+    fn moves_of(i: int) -> []Move
+        let end = i + 1 < first.len ? first[i + 1] : moves.len as int
+        return moves[first[i]..end]
+
+    fn clear()
+        starts.clear()
+        first.clear()
+        moves.clear()
+
+    fn release()
+        starts.free()
+        first.free()
+        moves.free()
+
+fn draw_openings(lines: str, seed: u64, needed: int, out: *[..]u8) -> int
+    out.clear()
+    var spans: [..]int
+    defer spans.free()
+    var from = 0
+    for i in 0..lines.len
+        if lines[i] != '\n': continue
+        if i > from
+            spans.push(from)
+            spans.push(i as int)
+        from = i as int + 1
+    let n = spans.len as int / 2
+    if n == 0: return 0
+    var order: [..]int
+    defer order.free()
+    for i in 0..n
+        order.push(i as int)
+    var r = SplitMix64(state: seed)
+    var k = n - 1
+    while k > 0
+        let j = (r.next() % (k + 1) as u64) as int
+        let held = order[k]
+        order[k] = order[j]
+        order[j] = held
+        k -= 1
+    for i in 0..needed
+        let at = order[i % n] * 2
+        for c in spans[at]..spans[at + 1]
+            out.push(lines[c])
+        out.push('\n')
+    return n
