@@ -65,6 +65,7 @@ struct Settings
     knights_sideways: bool
     free_moves: bool
     vsync: bool = true
+    fps_limit: int = 0
     msaa: int = 4
     render_scale: f32 = 1.0
     shadow_size: int = 2048
@@ -188,10 +189,12 @@ struct Settings
         let gx = doc.get(root, "graphics")
         if doc.is(gx, JsonObject)
             vsync = flag_or(&doc, gx, "vsync", true)
+            fps_limit = one_of(doc.num_at(gx, "fps_limit", 0.0) as int, [0, 15, 30, 60, 120])
             msaa = one_of(doc.num_at(gx, "msaa", 4.0) as int, [1, 2, 4, 8])
             render_scale = clamp(doc.num_at(gx, "render_scale", 1.0) as f32, 0.5, 2.0)
             shadow_size = one_of(doc.num_at(gx, "shadow_size", 2048.0) as int, [1024, 2048, 4096])
             anisotropy = one_of(doc.num_at(gx, "anisotropy", 8.0) as int, [1, 2, 4, 8, 16])
+            if msaa == 8 and render_scale == 1.5 and shadow_size == 4096 and anisotropy == 16: msaa = 4
         let s = doc.get(root, "settings")
         if doc.is(s, JsonObject)
             set_text(&name, json_text(&doc, s, "name"))
@@ -305,6 +308,7 @@ struct Settings
         doc.set(root, "board", b)
         let gx = doc.object()
         doc.set(gx, "vsync", doc.boolean(vsync))
+        doc.set(gx, "fps_limit", doc.number(fps_limit as f64))
         doc.set(gx, "msaa", doc.number(msaa as f64))
         doc.set(gx, "render_scale", doc.number(round(render_scale as f64 * 100.0) / 100.0))
         doc.set(gx, "shadow_size", doc.number(shadow_size as f64))

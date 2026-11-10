@@ -51,7 +51,7 @@ const StillSlots = [0, 6, 10, 15, 16, 19]
 const StillCount = 22
 
 const GraphicsPresets = ["Low", "Medium", "High", "Ultra"]
-const PresetSamples = [1, 2, 4, 8]
+const PresetSamples = [1, 2, 4, 4]
 const PresetScales = [0.75, 1.0, 1.0, 1.5]
 const PresetShadows = [1024, 2048, 2048, 4096]
 const PresetFilters = [1, 4, 8, 16]
@@ -63,6 +63,8 @@ const ShadowWords = ["Low", "Medium", "High"]
 const ShadowSizes = [1024, 2048, 4096]
 const FilterWords = ["Off", "2×", "4×", "8×", "16×"]
 const FilterSteps = [1, 2, 4, 8, 16]
+const FpsWords = ["15", "30", "60", "120", "Screen"]
+const FpsLimits = [15, 30, 60, 120, 0]
 const CostumeFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 const PreviewFen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
 const StartChoices = ["Restore previous tabs", "New tab page", "New analysis"]
@@ -676,6 +678,13 @@ struct SettingsPage
             let driver = str(app.gpu.driver())
             let api = driver == "direct3d12" ? "Direct3D 12" : driver
             kit.words(11, "Screen", format(&line, "{1.0e9 / app.refresh_ns() as f64:.0} Hz · {card} · {api}"))
+            var fp = -1
+            for i in 0..FpsLimits.len
+                if s.fps_limit == FpsLimits[i]: fp = i as int
+            with kit.row(12, "Frame rate limit", "How often the board is drawn while it moves, in 2D and 3D. Lower uses less of the graphics card; clicks and menus stay instant.")
+                if kit.segments("fpslimit", FpsWords, ref fp)
+                    s.fps_limit = FpsLimits[fp]
+                    changed = true
         let most = scene ? scene.most_samples(&app.gpu) : 4
         var offered = 0
         for n in SampleCounts

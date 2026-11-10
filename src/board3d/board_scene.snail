@@ -25,6 +25,9 @@ const AsidePass = 1
 const SharpPass = 2
 
 const SceneTickNs: i64 = 33333333
+const MotionHoldNs: i64 = 180000000
+const MotionTargets = 3
+const ParkLayerNs: i64 = 100000000
 
 const StillFrameNs: i64 = 6000000
 const UploadFrameNs: i64 = 4000000
@@ -111,6 +114,7 @@ struct SceneQuality
     scale: f32 = 1.0
     shadow: int = 2048
     aniso: f32 = 8.0
+    fps: int = 0
 
 struct BoardScene
     ready: bool
@@ -144,6 +148,12 @@ struct BoardScene
     big: Texture
     shrink: SceneShrink
     shown: u64
+    drawn_ns: i64
+    pose: u64
+    moving_until: i64
+    unscaled: Texture
+    sharp_w: int
+    sharp_h: int
     place: Vec4
     desk: DeskShow
     props: DeskLook
@@ -169,6 +179,9 @@ struct BoardScene
     seat_fov: f32
     looked_at: Vec3
     backdrop: SceneBackdrop
+    layer_key: u64
+    kept_key: u64
+    kept_ns: i64
     aside_key: u64
     aside_ns: i64
     seen_height: f32
@@ -534,7 +547,9 @@ struct BoardScene
 
     fn set_quality(gpu: *Gpu, q: SceneQuality)
         let restage = q.samples != quality.samples or q.aniso != quality.aniso
-        if not restage and q.scale == quality.scale and q.shadow == quality.shadow: return
+        if not restage and q.scale == quality.scale and q.shadow == quality.shadow
+            quality.fps = q.fps
+            return
         quality = q
         shown = 0
         if not ready: return
@@ -554,6 +569,7 @@ struct BoardScene
         den.unstage()
         backdrop.unstage()
         aside_key = 0
+        kept_key = 0
         looks.release(gpu)
         props.release(gpu)
         renderer.release()
@@ -651,6 +667,10 @@ struct BoardScene
         looked_at = aim
         light_from(a)
         return orbit != 0.0 or turned != want or look != want_look or rocker != rock
+
+    fn pose_key() -> u64
+        let at = hash_word(0x51ED5EED, ((camera.position.x * 1000.0) as i64 as u64) << 42 ^ ((camera.position.y * 1000.0) as i64 as u64) << 21 ^ (camera.position.z * 1000.0) as i64 as u64)
+        return hash_word(at, ((camera.rotation.x * 100000.0) as i64 as u64) << 48 ^ ((camera.rotation.y * 100000.0) as i64 as u64) << 32 ^ ((camera.rotation.z * 100000.0) as i64 as u64) << 16 ^ (camera.fov_y * 100000.0) as i64 as u64)
 
     fn light_from(a: f32)
         let sun_way = Quat.axis_angle(Vec3.up(), a) * Vec3(-0.6, 1.3, 0.9).normalized
@@ -817,11 +837,22 @@ struct BoardScene
             scene_loading(app, s, room)
             return
         app.gpu.build_aside(true)
-        let w = max((room.z * app.scale * quality.scale) as int, 8)
-        let h = max((room.w * app.scale * quality.scale) as int, 8)
-        if fit_drawn(&app.gpu, &target, &big, max((room.z * app.scale) as int, 8), max((room.w * app.scale) as int, 8), w, h): shown = 0
         camera.fov_y = 2.0 * atan(tan(0.45) * room.w / max(board_size, 1.0))
         let moving = place_camera(s.flipped, app.ui.dt, app.ui.still)
+        let posed = pose_key()
+        if posed != pose
+            if pose != 0: moving_until = now_ns() + MotionHoldNs
+            pose = posed
+        let motion = quality.scale > 1.0 and now_ns() < moving_until and not has_arg("--no-motion-scale")
+        let w0 = max((room.z * app.scale) as int, 8)
+        let h0 = max((room.w * app.scale) as int, 8)
+        sharp_w = max((room.z * app.scale * quality.scale) as int, 8)
+        sharp_h = max((room.w * app.scale * quality.scale) as int, 8)
+        let w = motion ? w0 : sharp_w
+        let h = motion ? h0 : sharp_h
+        if motion
+            if fit_target(&app.gpu, &target, w0, h0): shown = 0
+        elif fit_drawn(&app.gpu, &target, &big, w0, h0, w, h): shown = 0
         let t = s.slides.progress()
         var key = hash_word(show_key(s, w | h << 16, t), (camera.fov_y * 100000.0) as i64 as u64)
         key = hash_word(hash_word(key, desk.clock.key()), hash_word(desk.cards[0].key(), desk.cards[1].key()))
@@ -831,20 +862,30 @@ struct BoardScene
             key = hash_word(key, (den_px + 1) as u64 | ((den_py + 1) as u64) << 16 | ((seat_fov * 100000.0) as i64 as u64) << 32)
             key = hash_word(key, ((seat_eye.x * 1000.0) as i64 as u64) << 42 ^ ((seat_eye.y * 1000.0) as i64 as u64) << 21 ^ (seat_eye.z * 1000.0) as i64 as u64)
             key = hash_word(key, ((seat_aim.x * 1000.0) as i64 as u64) << 42 ^ ((seat_aim.y * 1000.0) as i64 as u64) << 21 ^ (seat_aim.z * 1000.0) as i64 as u64)
+        layer_key = motion ? 0 : key
         if ticking(): key = hash_word(key, (now_ns() / SceneTickNs) as u64)
-        if swaying or easing: key = hash_word(key, now_ns() as u64)
+        if swaying or easing
+            key = hash_word(key, now_ns() as u64)
+            layer_key = 0
         if redo and app.gpu.aside_waiting() == 0
             redo = false
             shown = 0
-        if key != shown
+        let gap: i64 = quality.fps > 0 ? 1000000000 / quality.fps as i64 : 0
+        let held = key != shown and whole and gap > 0 and now_ns() - drawn_ns < gap
+        let hidden = SDL_GetWindowFlags(app.window.handle) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED) != 0
+        if key != shown and not held and not hidden
             shown = key
+            drawn_ns = now_ns()
             live = true
             reduced = app.ui.still
             easing = false
             carried = false
             let missed = aside_missed
-            draw_into(app, s, t, &target, &big)
+            renderer.use_targets(motion ? MotionTargets : 0)
+            draw_into(app, s, t, &target, motion ? &unscaled : &big)
+            renderer.use_targets(0)
             redo = aside_missed != missed
+            if redo: kept_key = 0
             if not redo: whole = true
             if not easing: pick_id = -1
             if not carried: carry_id = -1
@@ -858,8 +899,11 @@ struct BoardScene
             let edge = (room.z - 1.0) / max(room.z, 1.0)
             app.ui.texture(&target, room.x, room.y, room.z - 1.0, room.w, uv: Vec4(0.0, 0.0, edge, 1.0), corners: Vec4(0.0, PageCurve - 1.0, 0.0, 0.0))
         else: app.ui.texture(&target, room.x, room.y, room.z, room.w)
-        if moving or t < 1.0 or s.free and s.free.moving or swaying or easing: app.ui.wake_in(0.0)
-        elif ticking(): app.ui.wake_in((SceneTickNs - now_ns() % SceneTickNs) as f32 / 1.0e9)
+        if hidden: return
+        let soon = gap > 0 ? max((drawn_ns + gap - now_ns()) as f32 / 1.0e9, 0.0) : 0.0
+        if held or moving or t < 1.0 or s.free and s.free.moving or swaying or easing: app.ui.wake_in(soon)
+        if motion: app.ui.wake_in(max((moving_until - now_ns()) as f32 / 1.0e9, soon))
+        elif ticking(): app.ui.wake_in(max((SceneTickNs - now_ns() % SceneTickNs) as f32 / 1.0e9, soon))
 
     fn scene_loading(app: *DesktopApp, s: *BoardShow, room: Vec4)
         app.ui.rect(room.x, room.y, room.z, room.w, s.page)
@@ -880,6 +924,8 @@ struct BoardScene
             return still.key != 0
         let dw = max((w as f32 * scale) as int, 8)
         let dh = max((h as f32 * scale) as int, 8)
+        kept_key = 0
+        layer_key = 0
         let stands = clock_stands
         clock_stands = clock
         var key = hash_word(show_key(s, dw | dh << 16, 1.0), hash_word(desk.clock.key(), hash_word(desk.cards[0].key(), desk.cards[1].key())))
@@ -900,6 +946,8 @@ struct BoardScene
             let missed = aside_missed
             app.gpu.build_aside(true)
             renderer.use_targets(sized)
+            sharp_w = dw
+            sharp_h = dh
             draw_into(app, s, 1.0, into, &still.big)
             renderer.use_targets(0)
             app.gpu.build_aside(false)
@@ -939,7 +987,10 @@ struct BoardScene
         let drawn = big.handle ? big : into
         let aspect = drawn.width as f32 / max(drawn.height, 1) as f32
         looks.view = camera.projection(aspect) * camera.view
-        if board_mirrors(style.board)
+        let keep = surrounded() and layer_key != 0 and not see_through(style.set) and style.set != GooSet and not has_arg("--no-layer-keep")
+        let fresh = style.room != ParkRoom or now_ns() - kept_ns < ParkLayerNs
+        let reuse = keep and kept_key == layer_key and fresh
+        if board_mirrors(style.board) and not reuse
             renderer.fit(&looks.mirror, drawn.width, drawn.height, HdrFormat)
             let (upright, flipped) = looks.set(&renderer, style.set)
             looks.show_board(&renderer, style.set, style.board)
@@ -965,27 +1016,44 @@ struct BoardScene
             if h != aside_key or now - aside_ns >= SceneTickNs or not backdrop.texture.handle
                 aside_key = h
                 aside_ns = now
-                backdrop.fit(&renderer, drawn.width, drawn.height)
+                backdrop.fit(&renderer, max(sharp_w, drawn.width), max(sharp_h, drawn.height))
                 seen_height = backdrop.texture.height as f32
                 draw_scene(s, t, AsidePass)
                 scene_lens().aside(true)
                 renderer.render_aside_into(&frame, &camera, &backdrop.texture)
                 scene_lens().aside(false)
             seen_height = drawn.height as f32
-            draw_scene(s, t, SharpPass)
-            backdrop.hold_shadows(&renderer, 1)
+            if reuse
+                scene_lens().focus(&camera, looked_at, seen_height, ((now % 3600000000000) as f64 / 1.0e9) as f32)
+                backdrop.draw(&renderer, scene_lens())
+            else
+                draw_scene(s, t, SharpPass)
+                backdrop.hold_shadows(&renderer, 1)
         else: draw_scene(s, t)
         renderer.sky = back
-        props.print(&app.gpu, &app.ui, &renderer, &frame, &desk, s.fonts, s.accent, s.accent_ink, style.card)
+        if not reuse
+            props.print(&app.gpu, &app.ui, &renderer, &frame, &desk, s.fonts, s.accent, s.accent_ink, style.card)
+            frame.lap("props")
         if big.handle
-            renderer.render_into(&frame, &camera, big)
+            render_view(&frame, big, reuse, keep)
             shrink.run(&app.gpu, &frame, big, into)
-        else: renderer.render_into(&frame, &camera, into)
-        if surrounded(): backdrop.free_shadows(&renderer)
+            frame.lap("shrink")
+        else: render_view(&frame, into, reuse, keep)
+        if surrounded() and not reuse: backdrop.free_shadows(&renderer)
         frame.submit()
         app.present_now()
 
+    fn render_view(frame: *Frame, into: *Texture, reuse: bool, keep: bool)
+        if reuse: renderer.again_into(frame, &camera, into)
+        elif keep and renderer.render_kept_into(frame, &camera, into)
+            kept_key = layer_key
+            kept_ns = now_ns()
+        else
+            kept_key = 0
+            renderer.render_into(frame, &camera, into)
+
     fn draw_den(app: *DesktopApp, s: *BoardShow, into: *Texture, big: *Texture)
+        kept_key = 0
         if not den_made
             den_made = true
             den_screen.init(DenCoverCd)

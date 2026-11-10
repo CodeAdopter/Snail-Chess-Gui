@@ -384,7 +384,7 @@ struct GuiApp
         sheet.finish_values = surfaces.finish_values()
         let animated = piece_art(sheet.set).motions.len > 0
         sheet.clock = ui.still ? 0.0 : ui.time
-        if not ui.still and animated: ui.wake_in(0.0)
+        if not ui.still and animated: ui.wake_in(board_frame_gap)
         if theme.material == 0: return
         look.sheet_values = Vec4(theme.motion.x, theme.motion.y, theme.motion.z, packed)
         look.page_values = look.sheet_values
@@ -972,7 +972,9 @@ struct GuiApp
             sounds.muted[k] = s.sound_muted[k]
         sounds.ready(s.sounds)
         if s.vsync != vsync_on and app.set_vsync(s.vsync): vsync_on = s.vsync
-        scene.set_quality(&app.gpu, SceneQuality(samples: min(s.msaa, scene.most_samples(&app.gpu)), scale: s.render_scale, shadow: s.shadow_size, aniso: s.anisotropy as f32))
+        scene.set_quality(&app.gpu, SceneQuality(samples: min(s.msaa, scene.most_samples(&app.gpu)), scale: s.render_scale, shadow: s.shadow_size, aniso: s.anisotropy as f32, fps: s.fps_limit))
+        board_frame_gap = s.fps_limit > 0 ? 1.0 / s.fps_limit as f32 : 0.0
+        effect_tick_ns = s.fps_limit > 0 ? max(app.refresh_ns(), 1000000000 / s.fps_limit as i64) : app.refresh_ns()
         app.redraw()
 
     fn board_look_now() -> BoardLook

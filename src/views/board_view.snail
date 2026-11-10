@@ -5,6 +5,8 @@ use src/views/piece_sheet
 use src/effects/effects
 use src/board3d/board_scene
 
+var board_frame_gap: f32 = 0.0
+
 const FileLetters = "abcdefgh"
 const RankDigits = "12345678"
 const DragStart: f32 = 4.0
@@ -569,7 +571,7 @@ struct BoardView
                 let p = corner(taken.at)
                 fx.burst_embers(ui, p.x, p.y, cell, mm.burst, (board.key % 997) as f32 * 0.41)
         draw_arrows(ui, look, under, cell, true)
-        if t < 1.0: ui.wake_in(0.0)
+        if t < 1.0: ui.wake_in(board_frame_gap)
         ui.unclip()
         if dragging and selected != Square.none
             let keep = ui.layer

@@ -3,6 +3,7 @@ use engine/ui/ui_layout
 const SpinTurnNs: i64 = 900000000
 const SpinSweep: f32 = 1.9
 const SweepNs: i64 = 1500000000
+const LoadFrameS: f32 = 0.0166
 
 fn load_ink(page: Color, strength: f32) -> Color
     let luma = page.r * 0.2126 + page.g * 0.7152 + page.b * 0.0722
@@ -17,7 +18,7 @@ fn load_spinner(ui: *UiCanvas, cx: f32, cy: f32, size: f32, ink: Color)
     let r = size * 0.5 - w * 0.5
     ui.ring(cx, cy, r, w, ink.with_alpha(ink.a * 0.2))
     ui.ring(cx, cy, r, w, ink, spin_start(ui), SpinSweep, true)
-    if not ui.still: ui.wake_in(0.0)
+    if not ui.still: ui.wake_in(LoadFrameS)
 
 fn load_card(ui: *UiCanvas, key: int, wide: f32, tall: f32, fill: Color, radius: f32, spin: *UiPath)
     let ink = load_ink(fill, 0.5)
@@ -32,7 +33,7 @@ fn load_card(ui: *UiCanvas, key: int, wide: f32, tall: f32, fill: Color, radius:
             ui.close()
             ui.open(UiNode(name: "loadsweep", key: 1, floating: true, offset: Vec2(x + half, 0.0), width: UiSize.fixed(half), height: UiSize.fixed(tall), box: UiBox(fill: UiFill.linear(glow, clear, 90.0))))
             ui.close()
-            ui.wake_in(0.0)
+            ui.wake_in(LoadFrameS)
         ui.drawing(spin, 24.0, 2.2, 22.0, ink)
 
 fn turn_spin(ui: *UiCanvas, spin: *UiPath)
