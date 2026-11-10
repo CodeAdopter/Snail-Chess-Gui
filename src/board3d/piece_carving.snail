@@ -2,24 +2,41 @@ use engine/sdf/simplify
 use src/board3d/piece_shapes
 use src/board3d/knight_outline
 
-fn add_field(m: *Mesh, f: *SdfField, cell: f32, target: int)
+# The field meshed once on a grid of cell, then simplified for each level in turn, finest first,
+# to its share of most triangles, into that level's mesh.
+fn add_field(ms: *[PieceLevels]Mesh, levels: int, f: *SdfField, cell: f32, most: int)
     f.prepare(cell, cell * 16.0)
     var out: SdfMesh
     mesh_field(f, &out, false)
-    if out.triangles() > target: simplify(&out, target)
-    let first = m.vertex_count as u32
     let h = cell * 0.25
-    for i in 0..out.positions.len
-        var p = out.positions[i]
-        for pass in 0..2
-            let n = field_normal(f, p, h)
-            p = p - n * f.distance(p)
-        m.vertex(p, field_normal(f, p, h), Vec2(0.0, 0.0))
-    var i = 0
-    while i < out.indices.len
-        m.triangle(first + out.indices[i], first + out.indices[i + 1], first + out.indices[i + 2])
-        i += 3
+    for level in 0..levels
+        let target = (most as f32 * piece_detail(level).share) as int
+        if out.triangles() > target: simplify(&out, target)
+        let m = &ms[level]
+        let first = m.vertex_count as u32
+        for i in 0..out.positions.len
+            var p = out.positions[i]
+            for pass in 0..2
+                let n = field_normal(f, p, h)
+                p = p - n * f.distance(p)
+            m.vertex(p, field_normal(f, p, h), Vec2(0.0, 0.0))
+        var i = 0
+        while i < out.indices.len
+            m.triangle(first + out.indices[i], first + out.indices[i + 1], first + out.indices[i + 2])
+            i += 3
     out.free_all()
+
+# Every level of the piece of kind into ms, the first levels of them.
+fn add_piece(ms: *[PieceLevels]Mesh, kind: int, levels: int)
+    if kind == Pawn as int: add_pawn(ms, levels)
+    if kind == Knight as int: add_knight(ms, levels)
+    if kind == Bishop as int: add_bishop(ms, levels)
+    if kind == Rook as int: add_rook(ms, levels)
+    if kind == Queen as int: add_queen(ms, levels)
+    if kind == King as int: add_king(ms, levels)
+
+fn add_turned(ms: *[PieceLevels]Mesh, levels: int, o: *PieceOutline)
+    for level in 0..levels: o.add_to(&ms[level], piece_detail(level))
 
 fn field_normal(f: *SdfField, p: Vec3, h: f32) -> Vec3
     let x = f.distance(p + Vec3(h, 0.0, 0.0)) - f.distance(p - Vec3(h, 0.0, 0.0))
@@ -38,11 +55,12 @@ fn surface_depth(f: *SdfField, x: f32, y: f32) -> f32
 
 const KnightScale: f32 = 0.892
 
-fn add_knight(m: *Mesh, segments: int)
+fn add_knight(ms: *[PieceLevels]Mesh, levels: int)
     var o: PieceOutline
     knight_outline(&o)
-    o.add_to(m, segments)
-    let first = m.vertex_count
+    add_turned(ms, levels, &o)
+    var first: [PieceLevels]int
+    for level in 0..levels: first[level] = ms[level].vertex_count
     let ink = BodyInk.of()
     let seat = Vec3(0.0, KnightSeat, 0.0)
     var f: SdfField
@@ -59,11 +77,13 @@ fn add_knight(m: *Mesh, segments: int)
         f.add(SdfShape.ellipsoid(Vec3(eye.x, eye.y, side * face), Vec3(0.026, 0.022, 0.016), 0, ink, blend: 0.008).carving())
         f.add(SdfShape.ellipsoid(Vec3(eye.x + 0.003, eye.y, side * (face - 0.012)), Vec3.splat(0.016), 0, ink, blend: 0.006))
     knight_mane(&f, ink)
-    add_field(m, &f, 0.003, 90000)
+    add_field(ms, levels, &f, 0.003, 90000)
     f.free_all()
-    for i in first..m.vertex_count
-        let v = &m.vertices[i]
-        v.position = seat + (v.position - seat) * KnightScale
+    for level in 0..levels
+        let m = &ms[level]
+        for i in first[level]..m.vertex_count
+            let v = &m.vertices[i]
+            v.position = seat + (v.position - seat) * KnightScale
 
 fn knight_ears(f: *SdfField, ink: BodyInk)
     let back = Vec2(-0.1, 0.735 + KnightSeat)
@@ -127,10 +147,10 @@ fn knight_mouth(f: *SdfField, ink: BodyInk)
     let lips = Vec3(0.345, 0.472 + KnightSeat, 0.0)
     f.add(SdfShape.limb(corner, lips, 0.0045, 0.0045, 0, ink, blend: 0.003, squash_z: 30.0).carving())
 
-fn add_bishop(m: *Mesh, segments: int)
+fn add_bishop(ms: *[PieceLevels]Mesh, levels: int)
     var o: PieceOutline
     bishop_outline(&o)
-    o.add_to(m, segments)
+    add_turned(ms, levels, &o)
     var mitre: PieceOutline
     bishop_mitre(&mitre)
     let ink = BodyInk.of()
@@ -138,15 +158,15 @@ fn add_bishop(m: *Mesh, segments: int)
     f.add(SdfShape.turned(Vec3(0.0, 0.0, 0.0), mitre.outline(), 0, ink))
     let slant = Quat.axis_angle(Vec3(0.0, 0.0, 1.0), -40.0 * Pi / 180.0)
     f.add(SdfShape.box(Vec3(-0.03, 0.93 + BishopLift, 0.085), Vec3(0.16, 0.011, 0.115), 0.008, 0, ink, turn: slant, blend: 0.004).carving())
-    add_field(m, &f, 0.003, 30000)
+    add_field(ms, levels, &f, 0.003, 30000)
     f.free_all()
 
 const QueenPoints = 8
 
-fn add_queen(m: *Mesh, segments: int)
+fn add_queen(ms: *[PieceLevels]Mesh, levels: int)
     var o: PieceOutline
     queen_outline(&o)
-    o.add_to(m, segments)
+    add_turned(ms, levels, &o)
     var crown: PieceOutline
     queen_crown(&crown, o.points[o.count - 1].y - QueenNeck.y)
     let ink = BodyInk.of()
@@ -162,7 +182,7 @@ fn add_queen(m: *Mesh, segments: int)
         let at = Vec3(sin(a) * ring, tip, cos(a) * ring)
         let turn = Quat.axis_angle(Vec3.up(), a)
         f.add(SdfShape.outline(at, notch[0..3], 0.07, 0.012, 0, ink, turn: turn, blend: 0.008).carving())
-    add_field(m, &f, 0.0025, 40000)
+    add_field(ms, levels, &f, 0.0025, 40000)
     f.free_all()
 
 fn crown_tip(o: *PieceOutline, from: f32) -> f32
@@ -171,14 +191,14 @@ fn crown_tip(o: *PieceOutline, from: f32) -> f32
         if o.points[i].x > from: top = max(top, o.points[i].y)
     return top
 
-fn add_king(m: *Mesh, segments: int)
+fn add_king(ms: *[PieceLevels]Mesh, levels: int)
     var o: PieceOutline
     king_outline(&o)
-    o.add_to(m, segments)
+    add_turned(ms, levels, &o)
     let ink = BodyInk.of()
     var f: SdfField
     let rise = o.lift
     f.add(SdfShape.box(Vec3(0.0, 1.455 + rise, 0.0), Vec3(0.042, 0.1, 0.025), 0.012, 0, ink))
     f.add(SdfShape.box(Vec3(0.0, 1.44 + rise, 0.0), Vec3(0.115, 0.034, 0.025), 0.012, 0, ink, blend: 0.01))
-    add_field(m, &f, 0.003, 12000)
+    add_field(ms, levels, &f, 0.003, 12000)
     f.free_all()

@@ -1,5 +1,27 @@
 use engine/mesh/sweeps
 
+const PieceLevels = 3
+
+# How finely a piece is carved, from the finest a piece close to the eye needs to the coarsest a
+# piece far off needs. The turns round its axis, how far its outline may stray from the one drawn
+# and the share of its carved parts' triangles it keeps.
+struct PieceDetail
+    segments: int
+    loose: f32
+    share: f32
+
+fn piece_detail(level: int) -> PieceDetail
+    if level == 1: return PieceDetail(56, 0.0005, 0.35)
+    if level == 2: return PieceDetail(36, 0.0012, 0.15)
+    return PieceDetail(72, 0.0, 1.0)
+
+# The coarsest level whose outline and turns stray less than half a pixel where a world unit
+# spans pixels of the picture.
+fn piece_level(pixels: f32) -> int
+    if pixels > 330.0: return 0
+    if pixels > 140.0: return 1
+    return 2
+
 struct PieceOutline
     points: [512]Vec2
     count: int
@@ -72,11 +94,15 @@ struct PieceOutline
         size = 1.0
         lift = held
 
-    fn add_to(m: *Mesh, segments: int)
-        add_lathe(m, points[0..count], segments)
+    fn add_to(m: *Mesh, d: PieceDetail)
+        var kept: [512]Vec2
+        let n = thin_outline(points[0..count], d.loose, &kept)
+        add_lathe(m, kept[0..n], d.segments)
 
-    fn add_part(m: *Mesh, start: f32, stop: f32, segments: int)
-        add_lathe_part(m, points[0..count], start * Pi / 180.0, stop * Pi / 180.0, segments)
+    fn add_part(m: *Mesh, start: f32, stop: f32, d: PieceDetail)
+        var kept: [512]Vec2
+        let n = thin_outline(points[0..count], d.loose, &kept)
+        add_lathe_part(m, kept[0..n], start * Pi / 180.0, stop * Pi / 180.0, d.segments / 6)
 
     fn outline() -> []Vec2
         return points[0..count]
@@ -121,10 +147,48 @@ fn foot_shape(o: *PieceOutline, tall: f32)
     for i in mark..o.count
         o.points[i].y = base + (o.points[i].y - base) * tall
 
-fn add_pawn(m: *Mesh, segments: int)
+# The points of an outline that keep it within loose of itself, both ends and both points of every
+# corner always kept, into kept, giving how many.
+fn thin_outline(p: []Vec2, loose: f32, kept: *[512]Vec2) -> int
+    var keep: [512]bool
+    let n = p.len as int
+    for i in 0..n: keep[i] = loose <= 0.0 or i == 0 or i == n - 1 or i > 0 and (p[i] - p[i - 1]).length < 0.00001 or i < n - 1 and (p[i] - p[i + 1]).length < 0.00001
+    if loose > 0.0
+        var from = 0
+        for i in 1..n
+            if not keep[i]: continue
+            keep_far(p, from, i, loose, &keep)
+            from = i
+    var count = 0
+    for i in 0..n
+        if not keep[i]: continue
+        kept[count] = p[i]
+        count += 1
+    return count
+
+# Keeps the point between a and b farthest from the line through them while it lies further than
+# loose, then does the same on each side of it.
+fn keep_far(p: []Vec2, a: int, b: int, loose: f32, keep: *[512]bool)
+    if b - a < 2: return
+    let d = p[b] - p[a]
+    let long = d.length
+    var far: f32 = 0.0
+    var at = -1
+    for i in a + 1..b
+        let v = p[i] - p[a]
+        let off = long > 0.000001 ? abs(v.x * d.y - v.y * d.x) / long : v.length
+        if off > far
+            far = off
+            at = i
+    if far <= loose: return
+    keep[at] = true
+    keep_far(p, a, at, loose, keep)
+    keep_far(p, at, b, loose, keep)
+
+fn add_pawn(ms: *[PieceLevels]Mesh, levels: int)
     var o: PieceOutline
     pawn_outline(&o)
-    o.add_to(m, segments)
+    for level in 0..levels: o.add_to(&ms[level], piece_detail(level))
 
 fn pawn_outline(o: *PieceOutline)
     o.start()
@@ -140,15 +204,16 @@ fn pawn_outline(o: *PieceOutline)
     o.arc(Vec2(0.1, 0.509), 0.01, 270.0, 180.0, 6)
     o.arc(Vec2(0.0, 0.5227 + ball * sin(below)), ball, -below * 180.0 / Pi, 90.0, 28, true)
 
-fn add_rook(m: *Mesh, segments: int)
+fn add_rook(ms: *[PieceLevels]Mesh, levels: int)
     var o: PieceOutline
     rook_outline(&o)
-    o.add_to(m, segments)
+    for level in 0..levels: o.add_to(&ms[level], piece_detail(level))
     rook_merlon(&o)
     let gap = 16.0
-    for k in 0..6
-        let start = k as f32 * 60.0 + gap * 0.5
-        o.add_part(m, start, start + 60.0 - gap, segments / 6)
+    for level in 0..levels
+        for k in 0..6
+            let start = k as f32 * 60.0 + gap * 0.5
+            o.add_part(&ms[level], start, start + 60.0 - gap, piece_detail(level))
 
 const RookRim: f32 = 0.88
 const RookTop: f32 = 0.98

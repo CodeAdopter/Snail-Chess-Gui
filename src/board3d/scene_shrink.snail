@@ -6,7 +6,9 @@ struct SceneShrink
     pipeline: *Pipeline
     sampler: *SDL_GPUSampler
 
-    fn run(gpu: *Gpu, frame: *Frame, big: *Texture, small: *Texture)
+    # Big brought down into small, or only the part of small that the cut of big, x0 y0 x1 y1, reaches
+    # through the filter when one is given, the rest of small kept.
+    fn run(gpu: *Gpu, frame: *Frame, big: *Texture, small: *Texture, cut: Vec4 = Vec4(0.0, 0.0, 0.0, 0.0))
         if pipeline == null
             var desc: PipelineDesc
             desc.vertex = shader("engine/shaders/post.hlsl", vertex: "fullscreen_vs")
@@ -15,7 +17,15 @@ struct SceneShrink
             pipeline = gpu.pipeline(&desc)
             sampler = gpu.sampler(false, false)
         let sizes = Vec4(big.width as f32, big.height as f32, big.width as f32 / small.width as f32, big.height as f32 / small.height as f32)
-        var pass = frame.pass_to(small, Color.rgb(0.0, 0.0, 0.0), null)
+        var pass: Pass
+        if cut.z > cut.x
+            let x0 = max(floor(cut.x / sizes.z) as int - 3, 0)
+            let y0 = max(floor(cut.y / sizes.w) as int - 3, 0)
+            let x1 = min(ceil(cut.z / sizes.z) as int + 3, small.width)
+            let y1 = min(ceil(cut.w / sizes.w) as int + 3, small.height)
+            pass = frame.pass_over(small)
+            pass.scissor(x0, y0, x1 - x0, y1 - y0)
+        else: pass = frame.pass_to(small, Color.rgb(0.0, 0.0, 0.0), null)
         pass.bind(pipeline)
         pass.fragment_texture(0, big, sampler)
         pass.fragment_uniforms(0, &sizes, sizeof(Vec4))

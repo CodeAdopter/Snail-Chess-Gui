@@ -1,0 +1,107 @@
+use engine/scene/camera
+use engine/ui/text_cache
+
+const MaxSceneParts = 160
+
+const PartWhole = 0
+const PartSome = 1
+const PartNone = 2
+
+const NoRect = Vec4(1.0e9, 1.0e9, -1.0e9, -1.0e9)
+
+# The board scene's picture as parts that can change alone, such as a piece, an arrow or the
+# clock, each a key, the rect of pixels it can touch as x0 y0 x1 y1, the rect of shadow map texels
+# it casts into, and base, a key of all the rest. A frame whose base matches the one drawn last
+# draws again only where parts came, went or changed. Full when a part could not be placed on the
+# picture.
+struct SceneParts
+    keys: [MaxSceneParts]u64
+    rects: [MaxSceneParts]Vec4
+    lights: [MaxSceneParts]Vec4
+    count: int
+    base: u64
+    full: bool
+
+    fn clear(b: u64)
+        count = 0
+        base = b
+        full = false
+
+    fn add(key: u64, rect: Vec4, light: Vec4 = NoRect)
+        if count == MaxSceneParts
+            full = true
+            return
+        keys[count] = key
+        rects[count] = rect
+        lights[count] = light
+        count += 1
+
+    fn take(from: *SceneParts)
+        count = from.count
+        base = from.base
+        full = from.full
+        for i in 0..count
+            keys[i] = from.keys[i]
+            rects[i] = from.rects[i]
+            lights[i] = from.lights[i]
+
+# The pixels and the shadow map texels where was and now differ, the rects of the parts one holds
+# and the other does not, with x0 past x1 when they hold the same.
+fn changed_rects(was: *SceneParts, now: *SceneParts) -> (Vec4, Vec4)
+    var taken: [MaxSceneParts]bool
+    for j in 0..was.count: taken[j] = false
+    var r = NoRect
+    var light = NoRect
+    for i in 0..now.count
+        var found = false
+        for j in 0..was.count
+            if taken[j] or was.keys[j] != now.keys[i]: continue
+            taken[j] = true
+            found = true
+            break
+        if found: continue
+        r = rect_union(r, now.rects[i])
+        light = rect_union(light, now.lights[i])
+    for j in 0..was.count
+        if taken[j]: continue
+        r = rect_union(r, was.rects[j])
+        light = rect_union(light, was.lights[j])
+    return r, light
+
+# h with two floats hashed in by their exact bits, so a part that moves by the least amount is
+# drawn again, as even that shifts its shading
+fn hash_floats(h: u64, a: f32, b: f32) -> u64
+    return hash_word(h, (f32_bits(a) as u64) << 32 | f32_bits(b) as u64)
+
+fn hash_color(h: u64, c: Color) -> u64
+    return hash_floats(hash_floats(h, c.r, c.g), c.b, c.a)
+
+fn rect_union(a: Vec4, b: Vec4) -> Vec4
+    return Vec4(min(a.x, b.x), min(a.y, b.y), max(a.z, b.z), max(a.w, b.w))
+
+fn rects_meet(a: Vec4, b: Vec4) -> bool
+    return a.x < b.z and a.z > b.x and a.y < b.w and a.w > b.y
+
+# The pixels of a w by h picture seen by camera that a box from lo to hi covers, and when it casts,
+# the shadow it throws along sun down to floor as well. The whole picture when a corner lies behind
+# the eye.
+fn seen_rect(camera: *Camera, lo: Vec3, hi: Vec3, w: f32, h: f32, sun: Vec3, floor: f32, casts: bool) -> Vec4
+    var r = Vec4(1.0e9, 1.0e9, -1.0e9, -1.0e9)
+    let corners = casts ? 16 : 8
+    for k in 0..corners
+        var p = Vec3((k & 1) == 0 ? lo.x : hi.x, (k & 2) == 0 ? lo.y : hi.y, (k & 4) == 0 ? lo.z : hi.z)
+        if k >= 8: p = p - sun * ((p.y - floor) / sun.y)
+        let (seen, at) = camera.screen_point(p, w, h)
+        if not seen: return Vec4(0.0, 0.0, w, h)
+        r = Vec4(min(r.x, at.x), min(r.y, at.y), max(r.z, at.x), max(r.w, at.y))
+    return Vec4(r.x - 2.0, r.y - 2.0, r.z + 2.0, r.w + 2.0)
+
+# The texels of a w by h shadow map, seen through to_map from the world to its texture, that a
+# box from lo to hi covers, with room for the map's soft edge.
+fn map_rect(to_map: Mat4, lo: Vec3, hi: Vec3, w: f32, h: f32) -> Vec4
+    var r = NoRect
+    for k in 0..8
+        let p = Vec3((k & 1) == 0 ? lo.x : hi.x, (k & 2) == 0 ? lo.y : hi.y, (k & 4) == 0 ? lo.z : hi.z)
+        let at = to_map * Vec4.of(p, 1.0)
+        r = Vec4(min(r.x, at.x * w), min(r.y, at.y * h), max(r.z, at.x * w), max(r.w, at.y * h))
+    return Vec4(r.x - 6.0, r.y - 6.0, r.z + 6.0, r.w + 6.0)

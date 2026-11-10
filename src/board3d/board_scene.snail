@@ -15,6 +15,7 @@ use src/board3d/den_scene
 use src/board3d/mars_scene
 use src/board3d/scene_shrink
 use src/board3d/scene_fx
+use src/board3d/scene_parts
 use src/views/load_mark
 use src/store/data_folder
 
@@ -58,7 +59,8 @@ const StandBaseMesh = 31
 const StandBoardMesh = 32
 const FxRootMesh = 34
 const FxMidMesh = 35
-const SceneMeshes = 36
+const LodMeshes = 36
+const SceneMeshes = 48
 
 const CardsX: f32 = -6.32
 const CardsApart: f32 = 1.55
@@ -211,6 +213,19 @@ struct BoardScene
     fling_at: Vec3
     fling_ns: i64
     easing: bool
+    parts: SceneParts
+    parts_now: SceneParts
+    parts_keep: bool
+    cutting: bool
+    cut: Vec4
+    shade_cut: Vec4
+    placed_rect: [MaxMen]Vec4
+    placed_light: [MaxMen]Vec4
+    mesh_known: [SceneMeshes]bool
+    mesh_reach: [SceneMeshes]f32
+    mesh_low: [SceneMeshes]f32
+    mesh_top: [SceneMeshes]f32
+    sun_toward: Vec3
 
     fn ready_on(gpu: *Gpu)
         if ready: return
@@ -277,17 +292,23 @@ struct BoardScene
         var kept: cstr = null
         if data: kept = data.path("pieces3d.bin", &buf).ptr as cstr
         if kept: cache.open(kept, piece_cache_key(72))
+        var levels: [PieceLevels]Mesh
+        for level in 0..PieceLevels: levels[level].init(65536, 262144)
+        for kind in Pawn as int..King as int + 1
+            var read = kept != null
+            for level in 0..PieceLevels
+                levels[level].clear()
+                if read: read = cache.take(&levels[level])
+            if not read
+                for level in 0..PieceLevels: levels[level].clear()
+                add_piece(&levels, kind, PieceLevels)
+            for level in 0..PieceLevels
+                if kept: cache.keep(&levels[level], not read)
+                copy_mesh(&carved[level == 0 ? kind : LodMeshes + (level - 1) * 6 + kind - 1], &levels[level])
+        for level in 0..PieceLevels: levels[level].free_all()
         for k in 0..SceneMeshes
+            if k >= Pawn as int and k <= King as int or k >= LodMeshes: continue
             m.clear()
-            let piece = k >= Pawn as int and k <= King as int
-            let read = piece and kept != null and cache.take(&m)
-            if not read and k == Pawn as int: add_pawn(&m, 72)
-            if not read and k == Knight as int: add_knight(&m, 72)
-            if not read and k == Bishop as int: add_bishop(&m, 72)
-            if not read and k == Rook as int: add_rook(&m, 72)
-            if not read and k == Queen as int: add_queen(&m, 72)
-            if not read and k == King as int: add_king(&m, 72)
-            if piece and kept: cache.keep(&m, not read)
             if k == FieldMesh: add_board_field(&m)
             if k == FrameMesh: add_frame_of(&m, WalnutBoard)
             if k == FlatFrameMesh: add_frame_of(&m, TournamentBoard)
@@ -327,6 +348,7 @@ struct BoardScene
         for k in 0..SceneMeshes
             if carved[k].vertex_count == 0: continue
             if ns > 0 and now_ns() - began > ns: return false
+            widen_bounds(k >= LodMeshes ? (k - LodMeshes) % 6 + 1 : k, &carved[k])
             shapes[k] = gpu.upload_mesh(&carved[k])
             made[k] = true
             carved[k].free_all()
@@ -411,36 +433,74 @@ struct BoardScene
         folding = 0
         folded = true
         for k in Pawn as int..King as int + 1
+            widen_bounds(k, &paper[k])
             fold_shapes[k] = gpu.upload_mesh(&paper[k])
             folds[k] = renderer.add_mesh(&fold_shapes[k])
             paper[k].free_all()
 
+    # How far mesh k reaches from its upright axis and how low and high it goes, the most of every
+    # shape it is drawn with
+    fn widen_bounds(k: int, m: *Mesh)
+        var reach: f32 = 0.0
+        var low: f32 = 1.0e9
+        var top: f32 = -1.0e9
+        for i in 0..m.vertex_count
+            let p = m.vertices[i].position
+            reach = max(reach, sqrt(p.x * p.x + p.z * p.z))
+            low = min(low, p.y)
+            top = max(top, p.y)
+        if mesh_known[k]
+            reach = max(reach, mesh_reach[k])
+            low = min(low, mesh_low[k])
+            top = max(top, mesh_top[k])
+        mesh_known[k] = true
+        mesh_reach[k] = reach
+        mesh_low[k] = low
+        mesh_top[k] = top
+
     fn fold_meshes()
-        var m: Mesh
-        m.init(65536, 262144)
         var cache: PieceCache
         var buf: [600]u8
         var kept: cstr = null
         if data: kept = data.path("pieces3d.bin", &buf).ptr as cstr
         if kept: cache.open(kept, piece_cache_key(72))
+        var levels: [PieceLevels]Mesh
+        for level in 0..PieceLevels: levels[level].init(65536, 262144)
         for k in Pawn as int..King as int + 1
-            m.clear()
-            if not (kept != null and cache.take(&m))
-                if k == Pawn as int: add_pawn(&m, 72)
-                if k == Knight as int: add_knight(&m, 72)
-                if k == Bishop as int: add_bishop(&m, 72)
-                if k == Rook as int: add_rook(&m, 72)
-                if k == Queen as int: add_queen(&m, 72)
-                if k == King as int: add_king(&m, 72)
-            fold_paper(&m, PaperFolds[k])
-            copy_mesh(&paper[k], &m)
+            var read = kept != null
+            for level in 0..PieceLevels
+                levels[level].clear()
+                if read: read = cache.take(&levels[level])
+            if not read
+                levels[0].clear()
+                add_piece(&levels, k, 1)
+            fold_paper(&levels[0], PaperFolds[k])
+            copy_mesh(&paper[k], &levels[0])
+        for level in 0..PieceLevels: levels[level].free_all()
         if kept: cache.close(kept)
-        m.free_all()
 
     fn piece_mesh(p: *PlacedPiece) -> int
         if p.ghost: return ghosts[p.kind]
         if style.set == PaperSet and folded: return folds[p.kind]
+        if p.level > 0: return meshes[LodMeshes + (p.level - 1) * 6 + p.kind - 1]
         return meshes[p.kind]
+
+    # Each piece's level of detail, the coarsest that still looks the same at how many pixels of a
+    # picture tall a world unit spans where it stands.
+    fn pick_levels(tall: f32)
+        let reach = tall / (2.0 * tan(camera.fov_y * 0.5))
+        let ahead = camera.forward
+        let forced = arg_int("--piece-level", -1) as int
+        for i in 0..placed_count
+            let p = &placed[i]
+            let deep = max((p.at - camera.position).dot(ahead), 0.05)
+            p.level = forced >= 0 ? min(forced, PieceLevels - 1) : piece_level(reach / deep)
+
+    # Every mesh a piece may be drawn with casts as cast says.
+    fn pieces_cast(r: *Renderer, cast: u8)
+        for k in Pawn as int..King as int + 1
+            r.casts[meshes[k]] = cast
+            for level in 1..PieceLevels: r.casts[meshes[LodMeshes + (level - 1) * 6 + k - 1]] = cast
 
     fn piece_matrix(p: *PlacedPiece, flipped: bool) -> Mat4
         let wide = 1.0 + p.squash * 0.5
@@ -570,6 +630,7 @@ struct BoardScene
         backdrop.unstage()
         aside_key = 0
         kept_key = 0
+        parts.base = 0
         looks.release(gpu)
         props.release(gpu)
         renderer.release()
@@ -674,6 +735,7 @@ struct BoardScene
 
     fn light_from(a: f32)
         let sun_way = Quat.axis_angle(Vec3.up(), a) * Vec3(-0.6, 1.3, 0.9).normalized
+        sun_toward = sun_way
         renderer.lighting.sun_direction = Vec4.of(-sun_way, 0.0)
         renderer.shadows[0].position = sun_way * 14.0
         renderer.shadows[1].position = sun_way * 14.0
@@ -885,7 +947,9 @@ struct BoardScene
             draw_into(app, s, t, &target, motion ? &unscaled : &big)
             renderer.use_targets(0)
             redo = aside_missed != missed
-            if redo: kept_key = 0
+            if redo
+                kept_key = 0
+                parts.base = 0
             if not redo: whole = true
             if not easing: pick_id = -1
             if not carried: carry_id = -1
@@ -987,6 +1051,10 @@ struct BoardScene
         let drawn = big.handle ? big : into
         let aspect = drawn.width as f32 / max(drawn.height, 1) as f32
         looks.view = camera.projection(aspect) * camera.view
+        pick_levels(drawn.height as f32)
+        if plan_part(s, drawn) == PartNone
+            frame.submit()
+            return
         let keep = surrounded() and layer_key != 0 and not see_through(style.set) and style.set != GooSet and not has_arg("--no-layer-keep")
         let fresh = style.room != ParkRoom or now_ns() - kept_ns < ParkLayerNs
         let reuse = keep and kept_key == layer_key and fresh
@@ -1034,22 +1102,35 @@ struct BoardScene
         if not reuse
             props.print(&app.gpu, &app.ui, &renderer, &frame, &desk, s.fonts, s.accent, s.accent_ink, style.card)
             frame.lap("props")
+        let cut_at = cutting ? cut : Vec4(0.0, 0.0, 0.0, 0.0)
         if big.handle
             render_view(&frame, big, reuse, keep)
-            shrink.run(&app.gpu, &frame, big, into)
+            shrink.run(&app.gpu, &frame, big, into, cut_at)
             frame.lap("shrink")
         else: render_view(&frame, into, reuse, keep)
+        cutting = false
         if surrounded() and not reuse: backdrop.free_shadows(&renderer)
         frame.submit()
         app.present_now()
 
     fn render_view(frame: *Frame, into: *Texture, reuse: bool, keep: bool)
-        if reuse: renderer.again_into(frame, &camera, into)
-        elif keep and renderer.render_kept_into(frame, &camera, into)
-            kept_key = layer_key
+        if cutting
+            let shade = &renderer.shadows[0]
+            if shade_cut.x >= shade_cut.z or shade_cut.y >= shade_cut.w: shade.every_frame = false
+            else
+                shade.parting = true
+                shade.part = [shade_cut.x as int, shade_cut.y as int, (shade_cut.z - shade_cut.x) as int, (shade_cut.w - shade_cut.y) as int]
+            renderer.again_part_into(frame, &camera, into, cut.x as int, cut.y as int, (cut.z - cut.x) as int, (cut.w - cut.y) as int)
+            parts.take(&parts_now)
+        elif reuse: renderer.again_into(frame, &camera, into)
+        elif (keep or parts_keep) and renderer.render_kept_into(frame, &camera, into)
+            kept_key = keep ? layer_key : 0
             kept_ns = now_ns()
+            if parts_keep: parts.take(&parts_now)
+            else: parts.base = 0
         else
             kept_key = 0
+            parts.base = 0
             renderer.render_into(frame, &camera, into)
 
     fn draw_den(app: *DesktopApp, s: *BoardShow, into: *Texture, big: *Texture)
@@ -1097,6 +1178,114 @@ struct BoardScene
             let a = &s.arrows[i]
             h = hash_word(h, a.from as u64 | (a.to as u64) << 8 | (pack_color(a.color) as u64) << 16 | ((a.width * 1000.0) as i64 as u64) << 48)
         return h
+
+    # Whether this frame draws whole, draws again only the cut where parts changed since the last
+    # one kept, or has nothing new to draw. Only the plain room with solid pieces is drawn in parts,
+    # as the rooms blur and mirrors and glass show what lies far off.
+    fn plan_part(s: *BoardShow, drawn: *Texture) -> int
+        cutting = false
+        parts_keep = false
+        if style.room != NoRoom or see_through(style.set) or board_mirrors(style.board) or s.fx.on: return PartWhole
+        if quality.samples < 2 or renderer.set_in_use != 0 or has_arg("--no-parts"): return PartWhole
+        let w = drawn.width as f32
+        let h = drawn.height as f32
+        parts_now.clear(parts_base(s, drawn))
+        list_parts(s, w, h)
+        parts_keep = not parts_now.full
+        if not parts_keep or parts.base != parts_now.base: return PartWhole
+        let (r, light) = changed_rects(&parts, &parts_now)
+        if r.x >= r.z or r.y >= r.w: return PartNone
+        let map = quality.shadow as f32
+        shade_cut = Vec4(max(floor(light.x), 0.0), max(floor(light.y), 0.0), min(ceil(light.z), map), min(ceil(light.w), map))
+        let x0 = max(floor(r.x), 0.0)
+        let y0 = max(floor(r.y), 0.0)
+        let x1 = min(ceil(r.z), w)
+        let y1 = min(ceil(r.w), h)
+        if x0 >= x1 or y0 >= y1: return PartNone
+        if (x1 - x0) * (y1 - y0) > w * h * 0.6: return PartWhole
+        cut = Vec4(x0, y0, x1, y1)
+        cutting = true
+        return PartSome
+
+    # Everything drawn that is not a part of its own, so a frame drawn in parts looks as one drawn
+    # whole.
+    fn parts_base(s: *BoardShow, drawn: *Texture) -> u64
+        var h = hash_word(style.key(), (drawn.width | drawn.height << 16) as u64 | (quality.samples as u64) << 32 | (quality.shadow as u64) << 40)
+        h = hash_floats(hash_floats(h, camera.position.x, camera.position.y), camera.position.z, camera.fov_y)
+        h = hash_floats(hash_floats(h, camera.rotation.x, camera.rotation.y), camera.rotation.z, camera.rotation.w)
+        h = hash_color(hash_color(hash_color(h, s.page), s.accent), s.accent_ink)
+        h = hash_word(h, ((s.flat_arrows ? 1 : 0) as u64) | ((clock_stands ? 1 : 0) as u64) << 1 | ((s.free ? 1 : 0) as u64) << 2)
+        return hash_word(h, s.fonts as u64)
+
+    # Each piece, mark, arrow, card and the clock, with the pixels it and its shadow can touch.
+    fn list_parts(s: *BoardShow, w: f32, h: f32)
+        let sun = sun_toward
+        let floor = -depth() - 0.02
+        let none = Vec3(0.0, 1.0, 0.0)
+        let to_map = renderer.shadows[0].texture_matrix()
+        let map = quality.shadow as f32
+        for i in 0..placed_count
+            let p = &placed[i]
+            let k = p.kind
+            let grow = 1.0 + abs(p.squash)
+            let reach = max(mesh_reach[k], mesh_reach[FeltMesh] * foot_scale(k)) * grow + p.lean.length * mesh_top[k] + 0.05
+            let lo = p.at + Vec3(-reach, mesh_low[k] - FeltThick - 0.02, -reach)
+            let hi = p.at + Vec3(reach, mesh_top[k] * grow + 0.02, reach)
+            var r = seen_rect(&camera, lo, hi, w, h, sun, floor, true)
+            placed_light[i] = map_rect(to_map, lo, hi, map, map)
+            let foot = foot_width(k as Kind) * 3.4
+            r = rect_union(r, seen_rect(&camera, Vec3(p.at.x - foot, -0.02, p.at.z - foot), Vec3(p.at.x + foot, 0.02, p.at.z + foot), w, h, none, 0.0, false))
+            placed_rect[i] = r
+            var key = hash_word(0x91ECE, p.kind as u64 | ((p.fx + 1) as u64) << 8 | ((p.ghost ? 1 : 0) as u64) << 20 | (p.level as u64) << 24)
+            key = hash_floats(hash_floats(key, p.at.x, p.at.y), p.at.z, p.angle)
+            key = hash_floats(hash_floats(hash_color(key, p.tint), p.squash, p.lean.x), p.lean.y, 0.0)
+            parts_now.add(key, r, placed_light[i])
+        for sq in 0..64
+            let at = sq as Square
+            let bit = (1 as u64) << (sq as u64)
+            var marks: u64 = 0
+            if s.last != NoMove and (at == s.last.from or at == s.last.to): marks |= 1
+            if at == s.check: marks |= 2
+            if at == s.selected: marks |= 4
+            if at == s.hover: marks |= 8
+            if s.targets & bit != 0: marks |= 16
+            if s.captures & bit != 0: marks |= 32
+            if marks == 0: continue
+            let c = square_centre(at)
+            let tint = marks & 60 != 0 ? hash_color(0, s.target) : 0
+            parts_now.add(hash_word(sq as u64 | marks << 8, tint), seen_rect(&camera, c - Vec3(0.56, 0.02, 0.56), c + Vec3(0.56, 0.05, 0.56), w, h, none, 0.0, false))
+        for i in 0..s.arrow_count
+            let a = &s.arrows[i]
+            let from = square_centre(a.from)
+            let to = square_centre(a.to)
+            let taken = s.board.squares[a.to]
+            var key = hash_word(a.from as u64 | (a.to as u64) << 8 | (taken as u64) << 16, (s.flat_arrows ? 1 : 0) as u64)
+            key = hash_floats(hash_color(key, a.color), a.width, 0.0)
+            let lo = Vec3(min(from.x, to.x), -0.02, min(from.z, to.z))
+            let hi = Vec3(max(from.x, to.x), 0.05, max(from.z, to.z))
+            if a.from == a.to or s.flat_arrows
+                let spread = max(a.width * 1.5, 0.5) + 0.06
+                parts_now.add(key, seen_rect(&camera, lo - Vec3(spread, 0.0, spread), hi + Vec3(spread, 0.0, spread), w, h, none, 0.0, false))
+                continue
+            let thick = a.width * 0.36
+            let spread = max(thick * 3.0, 0.34) + 0.06
+            let rise = thick * 4.0 + 0.6 + (to - from).length * 0.3 + 0.06
+            let low = lo - Vec3(spread, 0.0, spread)
+            let high = Vec3(hi.x + spread, rise, hi.z + spread)
+            parts_now.add(key, seen_rect(&camera, low, high, w, h, sun, floor, true), map_rect(to_map, low, high, map, map))
+        let x = clock_way()
+        if clock_stands
+            let at = Vec3(ClockX * x, -depth(), 0.0)
+            let lo = at - Vec3(ClockDeep * 0.5 + 0.1, 0.02, ClockLong * 0.5 + 0.1)
+            let hi = at + Vec3(ClockDeep * 0.5 + 0.1, ClockTall + ButtonUp + ButtonTall + 0.1, ClockLong * 0.5 + 0.1)
+            parts_now.add(desk.clock.key(), seen_rect(&camera, lo, hi, w, h, none, 0.0, false))
+            parts_now.add(hash_floats(0xC10C, rocker, 0.0), seen_rect(&camera, lo, hi, w, h, sun, floor, true), map_rect(to_map, lo, hi, map, map))
+        for k in 0..2
+            if not desk.cards[k].shown: continue
+            let spot = Vec3(CardsX * x, -depth(), k == 0 ? CardsApart : -CardsApart)
+            let lo = spot - Vec3(1.5, 0.02, 0.8)
+            let hi = spot + Vec3(1.5, 1.6, 0.8)
+            parts_now.add(hash_word(desk.cards[k].key(), k as u64), seen_rect(&camera, lo, hi, w, h, sun, floor, true), map_rect(to_map, lo, hi, map, map))
 
     fn place_pieces(s: *BoardShow, t: f32)
         looks.field.clear()
@@ -1216,18 +1405,18 @@ struct BoardScene
         let now = ((now_ns() % 3600000000000) as f64 / 1.0e9) as f32
         if style.room == CozyRoom
             room.draw(r, &camera, looked_at, now, seen_height, quality.shadow, BoardDepth - depth(), near, aside ? backdrop.unseen : -1)
-            for k in Pawn as int..King as int + 1: r.casts[meshes[k]] = 1
+            pieces_cast(r, 1)
         elif style.room == ParkRoom
             park.draw(r, &camera, looked_at, now, seen_height, quality.shadow, BoardDepth - depth(), near, aside ? backdrop.unseen : -1)
-            for k in Pawn as int..King as int + 1: r.casts[meshes[k]] = 1
+            pieces_cast(r, 1)
         elif style.room == MarsRoom
             mars.draw(r, &camera, looked_at, now, seen_height, quality.shadow, BoardDepth - depth(), near, aside ? backdrop.unseen : -1)
-            for k in Pawn as int..King as int + 1: r.casts[meshes[k]] = 1
+            pieces_cast(r, 1)
         else
             sun_setup()
             r.draw_with(table, meshes[TableMesh], Mat4.translation(Vec3(0.0, -depth(), 0.0)), Color.hex(0x2A2623))
             r.shadows[1].on = glass and r.shadows[0].on
-            for k in Pawn as int..King as int + 1: r.casts[meshes[k]] = glass ? 2 : 1
+            pieces_cast(r, glass ? 2 : 1)
         if folded
             for k in Pawn as int..King as int + 1: r.casts[folds[k]] = r.casts[meshes[k]]
         if aside: return
@@ -1235,6 +1424,7 @@ struct BoardScene
         if layered: r.behind_layers = glass_layers() as u8
         for i in 0..placed_count
             let p = &placed[i]
+            if cutting and not rects_meet(placed_rect[i], cut) and not rects_meet(placed_light[i], shade_cut): continue
             r.draw_layered(pieces, piece_mesh(p), piece_matrix(p, false), p.tint, layered ? glass_layer[i] : 0)
         if style.set == GooSet: draw_drops(r)
         let (felt, felt_twin) = looks.felt(r)
@@ -1366,6 +1556,7 @@ struct BoardScene
         let tint = Color.hex(FeltColors[style.felt as int])
         for i in 0..placed_count
             let p = &placed[i]
+            if cutting and not rects_meet(placed_rect[i], cut) and not rects_meet(placed_light[i], shade_cut): continue
             let wide = foot_scale(p.kind)
             let y = p.at.y - FeltThick
             renderer.draw_with(material, meshes[FeltMesh], Mat4.trs(Vec3(p.at.x, flipped ? -y : y, p.at.z), Quat.axis_angle(Vec3.up(), p.angle), Vec3(wide, flipped ? -1.0 : 1.0, wide)), tint)
@@ -1493,6 +1684,7 @@ struct PlacedPiece
     ghost: bool
     lean: Vec2
     squash: f32
+    level: int
 
 fn frame_mesh(b: BoardStyle) -> int
     if b == WalnutBoard or b == BurlBoard: return FrameMesh
