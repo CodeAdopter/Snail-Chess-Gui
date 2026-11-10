@@ -258,8 +258,15 @@ struct GuiApp
         if crash_test > 0: crash_on_purpose(crash_test)
         start_stress()
         app.live_frames(gui_live_step, self)
+        let bench_from = arg_int("--bench-from-ms", 0) as i64 * 1000000
+        var bench_at: i64 = 0
+        var bench_presented = 0
         while app.next()
             step()
+            if bench_from > 0 and bench_at == 0 and now_ns() - app.stats.started_ns >= bench_from
+                bench_at = now_ns()
+                bench_presented = app.stats.presented
+        if bench_at > 0: print("bench seconds {(now_ns() - bench_at) as f64 / 1.0e9:.2} presented {app.stats.presented - bench_presented}")
         stress_report()
         keep_window()
         settings.save()
