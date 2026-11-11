@@ -393,7 +393,9 @@ struct GuiApp
         look.page_values = look.sheet_values
 
     fn step()
-        tour_step()
+        if tour_step()
+            app.skip()
+            return
         if app.holding()
             if lichess.tick(now_ns()): app.redraw()
             run_engines(tabs.current())

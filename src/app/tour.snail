@@ -32,6 +32,8 @@ struct TourRun
     still: bool
     began_ns: i64
     quiet_ns: i64
+    quiet_mcycles: f64
+    busy: f64
     due_ns: i64
     frames: int
     settled: bool
@@ -80,10 +82,11 @@ extend GuiApp
             tour.stops.push(s)
         if tour.stops.len == 0
             print("tour has no stops in {path}")
-            app.running = false
+            app.quit()
             return
         tour.on = true
         tour.laps = max(arg_int("--tour-laps", 1), 1)
+        tour.busy = arg_number("--tour-busy", 100.0)
         tour.lap = 1
         tour.started_ns = now_ns()
         tour_plan()
@@ -120,7 +123,7 @@ extend GuiApp
     fn tour_begin()
         tour_clear()
         tour.began_ns = now_ns()
-        tour.quiet_ns = tour.began_ns
+        tour_quiet(tour.began_ns)
         tour.due_ns = 0
         tour.frames = 0
         tour.settled = false
@@ -150,47 +153,56 @@ extend GuiApp
             print("tour lap {tour.lap} settled {tour.settled} private_mb {private_mb():.1} working_mb {working_set_mb():.1}")
             tour.lap += 1
             if tour.lap > tour.laps + 1
-                print("tour done stops {tour.walked} seconds {(now_ns() - tour.started_ns) as f64 / 1.0e9:.1}")
+                print("tour done stops {tour.walked} seconds {(now_ns() - tour.started_ns) as f64 / 1.0e9:.1} shown_ms {app.stats.shown_ms:.0} peak_mb {peak_working_set_mb():.1}")
                 tour.on = false
-                app.running = false
+                app.quit()
                 return
             tour_plan()
             if tour.order.len > 0: break
         tour_begin()
 
-    fn tour_step()
-        if not tour.on: return
+    fn tour_quiet(now: i64)
+        tour.quiet_ns = now
+        tour.quiet_mcycles = process_cpu_mcycles()
+
+    fn tour_busy(now: i64) -> bool
+        let seconds = (now - tour.quiet_ns) as f64 / 1.0e9
+        return seconds > 0.0 and (process_cpu_mcycles() - tour.quiet_mcycles) / seconds > tour.busy
+
+    fn tour_step() -> bool
+        if not tour.on: return false
         let now = now_ns()
         let own = app.self_woken and tour.due_ns > 0 and now >= tour.due_ns - 1000000
-        if not own: tour.quiet_ns = now
+        if not own: tour_quiet(now)
         match tour.phase
             TourChurning
                 tour.frames += 1
                 if tour.frames >= TourChurnFrames
                     tour_next()
-                    return
+                    return false
                 tour.due_ns = now
                 app.wake_in(0.0)
+                return false
             TourSettling
                 let fixed = not tour.lap_end and tour_stop().live
+                if own and not fixed and tour_busy(now): tour_quiet(now)
                 let most = tour.lap_end ? TourLapSettleNs : max(tour_stop().settle_ms, 1) as i64 * 1000000
                 let settle_end = fixed ? tour.began_ns + most : tour.quiet_ns + TourQuietNs
                 if now >= settle_end or now - tour.began_ns >= most
                     tour.settled = fixed or now >= settle_end
                     tour.settle_ns = now - tour.began_ns
-                    if tour.lap_end
-                        tour_next()
-                        return
-                    tour_rest(now)
-                    return
+                    if tour.lap_end: tour_next()
+                    else: tour_rest(now)
+                    return own
                 tour.due_ns = settle_end
                 app.wake_in((settle_end - now) as f64 / 1.0e9)
             TourResting
                 if now < tour.due_ns
                     app.wake_in((tour.due_ns - now) as f64 / 1.0e9)
-                    return
+                    return own
                 tour_measure(now)
                 tour_next()
+        return own
 
     fn tour_rest(now: i64)
         let st = &app.stats
@@ -210,4 +222,4 @@ extend GuiApp
         let seconds = (now - tour.began_ns) as f64 / 1.0e9
         let built = st.built - tour.built - 1
         let self_built = st.self_built - tour.self_built - (app.self_woken ? 1 : 0)
-        print("tour stop lap {tour.lap} settled {tour.settled} settle_ms {tour.settle_ns / 1000000} seconds {seconds:.2} built {built} self_built {self_built} presented {st.presented - tour.presented} events {st.events - tour.events} cpu_mcycles {process_cpu_mcycles() - tour.mcycles:.1} private_mb {private_mb():.1} working_mb {working_set_mb():.1} name {s.name}")
+        print("tour stop lap {tour.lap} settled {tour.settled} settle_ms {tour.settle_ns / 1000000} seconds {seconds:.2} built {built} self_built {self_built} presented {st.presented - tour.presented} events {st.events - tour.events} cpu_mcycles {process_cpu_mcycles() - tour.mcycles:.1} private_mb {private_mb():.1} working_mb {working_set_mb():.1} aside {app.gpu.aside_waiting()} name {s.name}")
