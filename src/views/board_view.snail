@@ -269,6 +269,7 @@ struct BoardView
     fn take_notes(app: *DesktopApp, mouse: Vec2, hovered: bool)
         let input = &app.pointer.mouse
         let under = square_at(mouse)
+        if hovered and input.pressed(MouseLeft) and under != Square.none: notes.clear()
         if hovered and input.pressed(MouseRight): note_from = under
         if note_from == Square.none or not input.released(MouseRight): return
         let from = note_from

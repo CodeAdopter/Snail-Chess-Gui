@@ -391,7 +391,7 @@ struct SettingsPage
                     s.match_board_arrows()
                     changed = true
         with kit.card(2, "Your arrows")
-            if kit.switch(40, "Show your arrows", "Drag with the right mouse button to draw arrows. Arrows clear when the position changes.", ref s.note_arrows.on): changed = true
+            if kit.switch(40, "Show your arrows", "Drag with the right mouse button to draw arrows. Left-click the board or change the position to clear them.", ref s.note_arrows.on): changed = true
             with kit.block(41, "Colour", "")
                 with ui.open(UiNode(name: "notecolours", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
                     for i in 0..ArrowColorNames.len
