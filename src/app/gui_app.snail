@@ -976,7 +976,7 @@ struct GuiApp
         for k in 0..SoundCount
             sounds.levels[k] = s.sound_levels[k]
             sounds.muted[k] = s.sound_muted[k]
-        sounds.ready(s.sounds)
+        sounds.ready(s.sounds and not app.hidden)
         if s.vsync != vsync_on and app.set_vsync(s.vsync): vsync_on = s.vsync
         scene.set_quality(&app.gpu, SceneQuality(samples: min(s.msaa, scene.most_samples(&app.gpu)), scale: s.render_scale, shadow: s.shadow_size, aniso: s.anisotropy as f32, fps: s.fps_limit))
         board_frame_gap = s.fps_limit > 0 ? 1.0 / s.fps_limit as f32 : 0.0
@@ -1025,7 +1025,7 @@ struct GuiApp
         let by_hand = stepped and free.made == g.nodes[at].board.key
         free.landed = 0
         if stepped: free.made = 0
-        if not settings.sounds: return
+        if not settings.sounds or app.hidden: return
         if landed: sounds.play(SoundMove)
         if stepped and not by_hand
             let n = &g.nodes[at]
@@ -1039,7 +1039,7 @@ struct GuiApp
 
     fn clock_sounds(tab: *GuiTab)
         let play = tab.play
-        let running = settings.sounds and (settings.three_d or has_arg("--board3d")) and settings.desk_clock and tab.kind == Play and play != null and play.state == PlayRunning and play.clock.running
+        let running = settings.sounds and not app.hidden and (settings.three_d or has_arg("--board3d")) and settings.desk_clock and tab.kind == Play and play != null and play.state == PlayRunning and play.clock.running
         sounds.tick(running)
         if running and tab.id == clock_tab and play.clock.side != clock_side
             if play.clock.side == play.human: sounds.play_late_press()
@@ -1070,7 +1070,7 @@ struct GuiApp
         if not s.window_known: return
         var r = SDL_Rect(x: s.window_x, y: s.window_y, w: max(s.window_w, 640), h: max(s.window_h, 480))
         if SDL_GetDisplayForRect(&r) != 0 and has_arg("--width") == false: SDL_SetWindowPosition(app.window.handle, s.window_x, s.window_y)
-        if s.maximized: SDL_MaximizeWindow(app.window.handle)
+        if s.maximized and not app.hidden: SDL_MaximizeWindow(app.window.handle)
 
     fn keep_window()
         let s = &settings
