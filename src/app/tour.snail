@@ -1,0 +1,213 @@
+use src/app/gui_app
+
+const TourQuietNs: i64 = 250000000
+const TourLapSettleNs: i64 = 4000000000
+const TourChurnFrames = 6
+
+enum TourPhase: u8
+    TourSettling
+    TourResting
+    TourChurning
+
+struct TourStop
+    name: str
+    x: f32
+    y: f32
+    settle_ms: int
+    rest_ms: int
+    live: bool
+    once: bool
+    words: [..]str
+
+struct TourRun
+    on: bool
+    file: []u8
+    stops: [..]TourStop
+    laps: int
+    lap: int
+    order: [..]int
+    at: int
+    phase: TourPhase
+    lap_end: bool
+    still: bool
+    began_ns: i64
+    quiet_ns: i64
+    due_ns: i64
+    frames: int
+    settled: bool
+    settle_ns: i64
+    built: int
+    self_built: int
+    presented: int
+    events: int
+    mcycles: f64
+    walked: int
+    started_ns: i64
+
+var tour: TourRun
+
+fn tour_fields(line: str, into: *[..]str)
+    into.clear()
+    var from = 0
+    for i in 0..line.len + 1
+        if i < line.len and line[i] != '\t': continue
+        into.push(line[from..i])
+        from = i as int + 1
+
+extend GuiApp
+    fn start_tour()
+        let path = arg_word("--tour")
+        if path.len == 0: return
+        tour.file = read_file(path.ptr as cstr)
+        let text = str(tour.file)
+        var fields: [..]str
+        defer fields.free()
+        var from = 0
+        for i in 0..text.len
+            if text[i] != '\n': continue
+            var line = text[from..i]
+            from = i as int + 1
+            if line.len > 0 and line[line.len - 1] == '\r': line = line[0..line.len - 1]
+            tour_fields(line, &fields)
+            if fields.len < 6: continue
+            var s = TourStop(name: fields[1], live: fields[0] != "rest", once: fields[0] == "once")
+            s.x = parse_float(fields[2]) as f32
+            s.y = parse_float(fields[3]) as f32
+            s.settle_ms = parse_int(fields[4]) as int
+            s.rest_ms = parse_int(fields[5]) as int
+            for k in 6..fields.len
+                if fields[k].len > 0: s.words.push(fields[k])
+            tour.stops.push(s)
+        if tour.stops.len == 0
+            print("tour has no stops in {path}")
+            app.running = false
+            return
+        tour.on = true
+        tour.laps = max(arg_int("--tour-laps", 1), 1)
+        tour.lap = 1
+        tour.started_ns = now_ns()
+        tour_plan()
+        tour_begin()
+
+    fn tour_plan()
+        tour.order.clear()
+        tour.at = 0
+        tour.lap_end = false
+        let last = tour.lap > tour.laps
+        for i in 0..tour.stops.len
+            if tour.stops[i].once == last: tour.order.push(i as int)
+
+    fn tour_stop() -> *TourStop
+        return &tour.stops[tour.order[tour.at]]
+
+    fn tour_clear()
+        for t in tabs.tabs
+            if t.play and t.play.state == PlayRunning: t.play.abandon()
+            if t.event and t.event.state == EventRunning: t.event.pause()
+        let n = tabs.tabs.len as int
+        for k in 0..n
+            close_tab(tabs.tabs.len as int - 1)
+        log_view.shown = false
+        registry_popup.shown = false
+        install_popup.cancel(&library)
+        books_page.fetching.shown = false
+        books_page.importing.close()
+        books_page.generating.shown = false
+        app.ui.memory(strip.menu_id).open = false
+        if settings.start_with != StartNewTab: open_new(Analysis)
+        more_args.clear()
+
+    fn tour_begin()
+        tour_clear()
+        tour.began_ns = now_ns()
+        tour.quiet_ns = tour.began_ns
+        tour.due_ns = 0
+        tour.frames = 0
+        tour.settled = false
+        if tour.lap_end or tour.at >= tour.order.len
+            tour.lap_end = true
+            app.held_pointer = Vec2(-1.0, -1.0)
+            tour.phase = TourSettling
+        else
+            let s = tour_stop()
+            for w in s.words
+                more_args.push(w)
+            set_up_asked()
+            let still = has_arg("--still")
+            if still or tour.still: apply_settings()
+            tour.still = still
+            app.held_pointer = Vec2(s.x, s.y)
+            tour.phase = tour.lap > 1 and not s.once ? TourChurning : TourSettling
+        app.redraw()
+
+    fn tour_next()
+        if not tour.lap_end
+            tour.walked += 1
+            tour.at += 1
+            tour_begin()
+            return
+        loop
+            print("tour lap {tour.lap} settled {tour.settled} private_mb {private_mb():.1} working_mb {working_set_mb():.1}")
+            tour.lap += 1
+            if tour.lap > tour.laps + 1
+                print("tour done stops {tour.walked} seconds {(now_ns() - tour.started_ns) as f64 / 1.0e9:.1}")
+                tour.on = false
+                app.running = false
+                return
+            tour_plan()
+            if tour.order.len > 0: break
+        tour_begin()
+
+    fn tour_step()
+        if not tour.on: return
+        let now = now_ns()
+        let own = app.self_woken and tour.due_ns > 0 and now >= tour.due_ns - 1000000
+        if not own: tour.quiet_ns = now
+        match tour.phase
+            TourChurning
+                tour.frames += 1
+                if tour.frames >= TourChurnFrames
+                    tour_next()
+                    return
+                tour.due_ns = now
+                app.wake_in(0.0)
+            TourSettling
+                let fixed = not tour.lap_end and tour_stop().live
+                let most = tour.lap_end ? TourLapSettleNs : max(tour_stop().settle_ms, 1) as i64 * 1000000
+                let settle_end = fixed ? tour.began_ns + most : tour.quiet_ns + TourQuietNs
+                if now >= settle_end or now - tour.began_ns >= most
+                    tour.settled = fixed or now >= settle_end
+                    tour.settle_ns = now - tour.began_ns
+                    if tour.lap_end
+                        tour_next()
+                        return
+                    tour_rest(now)
+                    return
+                tour.due_ns = settle_end
+                app.wake_in((settle_end - now) as f64 / 1.0e9)
+            TourResting
+                if now < tour.due_ns
+                    app.wake_in((tour.due_ns - now) as f64 / 1.0e9)
+                    return
+                tour_measure(now)
+                tour_next()
+
+    fn tour_rest(now: i64)
+        let st = &app.stats
+        tour.phase = TourResting
+        tour.began_ns = now
+        tour.built = st.built
+        tour.self_built = st.self_built
+        tour.presented = st.presented
+        tour.events = st.events
+        tour.mcycles = process_cpu_mcycles()
+        tour.due_ns = now + max(tour_stop().rest_ms, 1) as i64 * 1000000
+        app.wake_in((tour.due_ns - now) as f64 / 1.0e9)
+
+    fn tour_measure(now: i64)
+        let st = &app.stats
+        let s = tour_stop()
+        let seconds = (now - tour.began_ns) as f64 / 1.0e9
+        let built = st.built - tour.built - 1
+        let self_built = st.self_built - tour.self_built - (app.self_woken ? 1 : 0)
+        print("tour stop lap {tour.lap} settled {tour.settled} settle_ms {tour.settle_ns / 1000000} seconds {seconds:.2} built {built} self_built {self_built} presented {st.presented - tour.presented} events {st.events - tour.events} cpu_mcycles {process_cpu_mcycles() - tour.mcycles:.1} private_mb {private_mb():.1} working_mb {working_set_mb():.1} name {s.name}")

@@ -1,5 +1,6 @@
 use src/app/session
 use src/app/stress
+use src/app/tour
 use src/app/fast_glue
 
 fn main()

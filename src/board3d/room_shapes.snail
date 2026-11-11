@@ -1,5 +1,3 @@
-use engine/mesh/sweeps
-use engine/math/random
 use src/board3d/board_shapes
 use src/board3d/scene_lens
 

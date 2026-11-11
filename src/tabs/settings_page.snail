@@ -590,6 +590,7 @@ struct SettingsPage
         if k == StillScene: styled.room = i as RoomStyle
         if k == StillClock: styled.clock = i as ClockStyle
         if k == StillCard: styled.plate = i as PlateStyle
+        if k != StillScene and styled.room == DenRoom: styled.room = NoRoom
         let desk = k == StillScene or k == StillClock or k == StillCard
         let close = k == StillPieces or k == StillQuality
         var b: Board

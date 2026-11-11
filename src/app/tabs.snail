@@ -1,4 +1,3 @@
-use engine/desktop/crash_report
 use src/tabs/board_editor
 use src/tabs/play_setup
 use src/tabs/event_tab

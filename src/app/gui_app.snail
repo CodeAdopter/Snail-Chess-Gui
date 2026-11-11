@@ -1,5 +1,4 @@
 use engine/desktop/window_icon
-use engine/desktop/crash_report
 use src/views/snail_logo
 use src/app/event_space
 use src/app/lichess_space
@@ -89,47 +88,9 @@ struct GuiApp
     logo: SnailLogo
     icon_key: int = -1
 
-    fn run()
-        let folder_made = data.open()
-        var crashes: [600]u8
-        var named: [64]u8
-        start_crash_reports(data.path("crashes", &crashes), format(&named, "Snail Chess GUI {version()}"))
-        let settings_read = settings.load(&data)
-        let known = settings.window_known
-        app.open("Snail Chess", known ? max(settings.window_w, 640) : 1440, known ? max(settings.window_h, 480) : 900)
-        place_window()
-        crash_note("gpu", app.gpu.device_name())
-        fonts = load_fonts(&app.ui)
-        effects.renderer = &app.ui_gpu
-        surfaces.renderer = &app.ui_gpu
-        settings_page.scene = &scene
-        scene.data = &data
-        settings_page.library = &library
-        settings_page.lichess = &lichess
-        settings_page.sounds = &sounds
-        app.hold_presents(app.refresh_ns() as f64 / 1.0e9)
-        effect_tick_ns = app.refresh_ns()
-        apply_settings()
+    fn set_up_asked()
         effects.forced = has_arg("--effects")
         effects.clock.length_scale = clamp(arg_number("--effect-length", 1.0) as f32, 0.01, 10.0)
-        if settings.zoom != 1.0: app.set_zoom(settings.zoom)
-        let w = &workspace
-        if settings.column > 0.0
-            w.column.pos = settings.column
-            w.analysis.pos = settings.analysis
-            w.graph.pos = settings.graph
-            w.ready = true
-        if settings.evals > 0.0: w.evals_most = settings.evals
-        w.shift = settings.shift
-        if not folder_made: app.ui.toast("Could not create the data folder. Changes will not be saved.")
-        if not settings_read: app.ui.toast("Could not read settings.json. The original file was saved as settings.bad.json.")
-        open_data()
-        start_fastchess()
-        let analysis_asked = has_arg("--analyse") or has_arg("--flip") or has_arg("--edit") or has_arg("--log") or has_arg("--log-all") or arg_word("--paste").len > 0 or arg_word("--select").len > 0 or arg_int("--engine", 0) > 0
-        let restored = settings.start_with == StartSession and not analysis_asked and restore_session()
-        if not restored
-            tabs.open(NewTab)
-            if settings.start_with != StartNewTab or analysis_asked: open_new(Analysis)
         let first = tabs.current()
         if has_arg("--analyse"): first.analysis.on = true
         if has_arg("--flip"): first.flipped = true
@@ -250,6 +211,47 @@ struct GuiApp
                 books_page.fetching.download()
                 books_page.importing.auto = true
         menu_asked = has_arg("--menu")
+
+    fn run()
+        let folder_made = data.open()
+        var crashes: [600]u8
+        var named: [64]u8
+        start_crash_reports(data.path("crashes", &crashes), format(&named, "Snail Chess GUI {version()}"))
+        let settings_read = settings.load(&data)
+        let known = settings.window_known
+        app.open("Snail Chess", known ? max(settings.window_w, 640) : 1440, known ? max(settings.window_h, 480) : 900)
+        place_window()
+        crash_note("gpu", app.gpu.device_name())
+        fonts = load_fonts(&app.ui)
+        effects.renderer = &app.ui_gpu
+        surfaces.renderer = &app.ui_gpu
+        settings_page.scene = &scene
+        scene.data = &data
+        settings_page.library = &library
+        settings_page.lichess = &lichess
+        settings_page.sounds = &sounds
+        app.hold_presents(app.refresh_ns() as f64 / 1.0e9)
+        effect_tick_ns = app.refresh_ns()
+        apply_settings()
+        if settings.zoom != 1.0: app.set_zoom(settings.zoom)
+        let w = &workspace
+        if settings.column > 0.0
+            w.column.pos = settings.column
+            w.analysis.pos = settings.analysis
+            w.graph.pos = settings.graph
+            w.ready = true
+        if settings.evals > 0.0: w.evals_most = settings.evals
+        w.shift = settings.shift
+        if not folder_made: app.ui.toast("Could not create the data folder. Changes will not be saved.")
+        if not settings_read: app.ui.toast("Could not read settings.json. The original file was saved as settings.bad.json.")
+        open_data()
+        start_fastchess()
+        let analysis_asked = has_arg("--analyse") or has_arg("--flip") or has_arg("--edit") or has_arg("--log") or has_arg("--log-all") or arg_word("--paste").len > 0 or arg_word("--select").len > 0 or arg_int("--engine", 0) > 0
+        let restored = settings.start_with == StartSession and not analysis_asked and restore_session()
+        if not restored
+            tabs.open(NewTab)
+            if settings.start_with != StartNewTab or analysis_asked: open_new(Analysis)
+        set_up_asked()
         let crash_test = arg_int("--crash-test", 0)
         if crash_test == 4: panic("--crash-test 4")
         if crash_test == 5
@@ -257,6 +259,7 @@ struct GuiApp
                 sleep_ms(100)
         if crash_test > 0: crash_on_purpose(crash_test)
         start_stress()
+        start_tour()
         app.live_frames(gui_live_step, self)
         let bench_from = arg_int("--bench-from-ms", 0) as i64 * 1000000
         var bench_at: i64 = 0
@@ -390,6 +393,7 @@ struct GuiApp
         look.page_values = look.sheet_values
 
     fn step()
+        tour_step()
         if app.holding()
             if lichess.tick(now_ns()): app.redraw()
             run_engines(tabs.current())

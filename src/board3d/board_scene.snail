@@ -1,11 +1,9 @@
-use engine/desktop/crash_report
 use engine/desktop/desktop_look
 use engine/render/renderer_views
 use src/views/piece_slide
 use src/views/board_palette
 use src/views/arrow_bend
 use src/board3d/piece_carving
-use src/board3d/board_shapes
 use src/board3d/free_board
 use src/board3d/scene_looks
 use src/board3d/piece_cache

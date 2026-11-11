@@ -1,6 +1,4 @@
-use engine/render/renderer
 use src/board3d/room_shapes
-use src/board3d/scene_lens
 
 struct RoomLook
     materials: [RoomParts]int

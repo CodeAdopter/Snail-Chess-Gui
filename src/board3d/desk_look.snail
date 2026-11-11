@@ -154,6 +154,7 @@ struct DeskLook
         if not printing
             printing = true
             canvas.init()
+            canvas.glyphs.budget_ns = 1000000000
             canvas.share_fonts(outer)
             printer.init(gpu, &canvas, CaptureFormat)
             faces = gpu.mipped_target(CardPx as int, CardPx as int, CaptureFormat)
