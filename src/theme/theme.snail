@@ -2,12 +2,26 @@ use engine/ui/ui_canvas
 
 enum ThemeName: u8
     Porcelain
-    AfterHours
+    Pink
+    Lavender
     Charcoal
+    Oled
+    Reef
+    AfterHours
+    Lime
+    Vermilion
+    Mocha
     Paper
+    CustomTheme
 
-const BasicThemes = 3
-const ThemeCount = 4
+const BasicThemes = 10
+const PresetThemes = 11
+const ThemeCount = 12
+const ThemeWords = ["porcelain", "pink", "lavender", "charcoal", "oled", "reef", "after-hours", "lime", "vermilion", "mocha", "paper", "custom"]
+const ThemeLabels = ["Porcelain", "Pink", "Lavender", "Charcoal", "OLED black", "Reef blue", "After hours", "Lime", "Vermilion", "Mocha", "Paper", "Custom"]
+const OwnAccentLabels = ["Deep teal", "Raspberry", "Violet", "Deep teal", "Deep teal", "Turquoise", "Deep teal", "Lime", "Vermilion", "Caramel", "Ink red", "Deep teal"]
+const DefaultCustomTheme: u32 = 0x1E2A38
+const DefaultCustomAccent: u32 = 0xE8A54B
 
 enum AccentName: u8
     DeepTeal
@@ -18,17 +32,31 @@ enum AccentName: u8
     Graphite
     Saffron
     Rosewood
+    Indigo
+    Lagoon
+    Coral
+    Orchid
+    CustomAccent
 
-const AccentLabels = ["Deep teal", "Harbour blue", "Mulberry", "Warm copper", "Snail green", "Graphite", "Saffron", "Rosewood"]
+const PresetAccents = 12
+const AccentLabels = ["Deep teal", "Harbour blue", "Mulberry", "Warm copper", "Snail green", "Graphite", "Saffron", "Rosewood", "Indigo", "Lagoon", "Coral", "Orchid", "Custom"]
 
 const PageCurve: f32 = 14.0
 
 fn theme_label(name: ThemeName) -> str
-    match name
-        AfterHours: return "After hours"
-        Charcoal: return "Charcoal"
-        Paper: return "Paper"
-    return "Porcelain"
+    return ThemeLabels[name as int]
+
+fn theme_named(word: str) -> ThemeName
+    if word == "ink": return Paper
+    for i in 0..ThemeWords.len
+        if ThemeWords[i] == word: return i as ThemeName
+    return Charcoal
+
+fn accent_label(name: ThemeName, a: AccentName) -> str
+    return a == DeepTeal ? OwnAccentLabels[name as int] : AccentLabels[a as int]
+
+fn lightness(c: Color) -> f32
+    return c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722
 
 struct GuiTheme
     name: ThemeName
@@ -49,16 +77,37 @@ struct GuiTheme
     pressed_at: f32 = -100.0
     pressed_point: f32
 
-    static fn of(name: ThemeName) -> GuiTheme
+    static fn of(name: ThemeName, custom: u32 = DefaultCustomTheme) -> GuiTheme
         match name
-            AfterHours: return GuiTheme(name, Color.hex(0x19231F), Color.hex(0x141C19), Color.hex(0x202D27), Color.hex(0x1C2822), Color.hex(0x36453B), Color.hex(0xE0E8DF), Color.hex(0x9DAD9F), Color.hex(0x5FA8A0), Color.hex(0x2B3D32), Color.hex(0x10201C), true, Color.hex(0xE0A35A))
+            Pink: return GuiTheme(name, Color.hex(0xF9E6EC), Color.hex(0xF1D3DD), Color.hex(0xFFF7FA), Color.hex(0xF4DDE5), Color.hex(0xECCAD6), Color.hex(0x3B1E2A), Color.hex(0x99707F), Color.hex(0xC23B76), Color.hex(0xFCE4EE), Color.hex(0xFFFFFF), false, Color.hex(0xB45A2D))
+            Lavender: return GuiTheme(name, Color.hex(0xF1EFF8), Color.hex(0xE4E0F0), Color.hex(0xFCFBFF), Color.hex(0xEBE8F4), Color.hex(0xDDD8EC), Color.hex(0x26213A), Color.hex(0x857E9C), Color.hex(0x6A52B3), Color.hex(0xEFEAFA), Color.hex(0xFFFFFF), false, Color.hex(0xB45A2D))
             Charcoal: return GuiTheme(name, Color.hex(0x18191B), Color.hex(0x131415), Color.hex(0x222326), Color.hex(0x1D1E21), Color.hex(0x3A3C42), Color.hex(0xE6E7E9), Color.hex(0xA4A6AD), Color.hex(0x6FB3AD), Color.hex(0x303136), Color.hex(0x121314), true, Color.hex(0xE0A35A))
+            Oled: return GuiTheme(name, Color.hex(0x000000), Color.hex(0x000000), Color.hex(0x0C0C0D), Color.hex(0x060607), Color.hex(0x242528), Color.hex(0xE8E9EB), Color.hex(0x9A9CA3), Color.hex(0x6FB3AD), Color.hex(0x1B1C1F), Color.hex(0x000000), true, Color.hex(0xE0A35A))
+            Reef: return GuiTheme(name, Color.hex(0x0B2438), Color.hex(0x071A2B), Color.hex(0x0F2F47), Color.hex(0x0D2A40), Color.hex(0x1E4A68), Color.hex(0xE3F2F9), Color.hex(0x8DB4C9), Color.hex(0x38CFE0), Color.hex(0x154766), Color.hex(0x04202E), true, Color.hex(0xFF8D6E))
+            AfterHours: return GuiTheme(name, Color.hex(0x19231F), Color.hex(0x141C19), Color.hex(0x202D27), Color.hex(0x1C2822), Color.hex(0x36453B), Color.hex(0xE0E8DF), Color.hex(0x9DAD9F), Color.hex(0x5FA8A0), Color.hex(0x2B3D32), Color.hex(0x10201C), true, Color.hex(0xE0A35A))
+            Lime: return GuiTheme(name, Color.hex(0x141910), Color.hex(0x0F130C), Color.hex(0x1C2317), Color.hex(0x181F14), Color.hex(0x334027), Color.hex(0xE6EDDC), Color.hex(0xA0AD90), Color.hex(0xA6E23A), Color.hex(0x2C3820), Color.hex(0x152008), true, Color.hex(0xE0A35A))
+            Vermilion: return GuiTheme(name, Color.hex(0x2B100B), Color.hex(0x220B07), Color.hex(0x381711), Color.hex(0x32140E), Color.hex(0x5E2A1F), Color.hex(0xF6E4DE), Color.hex(0xC49A8E), Color.hex(0xFF6B47), Color.hex(0x4C2018), Color.hex(0x2A0904), true, Color.hex(0xF2C14E))
+            Mocha: return GuiTheme(name, Color.hex(0x1F1915), Color.hex(0x191410), Color.hex(0x29211C), Color.hex(0x241D18), Color.hex(0x44372E), Color.hex(0xEDE3DA), Color.hex(0xB0A193), Color.hex(0xD4A373), Color.hex(0x3A2F27), Color.hex(0x1F150C), true, Color.hex(0xE5845C))
             Paper: return GuiTheme(name, Color.hex(0xEEE7D8), Color.hex(0xE2D9C6), Color.hex(0xF8F3E8), Color.hex(0xE9E1D0), Color.hex(0xD2C7B2), Color.hex(0x24211D), Color.hex(0x736B5E), Color.hex(0xB23A2C), Color.hex(0xF4E2D9), Color.hex(0xFFF9F0), false, Color.hex(0xB45A2D))
+            CustomTheme: return GuiTheme.made(custom)
         return GuiTheme(name, Color.hex(0xF7F8F5), Color.hex(0xE9ECE6), Color.hex(0xFFFFFF), Color.hex(0xF1F3EE), Color.hex(0xE2E7E3), Color.hex(0x1C2C32), Color.hex(0x84908F), Color.hex(0x286A67), Color.hex(0xEDF5F1), Color.hex(0xFFFFFF), false, Color.hex(0xB45A2D))
 
-    fn with_accent(a: AccentName) -> GuiTheme
+    static fn made(base: u32) -> GuiTheme
+        let p = Color.hex(base)
+        let white = Color.hex(0xFFFFFF)
+        let black = Color.hex(0x000000)
+        if lightness(p) < 0.5: return GuiTheme(CustomTheme, p, p.lerp(black, 0.22), p.lerp(white, 0.045), p.lerp(white, 0.022), p.lerp(white, 0.15), white.lerp(p, 0.1), white.lerp(p, 0.4), Color.hex(0x6FB3AD), p.lerp(white, 0.1), p.lerp(black, 0.3), true, Color.hex(0xE0A35A))
+        let teal = Color.hex(0x286A67)
+        return GuiTheme(CustomTheme, p, p.lerp(black, 0.06), p.lerp(white, 0.6), p.lerp(black, 0.025), p.lerp(black, 0.09), p.lerp(black, 0.86), p.lerp(black, 0.48), teal, p.lerp(white, 0.6).lerp(teal, 0.1), white, false, Color.hex(0xB45A2D))
+
+    fn with_accent(a: AccentName, own: u32 = DefaultCustomAccent) -> GuiTheme
         var t = *self
         if a == DeepTeal: return t
+        if a == CustomAccent
+            t.accent = Color.hex(own)
+            t.accent_ink = lightness(t.accent) < 0.55 ? Color.hex(0xFFFFFF) : Color.hex(0x121314)
+            if not dark: t.accent_soft = Color.hex(0xFFFFFF).lerp(t.accent, 0.1)
+            return t
         if dark
             match a
                 HarbourBlue: t.accent = Color.hex(0x95B8DC)
@@ -68,6 +117,10 @@ struct GuiTheme
                 Graphite: t.accent = Color.hex(0xB3B9C4)
                 Saffron: t.accent = Color.hex(0xD9BC62)
                 Rosewood: t.accent = Color.hex(0xD9949F)
+                Indigo: t.accent = Color.hex(0xA0A6F2)
+                Lagoon: t.accent = Color.hex(0x5BC9E1)
+                Coral: t.accent = Color.hex(0xEE8B6E)
+                Orchid: t.accent = Color.hex(0xDE92D1)
             return t
         match a
             HarbourBlue
@@ -91,10 +144,26 @@ struct GuiTheme
             Rosewood
                 t.accent = Color.hex(0xA2475A)
                 t.accent_soft = Color.hex(0xF7ECEE)
+            Indigo
+                t.accent = Color.hex(0x4F55B8)
+                t.accent_soft = Color.hex(0xEDEEF8)
+            Lagoon
+                t.accent = Color.hex(0x1A7FA0)
+                t.accent_soft = Color.hex(0xE8F2F5)
+            Coral
+                t.accent = Color.hex(0xC2502F)
+                t.accent_soft = Color.hex(0xF9EDEA)
+            Orchid
+                t.accent = Color.hex(0xA53D8F)
+                t.accent_soft = Color.hex(0xF6ECF4)
         return t
 
     fn detailed() -> bool
-        return name as int >= BasicThemes
+        let i = name as int
+        return i >= BasicThemes and i < PresetThemes
+
+    fn stamp() -> u64
+        return (pack_color(page) as u64) << 32 ^ (pack_color(accent) as u64) ^ (name as u64) << 24
 
     fn wear(b: UiBox, spills: bool = true) -> UiBox
         if material == 0: return b

@@ -53,7 +53,7 @@ struct EvalGraph
             i = game.nodes[i].first
 
     fn prepare(app: *DesktopApp, theme: *GuiTheme, game: *Game, w: int, h: int)
-        var key = hash_word((theme.name as u64) << 40 | (pack_color(theme.accent) as u64) << 8, (w as u64) << 20 | h as u64)
+        var key = hash_word(theme.stamp(), (w as u64) << 20 | h as u64)
         for i in line
             let n = &game.nodes[i]
             key = hash_word(key, i as u64 | (n.eval_cp as u32 as u64) << 24 | (n.eval_depth > 0 ? 1 : 0) as u64 << 60)

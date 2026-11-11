@@ -43,6 +43,8 @@ struct Settings
     data: *DataFolder
     theme: ThemeName = Charcoal
     accent: AccentName
+    custom_theme: u32 = DefaultCustomTheme
+    custom_accent: u32 = DefaultCustomAccent
     still: bool
     three_d: bool
     database_panel: bool
@@ -135,8 +137,10 @@ struct Settings
         let a = doc.get(root, "appearance")
         if doc.is(a, JsonObject)
             let t = json_text(&doc, a, "theme")
-            theme = t == "porcelain" ? Porcelain : t == "after-hours" ? AfterHours : t == "paper" or t == "ink" ? Paper : Charcoal
+            theme = theme_named(t)
             accent = clamp(doc.num_at(a, "accent", 0.0) as int, 0, AccentLabels.len as int - 1) as AccentName
+            custom_theme = doc.num_at(a, "custom_theme", DefaultCustomTheme as f64) as u32
+            custom_accent = doc.num_at(a, "custom_accent", DefaultCustomAccent as f64) as u32
             still = json_flag(&doc, a, "reduced_motion")
             zoom = clamp(doc.num_at(a, "zoom", 1.0) as f32, 0.5, 3.0)
             font = font_named(json_text(&doc, a, "font"))
@@ -254,8 +258,10 @@ struct Settings
         defer doc.free_all()
         let root = doc.object()
         let a = doc.object()
-        doc.set(a, "theme", doc.text(theme == Porcelain ? "porcelain" : theme == AfterHours ? "after-hours" : theme == Paper ? "paper" : "charcoal"))
+        doc.set(a, "theme", doc.text(ThemeWords[theme as int]))
         doc.set(a, "accent", doc.number(accent as f64))
+        doc.set(a, "custom_theme", doc.number(custom_theme as f64))
+        doc.set(a, "custom_accent", doc.number(custom_accent as f64))
         doc.set(a, "reduced_motion", doc.boolean(still))
         doc.set(a, "zoom", doc.number(zoom as f64))
         doc.set(a, "font", doc.text(FontWords[font]))

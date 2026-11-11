@@ -86,7 +86,7 @@ struct GuiApp
     scene: BoardScene
     icons: LineIcons
     logo: SnailLogo
-    icon_key: int = -1
+    icon_key: i64 = -1
 
     fn set_up_asked()
         effects.forced = has_arg("--effects")
@@ -361,8 +361,8 @@ struct GuiApp
             else: r.release()
 
     fn set_theme(name: ThemeName)
-        theme = GuiTheme.of(name).with_accent(settings.accent)
-        let key = name as int * 16 + settings.accent as int
+        theme = GuiTheme.of(name, settings.custom_theme).with_accent(settings.accent, settings.custom_accent)
+        let key = pack_color(theme.accent) as i64
         if key != icon_key
             app.set_icon_in(embed("../../assets/logo/icon.png"), theme.accent)
             icon_key = key
@@ -1606,12 +1606,6 @@ struct GuiApp
 fn gui_live_step(data: *void)
     let gui = data as *GuiApp
     gui.step()
-
-fn theme_named(word: str) -> ThemeName
-    if word == "porcelain": return Porcelain
-    if word == "after-hours": return AfterHours
-    if word == "paper": return Paper
-    return Charcoal
 
 
 fn phase_of(kind: TabKind) -> str

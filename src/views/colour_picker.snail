@@ -1,0 +1,131 @@
+use engine/ui/ui_edit
+use src/theme/fonts
+use src/views/arrow_paint
+
+const PickerWide: f32 = 248.0
+const PickerTall: f32 = 150.0
+const HueTall: f32 = 14.0
+const PickerKnob: f32 = 16.0
+const RainbowHues = [0xFF0000, 0xFFFF00, 0x00FF00, 0x00FFFF, 0x0000FF, 0xFF00FF, 0xFF0000]
+
+struct ColourPicker
+    hue: f32
+    sat: f32
+    val: f32
+    known: bool
+    shown: u32
+    field: UiEditText
+
+    fn take(rgb: u32)
+        let c = Color.hex(rgb)
+        let hi = max(c.r, max(c.g, c.b))
+        if hi > 0.0001
+            if saturation_of(c) > 0.0001: hue = hue_of(c) / 360.0
+            sat = saturation_of(c)
+        val = hi
+        known = true
+        shown = rgb
+
+    fn write(rgb: u32)
+        var t: [16]u8
+        field.set(format(&t, "#{rgb:06X}"))
+
+    fn draw(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, key: int, ref rgb: u32, swatches: []int) -> bool
+        if not known or rgb != shown
+            take(rgb)
+            write(rgb)
+        var moved = false
+        var picked = false
+        var chosen = rgb
+        let pure = colour_of_hsv(hue, 1.0, 1.0)
+        with ui.open(UiNode(key: key, name: "colourpicker", flow: FlowRow, gap: 18.0, align: Vec2(0.0, 0.0)))
+            with ui.open(UiNode(name: "pickleft", gap: 12.0))
+                let sq = ui.open(UiNode(name: "pickfield", flow: FlowStack, width: UiSize.fixed(PickerWide), height: UiSize.fixed(PickerTall), hit: true, box: UiBox(fill: UiFill.linear(Color.hex(0xFFFFFF), pure, 90.0), radius: Vec4.splat(8.0))))
+                let hs = ui.interact(sq.id)
+                ui.memory(sq.id).flags |= UiSlides
+                if hs.held
+                    let r = ui.last_rect(sq.id)
+                    let p = ui.pointer_local()
+                    sat = clamp((p.x - r.x) / max(r.z, 1.0), 0.0, 1.0)
+                    val = 1.0 - clamp((p.y - r.y) / max(r.w, 1.0), 0.0, 1.0)
+                    moved = true
+                ui.leaf(UiNode(width: UiSize.grow(), height: UiSize.grow(), box: UiBox(fill: UiFill.linear(Color(0.0, 0.0, 0.0, 0.0), Color(0.0, 0.0, 0.0, 1.0), 180.0), radius: Vec4.splat(8.0), border: 1.0, border_color: theme.line)))
+                picker_knob(ui, Vec2(sat, 1.0 - val), colour_of_hsv(hue, sat, val), hs.held)
+                ui.close()
+                let hb = ui.open(UiNode(name: "pickhue", flow: FlowStack, width: UiSize.fixed(PickerWide), height: UiSize.fixed(HueTall), hit: true, box: UiBox(fill: UiFill.linear(pure, pure, 90.0, rainbow_ramp(ui)), radius: Vec4.splat(HueTall * 0.5), border: 1.0, border_color: theme.line)))
+                let hh = ui.interact(hb.id)
+                ui.memory(hb.id).flags |= UiSlides
+                if hh.held
+                    let r = ui.last_rect(hb.id)
+                    hue = clamp((ui.pointer_local().x - r.x) / max(r.z, 1.0), 0.0, 1.0)
+                    moved = true
+                picker_knob(ui, Vec2(hue, 0.5), pure, hh.held)
+                ui.close()
+            with ui.open(UiNode(name: "pickright", gap: 12.0))
+                with ui.open(UiNode(name: "pickhead", flow: FlowRow, gap: 10.0, align: Vec2(0.0, 0.5)))
+                    ui.leaf(UiNode(name: "pickshown", width: UiSize.fixed(36.0), height: UiSize.fixed(36.0), box: UiBox(fill: UiFill.solid(Color.hex(rgb)), radius: Vec4.splat(8.0), border: 1.0, border_color: theme.line)))
+                    if ui.text_field("pickhex", &field, "#RRGGBB", UiNode(width: UiSize.fixed(104.0)))
+                        let (typed, ok) = hex_colour(field.text())
+                        if ok
+                            chosen = typed
+                            picked = true
+                with ui.open(UiNode(name: "pickswatches", gap: 6.0))
+                    let n = swatches.len as int
+                    var at = 0
+                    while at < n
+                        with ui.open(UiNode(key: at, name: "pickswatchrow", flow: FlowRow, gap: 6.0))
+                            for i in at..min(at + 6, n)
+                                let c = swatches[i] as u32
+                                let on = c == rgb
+                                let o = ui.open(UiNode(key: i, name: "pickswatch", width: UiSize.fixed(22.0), height: UiSize.fixed(22.0), hit: true, box: UiBox(fill: UiFill.solid(Color.hex(c)), radius: Vec4.splat(11.0), border: on ? 2.0 : 1.0, border_color: on ? theme.accent : theme.line)))
+                                let h = ui.interact(o.id)
+                                ui.close()
+                                if h.clicked
+                                    chosen = c
+                                    picked = true
+                                    write(c)
+                        at += 6
+        if picked
+            take(chosen)
+        elif moved
+            chosen = hex_of(colour_of_hsv(hue, sat, val))
+            shown = chosen
+            write(chosen)
+        if chosen == rgb: return false
+        rgb = chosen
+        return true
+
+fn picker_knob(ui: *UiCanvas, at: Vec2, c: Color, held: bool)
+    let size = held ? PickerKnob + 4.0 : PickerKnob
+    ui.leaf(UiNode(width: UiSize.fixed(size), height: UiSize.fixed(size), floating: true, anchor: at, pivot: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(c), radius: Vec4.splat(size * 0.5), border: 2.5, border_color: Color.hex(0xFFFFFF), shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.4), 0.0, 1.0, 4.0, 0.0, false))))
+
+fn rainbow_ramp(ui: *UiCanvas) -> int
+    var stops: [7]UiStop
+    for i in 0..RainbowHues.len: stops[i] = UiStop(i as f32 / 6.0, Color.hex(RainbowHues[i] as u32))
+    return ui.ramp(stops[0..stops.len])
+
+fn custom_dot(ui: *UiCanvas, c: Color, gap: Color)
+    let red = Color.hex(0xFF0000)
+    with ui.open(UiNode(name: "customdot", width: UiSize.fixed(18.0), height: UiSize.fixed(18.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.conic(red, red, 0.0, 0.5, 0.5, rainbow_ramp(ui)), radius: Vec4.splat(9.0))))
+        ui.leaf(UiNode(width: UiSize.fixed(11.0), height: UiSize.fixed(11.0), box: UiBox(fill: UiFill.solid(c), radius: Vec4.splat(5.5), border: 1.5, border_color: gap)))
+
+fn colour_of_hsv(h: f32, s: f32, v: f32) -> Color
+    let hi = v
+    let lo = v * (1.0 - s)
+    return with_hue(Color(hi, lo, lo, 1.0), h * 360.0)
+
+fn hex_colour(text: str) -> (u32, bool)
+    var n: u32 = 0
+    var digits = 0
+    for i in 0..text.len
+        let c = text[i]
+        var d: u32 = 0
+        if c >= '0' and c <= '9': d = (c - '0') as u32
+        elif c >= 'a' and c <= 'f': d = (c - 'a' + 10) as u32
+        elif c >= 'A' and c <= 'F': d = (c - 'A' + 10) as u32
+        elif c == '#' or c == ' ': continue
+        else: return 0, false
+        n = n << 4 | d
+        digits += 1
+    if digits == 3: return (n >> 8 & 15) * 0x110000 | (n >> 4 & 15) * 0x1100 | (n & 15) * 0x11, true
+    return n, digits == 6

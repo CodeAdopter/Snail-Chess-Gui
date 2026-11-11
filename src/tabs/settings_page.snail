@@ -8,6 +8,7 @@ use src/views/gallery
 use src/pieces/piece_groups
 use src/tabs/fast_extension
 use src/tabs/lichess_extension
+use src/views/colour_picker
 
 const SettingsSections = ["Appearance", "Arrows", "Effects", "Graphics", "Settings", "Cloud", "Board", "Pieces", "Background", "Board", "Pieces", "Scene", "FastChess", "Lichess"]
 const SettingsWords = ["appearance", "arrows", "effects", "graphics", "settings", "cloud", "board", "pieces", "background", "board3d", "pieces3d", "scene", "fastchess", "lichess"]
@@ -67,6 +68,10 @@ const FpsWords = ["15", "30", "60", "120", "Screen"]
 const FpsLimits = [15, 30, 60, 120, 0]
 const CostumeFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 const PreviewFen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+const ThemeGroups = ["Basic", "Detailed", "Custom"]
+const ThemeGroupNotes = ["Static themes with flat colours.", "Animated materials with hover and click effects.", "Pick any background colour and the rest of the theme follows."]
+const CustomThemePicks = [0x000000, 0x14181F, 0x1E2A38, 0x261E3A, 0x3A1622, 0x0F2B26, 0x2E2419, 0x3B3F46, 0xF6F3EC, 0xE6EEF7, 0xF8E7EE, 0xE9F4E3]
+const CustomAccentPicks = [0xFF4D6D, 0xFF7A3D, 0xFFB627, 0xD4E157, 0x4ADE80, 0x2DD4BF, 0x38BDF8, 0x3B82F6, 0x8B5CF6, 0xD946EF, 0xF472B6, 0xFFFFFF]
 const StartChoices = ["Restore previous tabs", "New tab page", "New analysis"]
 const PriorityChoices = ["Normal", "Below normal", "Idle"]
 
@@ -97,6 +102,8 @@ struct SettingsPage
     icons: LineIcons
     board_group: int
     theme_group: int
+    theme_pick: ColourPicker
+    accent_pick: ColourPicker
     finish_group: int
     shelf_ids: [4]u32
     preview: BoardView
@@ -123,7 +130,7 @@ struct SettingsPage
             hash.set(format(&t, "{s.hash_mb}"))
             board_group = s.palette as int >= ThemePalettes ? 1 : 0
             finish_group = s.finish != NoFinish ? 1 : 0
-            theme_group = s.theme as int >= BasicThemes ? 1 : 0
+            theme_group = s.theme == CustomTheme ? 2 : s.theme as int >= BasicThemes ? 1 : 0
         sheet.finish = look.sheet.finish
         sheet.finish_values = look.sheet.finish_values
         let top = TabRowHeight + CommandBarHeight
@@ -191,41 +198,39 @@ struct SettingsPage
         with kit.card(1, "Appearance")
             with kit.block(10, "Theme", "")
                 with ui.open(UiNode(name: "themegrouphead", flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5)))
-                    kit.segments("themegroup", ["Basic", "Detailed"], ref theme_group)
-                    ui.label(theme_group == 0 ? "Static themes with flat colours." : "Animated materials with hover and click effects.", muted_style(look), UiNode(width: UiSize.grow(), clip: true))
-                let first = theme_group == 0 ? 0 : BasicThemes
-                let past = theme_group == 0 ? BasicThemes : ThemeCount
-                with themes = wrap_rows(ui, "themecards", kit.width - 36.0, 12.0)
-                    for i in first..past
-                        themes.next(150.0)
-                        var t = GuiTheme.of(i as ThemeName).with_accent(s.accent)
-                        if t.detailed()
-                            t.material = look.surfaces.theme_material(t.name, PanelPart)
-                            t.motion = theme.motion
-                        let o = ui.open(UiNode(key: i as int, name: "themecard", width: UiSize.fixed(150.0), padding: Vec4.splat(10.0), gap: 8.0, hit: true, box: UiBox(fill: UiFill.solid(t.page), radius: Vec4.splat(8.0), border: s.theme as int == i ? 2.0 : 1.0, border_color: s.theme as int == i ? theme.accent : theme.line)))
-                        let hv = ui.interact(o.id)
-                        with ui.open(UiNode(width: UiSize.grow(), height: UiSize.fixed(36.0), padding: Vec4.splat(8.0), flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5), box: t.wear(UiBox(fill: UiFill.solid(t.surface), radius: Vec4.splat(5.0), border: 1.0, border_color: t.line), false)))
-                            ui.leaf(UiNode(width: UiSize.fixed(12.0), height: UiSize.fixed(12.0), box: UiBox(fill: UiFill.solid(t.accent), radius: Vec4.splat(6.0))))
-                            ui.leaf(UiNode(width: UiSize.fixed(50.0), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(t.muted), radius: Vec4.splat(3.0))))
-                        ui.label(theme_label(i as ThemeName), UiTextStyle(face: fonts.text, size: 12.5, color: t.ink))
-                        ui.close()
-                        if hv.clicked and s.theme as int != i
-                            s.theme = i as ThemeName
+                    kit.segments("themegroup", ThemeGroups, ref theme_group)
+                    ui.label(ThemeGroupNotes[theme_group], muted_style(look), UiNode(width: UiSize.grow(), clip: true))
+                if theme_group == 2
+                    with ui.open(UiNode(name: "customtheme", flow: kit.narrow() ? FlowColumn : FlowRow, width: UiSize.grow(), gap: 20.0))
+                        if theme_card(s, look, CustomTheme): changed = true
+                        if theme_pick.draw(ui, theme, fonts, 0, ref s.custom_theme, CustomThemePicks[0..CustomThemePicks.len])
+                            s.theme = CustomTheme
                             changed = true
+                else
+                    let first = theme_group == 0 ? 0 : BasicThemes
+                    let past = theme_group == 0 ? BasicThemes : PresetThemes
+                    with themes = wrap_rows(ui, "themecards", kit.width - 36.0, 12.0)
+                        for i in first..past
+                            themes.next(150.0)
+                            if theme_card(s, look, i as ThemeName): changed = true
             with kit.block(11, "Accent", "")
-                let across = clamp(floor((kit.width - 36.0 + 8.0) / 132.0) as int, 1, 4)
+                let across = clamp(floor((kit.width - 36.0 + 8.0) / 132.0) as int, 1, 6)
                 with accents = wrap_rows(ui, "accents", across as f32 * 132.0 - 8.0, 8.0)
                     for i in 0..AccentLabels.len as int
                         accents.next(124.0)
-                        let t = GuiTheme.of(s.theme).with_accent(i as AccentName)
-                        let o = ui.open(UiNode(key: i, name: "accent", width: UiSize.fixed(124.0), flow: FlowRow, gap: 8.0, padding: Vec4(6.0, 4.0, 10.0, 4.0), align: Vec2(0.0, 0.5), hit: true, box: UiBox(radius: Vec4.splat(5.0), border: s.accent as int == i ? 1.0 : 0.0, border_color: theme.accent)))
+                        let a = i as AccentName
+                        let t = GuiTheme.of(s.theme, s.custom_theme).with_accent(a, s.custom_accent)
+                        let o = ui.open(UiNode(key: i, name: "accent", width: UiSize.fixed(124.0), flow: FlowRow, gap: 8.0, padding: Vec4(6.0, 4.0, 10.0, 4.0), align: Vec2(0.0, 0.5), hit: true, box: UiBox(radius: Vec4.splat(5.0), border: s.accent == a ? 1.0 : 0.0, border_color: theme.accent)))
                         let hv = ui.interact(o.id)
-                        ui.leaf(UiNode(width: UiSize.fixed(18.0), height: UiSize.fixed(18.0), box: UiBox(fill: UiFill.solid(t.accent), radius: Vec4.splat(9.0))))
-                        ui.label(AccentLabels[i], UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+                        if a == CustomAccent: custom_dot(ui, t.accent, theme.surface)
+                        else: ui.leaf(UiNode(width: UiSize.fixed(18.0), height: UiSize.fixed(18.0), box: UiBox(fill: UiFill.solid(t.accent), radius: Vec4.splat(9.0))))
+                        ui.label(accent_label(s.theme, a), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
                         ui.close()
-                        if hv.clicked and s.accent as int != i
-                            s.accent = i as AccentName
+                        if hv.clicked and s.accent != a
+                            s.accent = a
                             changed = true
+                if s.accent == CustomAccent
+                    if accent_pick.draw(ui, theme, fonts, 1, ref s.custom_accent, CustomAccentPicks[0..CustomAccentPicks.len]): changed = true
         with kit.card(3, "Font")
             let wide: f32 = 156.0
             with kit.block(30, "Typeface", "Used for all of the program's text.")
@@ -247,6 +252,25 @@ struct SettingsPage
         with kit.card(2, "Motion")
             if kit.switch(20, "Reduced motion", "Disable interface transitions, smooth scrolling and visual effect animations.", ref s.still): changed = true
         return changed
+
+    fn theme_card(s: *Settings, look: *BoardLook, name: ThemeName) -> bool
+        let ui = kit.ui
+        let theme = look.theme
+        let on = s.theme == name
+        var t = GuiTheme.of(name, s.custom_theme).with_accent(s.accent, s.custom_accent)
+        if t.detailed()
+            t.material = look.surfaces.theme_material(t.name, PanelPart)
+            t.motion = theme.motion
+        let o = ui.open(UiNode(key: name as int, name: "themecard", width: UiSize.fixed(150.0), padding: Vec4.splat(10.0), gap: 8.0, hit: true, box: UiBox(fill: UiFill.solid(t.page), radius: Vec4.splat(8.0), border: on ? 2.0 : 1.0, border_color: on ? theme.accent : theme.line)))
+        let hv = ui.interact(o.id)
+        with ui.open(UiNode(width: UiSize.grow(), height: UiSize.fixed(36.0), padding: Vec4.splat(8.0), flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5), box: t.wear(UiBox(fill: UiFill.solid(t.surface), radius: Vec4.splat(5.0), border: 1.0, border_color: t.line), false)))
+            ui.leaf(UiNode(width: UiSize.fixed(12.0), height: UiSize.fixed(12.0), box: UiBox(fill: UiFill.solid(t.accent), radius: Vec4.splat(6.0))))
+            ui.leaf(UiNode(width: UiSize.fixed(50.0), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(t.muted), radius: Vec4.splat(3.0))))
+        ui.label(theme_label(name), UiTextStyle(face: look.fonts.text, size: 12.5, color: t.ink))
+        ui.close()
+        if not hv.clicked or on: return false
+        s.theme = name
+        return true
 
     fn board(app: *DesktopApp, s: *Settings, look: *BoardLook) -> bool
         let ui = &app.ui

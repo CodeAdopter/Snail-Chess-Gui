@@ -43,7 +43,7 @@ struct TelemetryGraph
 
     fn prepare(app: *DesktopApp, theme: *GuiTheme, records: []TelemetryRecord, w: int, h: int)
         let last = records[records.len - 1]
-        let key = (records.len as u64) << 40 ^ (kind as u64) << 36 ^ (theme.name as u64) << 34 ^ (w as u64) << 17 ^ h as u64 ^ (last.nodes as u64) << 50
+        let key = hash_word((records.len as u64) << 40 ^ (kind as u64) << 36 ^ (w as u64) << 17 ^ h as u64 ^ (last.nodes as u64) << 50, theme.stamp())
         if not ready
             layer.init(&app.gpu, &app.ui_gpu, max(w, 512), max(h, 128), room: 64, path_room: 65536, writing: false)
             ready = true
