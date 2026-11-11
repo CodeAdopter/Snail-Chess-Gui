@@ -103,10 +103,10 @@ struct BookImportPopup
         let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
         var line: [700]u8
         if downloaded
-            ui.label(format(&line, "Import {str(suggested[0..suggested.len])}"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(format(&line, "Import {str(suggested[0..suggested.len])}"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
             ui.paragraph(format(&line, "{file_name_of(file_text())} · Downloaded from the registry and verified against the catalog."), note)
         else
-            ui.label(format(&line, "Import {file_name_of(file_text())}"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(format(&line, "Import {file_name_of(file_text())}"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
             ui.paragraph(file_text(), note)
         with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 16.0, align: Vec2(0.0, 0.5)))
             for i in 0..ImportFormatNames.len
@@ -130,7 +130,7 @@ struct BookImportPopup
 
     fn waiting(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts)
         var line: [700]u8
-        ui.label(format(&line, "Reading {file_name_of(file_text())}"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+        ui.paragraph(format(&line, "Reading {file_name_of(file_text())}"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
         let done = atomic_load(&job.found.done)
         let unit = format as ImportFormat == ImportPgn ? "games" : "lines"
         ui.paragraph(format(&line, "Read {done} {unit}."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
@@ -143,7 +143,7 @@ struct BookImportPopup
         let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
         var line: [700]u8
         if job.problem_len > 0
-            ui.label(format(&line, "{file_name_of(file_text())} could not be read as a book"), title)
+            ui.paragraph(format(&line, "{file_name_of(file_text())} could not be read as a book"), title)
             ui.paragraph(job.problem_text(), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
             with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
                 if ui.button("Back"): step = ImportChoosing
@@ -180,7 +180,7 @@ struct BookImportPopup
             step = ImportReport
             return
         var line: [700]u8
-        ui.label(format(&line, "Replace {taken.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+        ui.paragraph(format(&line, "Replace {taken.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
         ui.paragraph(format(&line, "Replace the existing {taken.positions} openings with {job.found.count} imported openings. Tournaments using this book keep their own copies."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
         with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
             ui.spacer()

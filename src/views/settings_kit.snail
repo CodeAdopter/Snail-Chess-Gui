@@ -20,7 +20,7 @@ struct SettingsKit
     fn title(group: str, text: str, about: str)
         with ui.open(UiNode(name: "kittitle", width: UiSize.grow(), gap: 4.0, padding: Vec4(inset + 2.0, 0.0, 0.0, 6.0)))
             if group.len > 0: ui.label(group, UiTextStyle(face: fonts.strong, size: 11.0, color: theme.muted, tracking: 0.8))
-            ui.label(text, UiTextStyle(face: fonts.serif, size: 26.0, color: theme.ink))
+            ui.paragraph(text, UiTextStyle(face: fonts.serif, size: 26.0, color: theme.ink), UiNode(width: UiSize.grow()))
             if about.len > 0: ui.paragraph(about, UiTextStyle(face: fonts.text, size: 13.0, color: theme.muted), UiNode(width: UiSize.grow()))
 
     fn card(key: int, heading: str) -> UiOpen
@@ -45,17 +45,17 @@ struct SettingsKit
             if note.len > 0: ui.paragraph(note, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.grow()))
         return o
 
-    fn segments(name: str, words: []str, ref chosen: int) -> bool
+    fn segments(name: str, words: []str, ref chosen: int, pad: f32 = 16.0) -> bool
         let before = chosen
         with ui.open(UiNode(name: name, flow: FlowRow, height: UiSize.fixed(32.0), padding: Vec4.splat(3.0), gap: 2.0, align: Vec2(0.0, 0.5), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(8.0), border: 1.0, border_color: theme.line)))
             for i, word in words
                 let on = i == chosen
-                let o = ui.open(UiNode(name: word, key: i, flow: FlowRow, height: UiSize.grow(), padding: Vec4(16.0, 0.0, 16.0, 0.0), align: Vec2(0.5, 0.5), hit: true, focusable: true))
+                let o = ui.open(UiNode(name: word, key: i, flow: FlowRow, height: UiSize.grow(), padding: Vec4(pad, 0.0, pad, 0.0), align: Vec2(0.5, 0.5), hit: true, focusable: true))
                 let h = ui.interact(o.id)
                 let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 24.0)
                 let raised = ui.spring(o.id, 1, on ? 1.0 : 0.0, 24.0)
                 ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.6).with_alpha(raised)), radius: Vec4.splat(6.0), shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.25 * raised), 0.0, 1.0, 3.0, 0.0, false))
-                ui.label(word, UiTextStyle(face: on ? fonts.strong : fonts.text, size: 12.5, color: theme.muted.lerp(theme.ink, max(raised, lit))))
+                ui.label(word, UiTextStyle(face: on ? fonts.strong : fonts.text, size: 12.5, color: theme.muted.lerp(theme.ink, max(raised, lit))), UiNode(clip: true))
                 ui.close()
                 if h.clicked: chosen = i
         return chosen != before

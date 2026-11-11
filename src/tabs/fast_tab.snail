@@ -1,4 +1,3 @@
-use engine/ui/ui_widgets
 use src/fastchess/fast_run
 use src/views/board_view
 use src/views/list_rows
@@ -375,14 +374,14 @@ struct FastView
                 if run.pgn.len > 0 and ui.button("Open PGN"): fast_open(str(run.pgn[0..run.pgn.len]))
             fast_section(ui, look, "RUN")
             fact(ui, fonts, theme, "fastchess", str(run.version[0..run.version_len]))
-            fact(ui, fonts, theme, "Started in", str(run.cwd[0..run.cwd.len]))
+            path_fact(ui, fonts, theme, "Started in", str(run.cwd[0..run.cwd.len]))
             var span: [48]u8
             fact(ui, fonts, theme, "Concurrency", format(&line, "{run.args.concurrency} games at once"))
             if run.args.tc_len > 0: fact(ui, fonts, theme, "Time control", run.args.tc_text())
             if run.args.sprt: fact(ui, fonts, theme, "SPRT", format(&line, "elo0 {run.args.elo0:.1} · elo1 {run.args.elo1:.1} · alpha {run.args.alpha:.3} · beta {run.args.beta:.3}"))
             if run.state == FastEnded: fact(ui, fonts, theme, "Exit code", format(&span, "{run.code}"))
             elif run.state == FastLost: fact(ui, fonts, theme, "Ended", "snailfast was closed before fastchess finished")
-            fact(ui, fonts, theme, "Folder", run.folder_text())
+            path_fact(ui, fonts, theme, "Folder", run.folder_text())
             let t = &run.tally
             var warnings = 0
             for f in t.faults

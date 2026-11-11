@@ -103,7 +103,7 @@ struct BooksPage
             ui.text_field("booksearch", &search, "Search books", UiNode(width: UiSize.grow()))
             with ui.open(UiNode(name: "bookfilterrow", width: UiSize.grow(), padding: Vec4(0.0, 6.0, 0.0, 0.0)))
                 var rk = SettingsKit(ui, theme, fonts, rail_w, 0, 0.0)
-                rk.segments("bookfilter", BookFilters, ref filter)
+                rk.segments("bookfilter", BookFilters, ref filter, 8.0)
             rail_group(ui, theme, fonts, 0, format(&count, "BOOKS  {shown.len}"), false)
             if books.books.len == 0: ui.paragraph("No books yet. Import a Polyglot book, a PGN or an EPD, or add one from the registry.", note, UiNode(width: UiSize.grow(), padding: Vec4(12.0, 4.0, 12.0, 4.0)))
             elif shown.len == 0: ui.paragraph("No matching books.", note, UiNode(width: UiSize.grow(), padding: Vec4(12.0, 4.0, 12.0, 4.0)))
@@ -336,7 +336,7 @@ struct BooksPage
             return
         var line: [400]u8
         with ui.modal("removebook", ref removing, 440.0)
-            ui.label(format(&line, "Uninstall {b.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(format(&line, "Uninstall {b.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
             ui.paragraph(format(&line, "Delete this book and its {b.positions} openings from the data folder. Tournaments using the book keep their own copies."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
             with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5), padding: Vec4(0.0, 6.0, 0.0, 0.0)))
                 ui.spacer()

@@ -80,7 +80,7 @@ struct PastePicker
                     let h = ui.interact(o.id)
                     let lit = ui.spring(o.id, 0, h.hovered ? 1.0 : 0.0, 22.0)
                     ui.elements[o.index].node.box = UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.1 * lit)), radius: Vec4.splat(5.0))
-                    ui.label(game_title(all, starts[g], &line), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+                    ui.label(game_title(all, starts[g], &line), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(clip: true))
                     ui.close()
                     if h.clicked
                         let r = take_pasted_game(all, starts[g], target, &spare)

@@ -151,7 +151,7 @@ struct TelemetryGraph
         ui.box(cx, cy, cw, ch, UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(6.0), border: 1.0, border_color: theme.line, shadow: UiShadow(Color(0.0, 0.0, 0.0, 0.28), 0.0, 6.0, 18.0, 0.0, false)))
         ui.clip_to(cx, cy, cw, ch, 6.0)
         ui.circle(cx + 16.0, cy + 18.0, 4.0, line)
-        ui.text(cx + 26.0, cy + 10.0, r.side == White as i32 ? white : black, UiTextStyle(face: fonts.strong, size: 12.0, color: theme.ink))
+        ui.text_line(cx + 26.0, cy + 10.0, cw - 38.0, r.side == White as i32 ? white : black, UiTextStyle(face: fonts.strong, size: 12.0, color: theme.ink))
         var shown: [32]u8
         var move: [32]u8
         let number = (r.ply as int + 1) / 2

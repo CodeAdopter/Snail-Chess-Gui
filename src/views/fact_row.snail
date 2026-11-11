@@ -1,4 +1,5 @@
-use engine/ui/ui_layout
+use engine/ui/ui_widgets
+use engine/desktop/file_tree
 use src/theme/theme
 use src/theme/fonts
 
@@ -6,3 +7,12 @@ fn fact(ui: *UiCanvas, fonts: *GuiFonts, theme: *GuiTheme, name: str, value: str
     with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 12.0))
         ui.paragraph(name, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.fixed(96.0)))
         ui.paragraph(value, UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+
+fn path_fact(ui: *UiCanvas, fonts: *GuiFonts, theme: *GuiTheme, name: str, path: str)
+    with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 12.0, align: Vec2(0.0, 0.5)))
+        ui.paragraph(name, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.fixed(96.0)))
+        path_text(ui, path, UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), true)
+        if path.len > 0 and ui.button("Open folder"): show_in_folder(path)
+
+fn path_text(ui: *UiCanvas, path: str, style: UiTextStyle, fill: bool)
+    ui.paragraph(path, UiTextStyle(max_lines: 1, ellipsis: true, cut_middle: true, ..style), UiNode(clip: true, width: fill ? UiSize.grow() : UiSize.fit()))

@@ -86,7 +86,7 @@ fn player_tag(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, key: int, name:
     var n: [16]u8
     with ui.open(UiNode(key: key, name: "player", flow: FlowRow, gap: 6.0, align: Vec2(0.0, 0.5)))
         ui.leaf(UiNode(width: UiSize.fixed(9.0), height: UiSize.fixed(9.0), box: UiBox(fill: UiFill.solid(white ? Color.hex(0xF2EFE8) : Color.hex(0x222222)), radius: Vec4.splat(4.5), border: 1.0, border_color: theme.muted.with_alpha(0.7))))
-        ui.label(name.len > 0 ? name : "?", UiTextStyle(face: fonts.strong, size: 13.5, color: name.len > 0 ? theme.ink : theme.muted))
+        ui.label(name.len > 0 ? name : "?", UiTextStyle(face: fonts.strong, size: 13.5, color: name.len > 0 ? theme.ink : theme.muted), UiNode(clip: true))
         if elo > 0
             with ui.open(UiNode(name: "elo", padding: Vec4(6.0, 1.0, 6.0, 2.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(4.0), border: 1.0, border_color: theme.line.with_alpha(0.8))))
                 ui.label(format(&n, "{elo}"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))

@@ -11,8 +11,8 @@ fn draw_player_bar(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name_id: s
     let disc = side == White ? Color(0.95, 0.95, 0.93, 1.0) : Color(0.08, 0.08, 0.09, 1.0)
     with ui.open(UiNode(name: name_id, floating: true, offset: Vec2(x, y), width: UiSize.fixed(w), height: UiSize.fixed(PlayerBarHeight), flow: FlowRow, gap: 10.0, align: Vec2(0.0, 0.5), padding: Vec4(12.0, 0.0, 4.0, 0.0), clip: true, box: theme.wear(UiBox(fill: UiFill.solid(theme.surface), radius: Vec4.splat(8.0), border: 1.0, border_color: theme.line))))
         ui.leaf(UiNode(width: UiSize.fixed(12.0), height: UiSize.fixed(12.0), box: UiBox(fill: UiFill.solid(disc), radius: Vec4.splat(6.0), border: 1.0, border_color: theme.muted)))
-        ui.label(name, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink))
-        if note.len > 0: ui.label(note, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+        ui.label(name, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink), UiNode(clip: true))
+        if note.len > 0: ui.label(note, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(clip: true))
         ui.spacer()
         if eval.len > 0: ui.label(eval, UiTextStyle(face: fonts.strong, size: 12.5, color: theme.ink))
         if clock.len > 0

@@ -2,7 +2,6 @@ use engine/desktop/desktop_app
 use engine/ui/ui_edit
 use src/engines/trust_score
 use src/engines/ccrl_ratings
-use src/views/fact_row
 use src/views/stat_tile
 use src/views/rail
 
@@ -105,7 +104,7 @@ struct RegistryPopup
         let e = &c.engines[chosen]
         let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
         var line: [300]u8
-        ui.label(c.text(e.name), UiTextStyle(face: fonts.serif, size: 26.0, color: theme.ink))
+        ui.paragraph(c.text(e.name), UiTextStyle(face: fonts.serif, size: 26.0, color: theme.ink))
         if e.gone: ui.paragraph("The GitHub repository is no longer available. This engine cannot be installed.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.warn))
         elif e.archived: ui.paragraph("This repository is archived and is no longer accepting updates.", note)
         if e.description.len > 0: ui.paragraph(c.text(e.description), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))

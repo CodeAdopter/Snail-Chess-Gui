@@ -31,7 +31,7 @@ fn draw_engine_card(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name_id: 
         let middle = max(w - 14.0 - 6.0 - 10.0 - 12.0 - eval_w - (c.clock.len > 0 ? CardClockWidth + 12.0 : 0.0), 1.0)
         with ui.open(UiNode(width: UiSize.fixed(middle), gap: 4.0, clip: true))
             with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 1.0)))
-                ui.label(c.name, UiTextStyle(face: fonts.strong, size: 13.5, color: theme.ink))
+                ui.label(c.name, UiTextStyle(face: fonts.strong, size: 13.5, color: theme.ink), UiNode(clip: true))
                 if c.version.len > 0: ui.label(c.version, small)
             if c.search.len > 0: ui.label(c.search, small, UiNode(width: UiSize.fixed(middle), clip: true))
         if c.eval.len > 0: ui.label(c.eval, UiTextStyle(face: fonts.mono, size: 16.0, color: theme.ink), UiNode(width: UiSize.fixed(CardEvalWidth), align: Vec2(1.0, 0.5)))

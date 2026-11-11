@@ -130,11 +130,11 @@ struct TournamentIndex
         let done = r.finished_games()
         let total = max(r.schedule.len as int, 1)
         ui.clip_to(tx, y, text_w, IndexRowHeight, 0.0)
-        ui.text(tx, y + 11.0, r.config.name_text(), UiTextStyle(face: fonts.serif, size: 17.0, color: theme.ink))
-        ui.text(tx, y + 37.0, format(&line, "{state_label(r.state)}  ·  {format_label(r.config.format)}  ·  {r.config.control.text(&tc)}  ·  {r.config.entrants.len} engines  ·  {r.config.book == NoEventBook ? "No book" : r.config.book_name_text()}"), muted)
-        if wide: ui.text(tx, y + 56.0, engines_text(r), muted)
+        ui.text_line(tx, y + 11.0, text_w, r.config.name_text(), UiTextStyle(face: fonts.serif, size: 17.0, color: theme.ink))
+        ui.text_line(tx, y + 37.0, text_w, format(&line, "{state_label(r.state)}  ·  {format_label(r.config.format)}  ·  {r.config.control.text(&tc)}  ·  {r.config.entrants.len} engines  ·  {r.config.book == NoEventBook ? "No book" : r.config.book_name_text()}"), muted)
+        if wide: ui.text_line(tx, y + 56.0, text_w, engines_text(r), muted)
         else
-            ui.text(tx, y + 54.0, format(&line, "{done} of {r.schedule.len} games  ·  {engines_text(r)}"), muted)
+            ui.text_line(tx, y + 54.0, text_w, format(&line, "{done} of {r.schedule.len} games  ·  {engines_text(r)}"), muted)
             ui.box(tx, y + IndexRowHeight - 9.0, text_w, 3.0, UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(1.5)))
             ui.box(tx, y + IndexRowHeight - 9.0, text_w * done as f32 / total as f32, 3.0, UiBox(fill: UiFill.solid(theme.accent), radius: Vec4.splat(1.5)))
         ui.unclip()
@@ -149,7 +149,7 @@ struct TournamentIndex
             let lead = r.standings.order[0]
             let t = &r.standings.tallies[lead]
             ui.clip_to(rx, y + 44.0, right - 16.0, 24.0, 0.0)
-            ui.text(rx, y + 48.0, format(&line, "Leader {r.config.entrants[lead].name_text()}  {t.points():.1}/{t.games()}"), muted)
+            ui.text_line(rx, y + 48.0, right - 16.0, format(&line, "Leader {r.config.entrants[lead].name_text()}  {t.points():.1}/{t.games()}"), muted)
             ui.unclip()
         if hv.hovered: app.cursor = SDL_SYSTEM_CURSOR_POINTER
         return hv.clicked

@@ -85,12 +85,7 @@ struct FastExtension
                     if ui.button("Copy")
                         var text: [720]u8
                         if SDL_SetClipboardText(format(&text, "{shown}").ptr as cstr): ui.toast("Path copied")
-                    if ui.button("Open folder")
-                        var cut = shown.len as int
-                        if installed
-                            while cut > 0 and shown[cut - 1] != '\\'
-                                cut -= 1
-                        fast_open(shown[0..cut])
+                    if ui.button("Open folder"): show_in_folder(shown)
             ui.paragraph(shown, UiTextStyle(face: fonts.mono, size: 11.5, color: theme.ink), UiNode(width: UiSize.grow(), padding: Vec4(18.0, 0.0, 18.0, 14.0)))
             with kit.row(11, "Source", "github.com/Disservin/fastchess, under the GPL-3.0 licence.")
                 if ui.button("Open"): SDL_OpenURL("https://github.com/Disservin/fastchess")

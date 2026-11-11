@@ -136,7 +136,7 @@ struct EventView
             with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 10.0, align: Vec2(0.0, 0.5)))
                 let shown = p.score_kind != NoScore ? score_text(p.score_kind, p.score, side, &eval) : "–"
                 ui.label(shown, UiTextStyle(face: fonts.strong, size: 19.0, color: theme.ink))
-                ui.label(format(&title, "{s.name_of(side)} to move"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
+                ui.label(format(&title, "{s.name_of(side)} to move"), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(clip: true))
             var facts: [160]u8
             var speed: [32]u8
             let n = &p.heard
@@ -218,7 +218,7 @@ struct EventView
                 var number: [8]u8
                 with list.row(place, i, i == watched)
                     with list.middle()
-                        ui.label(r.config.entrants[i].name_text(), UiTextStyle(face: fonts.strong, size: 13.5, color: theme.ink))
+                        ui.label(r.config.entrants[i].name_text(), UiTextStyle(face: fonts.strong, size: 13.5, color: theme.ink), UiNode(clip: true))
                         form_strip(ui, look, st, i)
                     lead_tile(&list, look, r, place as int, format(&number, "{place + 1}"))
                     with list.actions()
@@ -253,8 +253,8 @@ struct EventView
         let theme = look.theme
         let fonts = look.fonts
         with ui.open(UiNode(name: caption, width: UiSize.fixed(width), gap: 2.0, align: Vec2(1.0, 0.5)))
-            ui.label(value, UiTextStyle(face: big ? fonts.strong : fonts.text, size: big ? 17.0 : 13.0, color: theme.ink))
-            ui.label(caption, UiTextStyle(face: fonts.strong, size: 9.5, color: theme.muted, tracking: 0.6))
+            ui.label(value, UiTextStyle(face: big ? fonts.strong : fonts.text, size: big ? 17.0 : 13.0, color: theme.ink), UiNode(clip: true))
+            ui.label(caption, UiTextStyle(face: fonts.strong, size: 9.5, color: theme.muted, tracking: 0.6), UiNode(clip: true))
 
     fn score_card(app: *DesktopApp, look: *BoardLook, r: *EventRunner, i: int, right: f32)
         let ui = &app.ui
@@ -388,7 +388,7 @@ struct EventView
             let lit = s.clock.side == side and s.clock.running
             ui.circle(bx + 4.0, ty + 8.0, 5.0, theme.muted)
             ui.circle(bx + 4.0, ty + 8.0, 4.0, side == White ? Color(0.95, 0.95, 0.93, 1.0) : Color(0.08, 0.08, 0.09, 1.0))
-            ui.text(bx + 14.0, ty, s.name_of(side), name)
+            ui.text_line(bx + 14.0, ty, s.clock.timed() ? PeekBoard - 72.0 : PeekBoard - 14.0, s.name_of(side), name)
             if s.clock.timed(): ui.text(bx + PeekBoard - 52.0, ty, whole_clock(s.clock.left_ns(side, now), &clock), UiTextStyle(face: fonts.mono, size: 12.5, color: lit ? theme.accent : theme.muted))
         let (kind, white) = live_eval(s)
         let share = ui.spring(id_hash("peekbar"), 0, white_share(kind, white), 10.0)
@@ -505,7 +505,7 @@ struct EventView
                 let f = &r.faults[k]
                 let name = f.entrant >= 0 and f.entrant < r.config.entrants.len ? r.config.entrants[f.entrant].name_text() : "An engine"
                 let what = f.end == ByIllegalMove ? "played an illegal move" : "crashed"
-                ui.label(format(&line, "{name} {what} at move {f.fullmove} in game {f.game + 1}."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(key: k))
+                ui.paragraph(format(&line, "{name} {what} at move {f.fullmove} in game {f.game + 1}."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink), UiNode(key: k, width: UiSize.grow()))
             if from > 0: ui.label(format(&line, "And {from} earlier. The crash log below has them all."), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
         ui.leaf(UiNode(height: UiSize.fixed(6.0)))
 

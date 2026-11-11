@@ -1,4 +1,5 @@
 use engine/desktop/desktop_look
+use src/views/fact_row
 use src/views/settings_kit
 use src/views/line_icons
 
@@ -89,7 +90,14 @@ fn page_actions(ui: *UiCanvas, key: int, inset: f32 = 0.0) -> UiOpen
 fn fact_row(kit: *SettingsKit, key: int, name: str, value: str)
     let ui = kit.ui
     with kit.row(key, name, "")
-        ui.label(value, UiTextStyle(face: kit.fonts.text, size: 13.0, color: kit.theme.ink), UiNode(clip: true, width: kit.narrow() ? UiSize.grow() : UiSize.fit(0.0, kit.width * 0.64)))
+        ui.paragraph(value, UiTextStyle(face: kit.fonts.text, size: 13.0, color: kit.theme.ink, max_lines: 1, ellipsis: true), UiNode(clip: true, width: kit.narrow() ? UiSize.grow() : UiSize.fit(0.0, kit.width * 0.64)))
+
+fn path_row(kit: *SettingsKit, key: int, name: str, path: str)
+    let ui = kit.ui
+    with kit.row(key, name, "")
+        with ui.open(UiNode(name: "pathline", flow: FlowRow, gap: 12.0, align: Vec2(0.0, 0.5), width: kit.narrow() ? UiSize.grow() : UiSize.fit(0.0, kit.width * 0.64)))
+            path_text(ui, path, UiTextStyle(face: kit.fonts.text, size: 13.0, color: kit.theme.ink), kit.narrow())
+            if path.len > 0 and ui.button("Open folder"): show_in_folder(path)
 
 fn tag(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, text: str)
     with ui.open(UiNode(name: "tag", flow: FlowRow, height: UiSize.fixed(28.0), padding: Vec4(12.0, 0.0, 12.0, 0.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(theme.accent.with_alpha(0.12)), radius: Vec4.splat(14.0))))
@@ -126,7 +134,7 @@ struct SheetPopup
         let o = ui.open(UiNode(name: "sheethead", flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(SheetHead), padding: Vec4(22.0, 0.0, 58.0, 0.0), gap: 12.0, align: Vec2(0.0, 0.5)))
         with ui.open(UiNode(name: "sheetclose", floating: true, anchor: Vec2(1.0, 0.5), pivot: Vec2(1.0, 0.5), offset: Vec2(-14.0, 0.0)))
             if cross_button(ui, theme, fonts, "close", 0): closed = true
-        ui.label(title, UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink))
+        ui.label(title, UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink), UiNode(clip: true))
         ui.label(note, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(width: UiSize.grow(), clip: true))
         return o
 

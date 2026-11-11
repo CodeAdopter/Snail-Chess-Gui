@@ -44,7 +44,7 @@ fn draw_new_tab_page(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, icons
             with ui.open(UiNode(name: "newtab", width: UiSize.fixed(w), gap: 14.0))
                 with ui.open(UiNode(name: "newtabtitle", width: UiSize.grow(), gap: 4.0, padding: Vec4(2.0, 0.0, 0.0, 4.0)))
                     ui.label("SNAIL CHESS", heading)
-                    ui.label(format(&line, "Ready to play, {person}?"), UiTextStyle(face: fonts.serif, size: 30.0, color: theme.ink))
+                    ui.paragraph(format(&line, "Ready to play, {person}?"), UiTextStyle(face: fonts.serif, size: 30.0, color: theme.ink))
                 lichess_hero(app, theme, fonts, lichess, stacked, asks)
                 with ui.open(UiNode(flow: stacked ? FlowColumn : FlowRow, width: UiSize.grow(), gap: 14.0))
                     hero(app, theme, fonts, record, quick, asks)
@@ -83,19 +83,19 @@ fn lichess_hero(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, lp: *Liche
             with ui.open(UiNode(width: UiSize.grow(), gap: 3.0, clip: true))
                 ui.label("PLAY ON LICHESS", small)
                 if not lp.signed_in()
-                    ui.label("Real opponents, rapid and classical", big)
-                    ui.label("Play on Lichess against real players, on the 2D board or the 3D table.", note)
+                    ui.label("Real opponents, rapid and classical", big, UiNode(clip: true))
+                    ui.label("Play on Lichess against real players, on the 2D board or the 3D table.", note, UiNode(clip: true))
                 elif lp.playing()
                     let g = &lp.game
-                    ui.label("Game in progress", big)
-                    ui.label(format(&line, "Against {lp.white ? g.black.name.text() : g.white.name.text()}  ·  {g.initial_ms / 60000}+{g.increment_ms / 1000}"), note)
+                    ui.label("Game in progress", big, UiNode(clip: true))
+                    ui.label(format(&line, "Against {lp.white ? g.black.name.text() : g.white.name.text()}  ·  {g.initial_ms / 60000}+{g.increment_ms / 1000}"), note, UiNode(clip: true))
                 elif searching
-                    ui.label(format(&line, "Finding a {lp.seek_rated ? "rated" : "casual"} {lp.seek_minutes}+{lp.seek_increment} game"), big)
+                    ui.label(format(&line, "Finding a {lp.seek_rated ? "rated" : "casual"} {lp.seek_minutes}+{lp.seek_increment} game"), big, UiNode(clip: true))
                     let t = (now - lp.searched_ns) / 1000000000
                     ui.label(format(&clock, "{t / 60}:{t % 60:02}"), UiTextStyle(face: fonts.mono, size: 12.5, color: theme.muted))
                 else
-                    ui.label(lp.name.text(), big)
-                    ui.label(format(&line, "Rapid {lp.rapid}  ·  Classical {lp.classical}"), note)
+                    ui.label(lp.name.text(), big, UiNode(clip: true))
+                    ui.label(format(&line, "Rapid {lp.rapid}  ·  Classical {lp.classical}"), note, UiNode(clip: true))
             if not lp.signed_in()
                 if play_button(ui, theme, fonts, lp.state == LichessChecking ? "Signing in…" : "Set up Lichess"): asks.lichess = true
             elif lp.playing()
@@ -108,7 +108,7 @@ fn lichess_hero(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, lp: *Liche
             with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 14.0, align: Vec2(0.0, 0.5)))
                 ui.spacer()
                 lichess_seek_row(ui, theme, fonts, lp)
-        if lp.problem.len > 0 and lp.state != LichessSignedOut: ui.label(lp.problem.text(), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.loss()))
+        if lp.problem.len > 0 and lp.state != LichessSignedOut: ui.paragraph(lp.problem.text(), UiTextStyle(face: fonts.strong, size: 12.5, color: theme.loss()))
 
 fn lichess_seek_row(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, lp: *LichessPlay)
     var line: [120]u8
@@ -270,7 +270,7 @@ fn queue(app: *DesktopApp, theme: *GuiTheme, fonts: *GuiFonts, record: *PlayerRe
             avatar(ui, theme, fonts, t)
             with ui.open(UiNode(gap: 3.0))
                 with ui.open(UiNode(flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
-                    ui.label(t.name_text(), UiTextStyle(face: fonts.strong, size: 15.0, color: theme.ink))
+                    ui.label(t.name_text(), UiTextStyle(face: fonts.strong, size: 15.0, color: theme.ink), UiNode(clip: true))
                     ui.label(t.full() ? "Full strength" : format(&line, "{t.elo}"), UiTextStyle(face: fonts.strong, size: 15.0, color: theme.muted))
                     style_tag(ui, theme, fonts, t.style)
                 var drawn: [16]u8
@@ -317,7 +317,7 @@ fn side_card(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, name: str, title
     let h = ui.interact(o.id)
     let lit = ui.spring(o.id, 0, h.hovered or h.focused and ui.keyboard_nav ? 1.0 : 0.0, 20.0)
     ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.35 * lit)), radius: Vec4.splat(CardCurve), border: 1.0, border_color: theme.line.lerp(theme.muted, 0.3 * lit)))
-    ui.label(title, UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink))
+    ui.label(title, UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink), UiNode(clip: true))
     ui.paragraph(line, UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted), UiNode(width: UiSize.grow()))
     ui.spacer()
     with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 4.0, align: Vec2(0.0, 0.5)))
@@ -353,10 +353,10 @@ fn recent(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, played: *PlayedInde
             with ui.open(UiNode(name: "result", width: UiSize.fixed(32.0), height: UiSize.fixed(32.0), align: Vec2(0.5, 0.5), box: UiBox(fill: UiFill.solid(c.with_alpha(theme.dark ? 0.2 : 0.14)), radius: Vec4.splat(ControlCurve))))
                 ui.label(letter, UiTextStyle(face: fonts.strong, size: 13.5, color: c))
             with ui.open(UiNode(width: UiSize.grow(), gap: 3.0, clip: true))
-                ui.label(opponent, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink))
+                ui.label(opponent, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink), UiNode(clip: true))
                 let said = o == 1 ? "Won" : o == 0 ? "Drawn" : o == -1 ? "Lost" : "Unfinished"
                 var clock: [24]u8
-                ui.label(format(&line, "{SpeedNames[g.speed]} {g.speed != SpeedInfinite ? clock_of_pgn(played.text(g.clock), &clock) : ""}  ·  {said}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+                ui.label(format(&line, "{SpeedNames[g.speed]} {g.speed != SpeedInfinite ? clock_of_pgn(played.text(g.clock), &clock) : ""}  ·  {said}"), UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(clip: true))
             if g.changed
                 let cc = g.change > 0 ? theme.gain() : g.change < 0 ? theme.loss() : theme.muted
                 with ui.open(UiNode(name: "change", padding: Vec4(8.0, 3.0, 8.0, 4.0), box: UiBox(fill: UiFill.solid(cc.with_alpha(theme.dark ? 0.18 : 0.12)), radius: Vec4.splat(5.0))))
@@ -371,8 +371,8 @@ fn card(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, icons: *LineIcons, na
     ui.elements[o.index].node.box = theme.wear(UiBox(fill: UiFill.solid(theme.surface.lerp(theme.line, 0.35 * lit)), radius: Vec4.splat(CardCurve), border: 1.0, border_color: theme.line.lerp(theme.muted, 0.3 * lit), shadow: UiShadow(Color(0.0, 0.0, 0.0, (theme.dark ? 0.16 : 0.04) * (0.5 + 0.5 * lit)), 0.0, 2.0, 10.0, 0.0, false)))
     icon_tile(ui, theme, icons, icon, 38.0, lit)
     with ui.open(UiNode(width: UiSize.grow(), gap: 3.0, clip: true))
-        ui.label(title, UiTextStyle(face: fonts.strong, size: 13.5, color: theme.ink))
-        ui.label(line, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted))
+        ui.label(title, UiTextStyle(face: fonts.strong, size: 13.5, color: theme.ink), UiNode(clip: true))
+        ui.label(line, UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted), UiNode(clip: true))
     ui.mark(MarkRight, 14.0, theme.muted.lerp(theme.ink, lit))
     ui.close()
     return h.clicked

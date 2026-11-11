@@ -178,7 +178,7 @@ struct AnalysisPanel
         var named: [200]u8
         let name = entry ? entry.display_name() : a.engine.name_len > 0 ? a.engine.display_name() : "No engine"
         let p = entry and a.profile_id != 0 ? entry.profile(a.profile_id) : null
-        ui.label(p ? format(&named, "{name} · {p.name_text()}") : name, UiTextStyle(face: look.fonts.strong, size: 12.5, color: look.theme.ink))
+        ui.label(p ? format(&named, "{name} · {p.name_text()}") : name, UiTextStyle(face: look.fonts.strong, size: 12.5, color: look.theme.ink), UiNode(clip: true))
         ui.tooltip("Choose engine")
         ui.close()
 

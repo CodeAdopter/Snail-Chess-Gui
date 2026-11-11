@@ -108,7 +108,7 @@ struct HistoryView
         var big: [24]u8
         with list.middle()
             with list.line()
-                ui.label(c.name_text(), UiTextStyle(face: list.fonts.strong, size: 13.5, color: theme.ink))
+                ui.label(c.name_text(), UiTextStyle(face: list.fonts.strong, size: 13.5, color: theme.ink), UiNode(clip: true))
                 ui.label(match_kind ? "Match" : "Tournament", UiTextStyle(face: list.fonts.text, size: 12.0, color: theme.muted), UiNode(padding: Vec4(4.0, 0.0, 0.0, 0.0)))
             let book = c.book == NoEventBook ? "no book" : c.book_name_text()
             if match_kind and s.tallies.len == 2: list.note(format(&line, "{c.entrants[0].name_text()} {s.tallies[0].points():.1} – {s.tallies[1].points():.1} {c.entrants[1].name_text()}  ·  {book}  ·  {day_short(day, &when)}"))

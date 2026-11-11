@@ -169,7 +169,7 @@ struct DatabasesView
             return
         var line: [400]u8
         with ui.modal("removedatabase", ref removing, 420.0)
-            ui.label(format(&line, "Remove {d.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(format(&line, "Remove {d.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
             ui.paragraph(format(&line, "Delete the imported copy of {d.count} games and its index. The original PGN file will be kept."), UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
             with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
                 ui.spacer()

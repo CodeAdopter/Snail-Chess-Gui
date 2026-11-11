@@ -134,7 +134,7 @@ struct GameCards
         let theme = look.theme
         let name = played.text(side == 0 ? g.white : g.black)
         ui.leaf(UiNode(width: UiSize.fixed(9.0), height: UiSize.fixed(9.0), box: UiBox(fill: UiFill.solid(side == 0 ? Color.hex(0xF2EFE8) : Color.hex(0x222222)), radius: Vec4.splat(4.5), border: 1.0, border_color: theme.muted.with_alpha(0.7))))
-        ui.label(name.len > 0 ? name : "?", UiTextStyle(face: side == g.person ? look.fonts.strong : look.fonts.text, size: size, color: name.len > 0 ? theme.ink : theme.muted))
+        ui.label(name.len > 0 ? name : "?", UiTextStyle(face: side == g.person ? look.fonts.strong : look.fonts.text, size: size, color: name.len > 0 ? theme.ink : theme.muted), UiNode(clip: true))
 
     fn rating_note(ui: *UiCanvas, look: *BoardLook, g: *PlayedGame, side: int)
         let theme = look.theme

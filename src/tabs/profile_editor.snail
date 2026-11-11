@@ -133,7 +133,7 @@ struct ProfileEditor
                             for k in 0..press_len
                                 press_name[k] = name[k]
                         ui.label("Send this command to active analyses using this engine", muted)
-                    else: ui.label(value, muted)
+                    else: ui.label(value, muted, UiNode(clip: true))
             if not given: ui.leaf(UiNode(width: UiSize.fixed(DefaultButtonWidth)))
             elif ui.button("Default", false, UiNode(width: UiSize.fixed(DefaultButtonWidth)))
                 set(lib, p, name, default, default)
@@ -186,7 +186,7 @@ struct ProfileEditor
         let ui = &app.ui
         var line: [160]u8
         with ui.modal("deleteprofile", ref deleting, 400.0)
-            ui.label(format(&line, "Delete the profile {p.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(format(&line, "Delete the profile {p.name_text()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
             ui.paragraph("Analyses using this profile will switch to Default.", UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted))
             with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
                 ui.spacer()

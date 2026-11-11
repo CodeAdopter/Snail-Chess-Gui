@@ -214,7 +214,7 @@ struct InstallPopup
         with sheet.body()
             match stage
                 StageChoosing
-                    ui.label(format(&line, "CPU: {list.cpu.name()} · Recommended build: {cpu_text(&list.cpu)}"), note)
+                    ui.paragraph(format(&line, "CPU: {list.cpu.name()} · Recommended build: {cpu_text(&list.cpu)}"), note)
                     let trust = trust_of(c, &c.engines[engine])
                     let doubtful = trust.level() == TrustLow
                     if doubtful
@@ -242,7 +242,7 @@ struct InstallPopup
                         ui.spacer()
                         if ui.button("Cancel"): showing = false
                 StagePicking
-                    ui.label(format(&line, "{job_asset()} contains {job.programs.len} executables"), title)
+                    ui.paragraph(format(&line, "{job_asset()} contains {job.programs.len} executables"), title)
                     ui.paragraph("Select the executables to add. The recommended build for this computer is selected.", note)
                     with ui.scroll_area("programs", gap: 2.0, node: UiNode(width: UiSize.grow(), height: UiSize.fit(0.0, InstallListHeight)))
                         for i in 0..job.programs.len as int

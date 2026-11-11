@@ -117,7 +117,7 @@ struct EnginesPage
                     removing = true
         var path: [600]u8
         with kit.card(2, "Engine source")
-            fact_row(&kit, 20, "Program", lib.exe_path(id, &path))
+            path_row(&kit, 20, "Program", lib.exe_path(id, &path))
             fact_row(&kit, 21, "Source", source_text(e))
             let o = &e.origin
             if o.known()
@@ -179,7 +179,7 @@ struct EnginesPage
         var line: [700]u8
         var path: [600]u8
         with ui.modal("removeengine", ref removing, 440.0)
-            ui.label(format(&line, "Uninstall {e.display_name()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
+            ui.paragraph(format(&line, "Uninstall {e.display_name()}?"), UiTextStyle(face: fonts.serif, size: 18.0, color: theme.ink))
             let note = UiTextStyle(face: fonts.text, size: 12.5, color: theme.muted)
             if e.copied: ui.paragraph("Delete this engine's files and profiles from the data folder. Existing tournament games will be kept.", note)
             else: ui.paragraph(format(&line, "Remove this engine and its profiles from the library. The executable will remain at {lib.exe_path(confirm_id, &path)}"), note)

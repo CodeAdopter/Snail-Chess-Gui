@@ -535,7 +535,7 @@ struct TournamentDraft
         var title: [120]u8
         let muted = UiTextStyle(face: fonts.text, size: 12.0, color: theme.muted)
         with ui.modal("draftchanges", ref show, 620.0)
-            ui.label(format(&title, "Changes for {e.name_text()}"), UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink))
+            ui.paragraph(format(&title, "Changes for {e.name_text()}"), UiTextStyle(face: fonts.serif, size: 19.0, color: theme.ink))
             renamed.clear()
             for v in e.changes.values
                 if renamed.len > 0: push_text(&renamed, ", ")

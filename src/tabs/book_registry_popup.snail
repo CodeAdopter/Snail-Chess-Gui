@@ -83,7 +83,7 @@ struct BookRegistryPopup
         var line: [300]u8
         var size: [40]u8
         var unpacked: [40]u8
-        ui.label(c.text(b.name), UiTextStyle(face: fonts.serif, size: 26.0, color: theme.ink))
+        ui.paragraph(c.text(b.name), UiTextStyle(face: fonts.serif, size: 26.0, color: theme.ink))
         if b.description.len > 0: ui.paragraph(c.text(b.description), UiTextStyle(face: fonts.text, size: 12.5, color: theme.ink))
         fact(ui, fonts, theme, "Holds", format(&line, "{b.positions} positions, {b.pgn ? "as PGN lines" : "as EPD"}"))
         fact(ui, fonts, theme, "Kind", c.text(b.category))

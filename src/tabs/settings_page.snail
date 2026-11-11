@@ -761,7 +761,7 @@ struct SettingsPage
             with ui.open(UiNode(key: k, flow: FlowRow, width: UiSize.fixed(min(420.0, kit.width - 36.0)), height: UiSize.fixed(44.0), gap: 12.0, align: Vec2(0.0, 0.5), padding: Vec4(4.0, 0.0, 12.0, 0.0), box: UiBox(fill: UiFill.solid(theme.sunken), radius: Vec4.splat(4.0))))
                 with ui.open(UiNode(width: UiSize.fixed(36.0), height: UiSize.fixed(36.0), align: Vec2(0.5, 0.5), box: box))
                     ui.label(place, UiTextStyle(face: fonts.strong, size: 15.0, color: tint))
-                ui.label(name, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow()))
+                ui.label(name, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink), UiNode(width: UiSize.grow(), clip: true))
                 ui.label(score, UiTextStyle(face: fonts.strong, size: 13.0, color: theme.ink))
 
     fn settings(app: *DesktopApp, s: *Settings, look: *BoardLook, data: *DataFolder, token: *GithubToken) -> bool
@@ -769,7 +769,6 @@ struct SettingsPage
         let theme = look.theme
         let note = muted_style(look)
         var changed = false
-        var line: [700]u8
         with kit.card(1, "You")
             with kit.row(10, "Your name", "Your name in games against engines. Leave blank to use your Windows account name.")
                 if ui.text_field("profilename", &name, s.person_name(), UiNode(width: UiSize.fixed(KitControl)))
@@ -817,8 +816,7 @@ struct SettingsPage
                     changed = true
             if kit.choice(40, "Engine process priority", "Lower priorities give other applications more CPU time. Engines started after the change use the new priority.", ref s.priority, PriorityChoices): changed = true
         with kit.card(5, "Your data")
-            with kit.row(50, "Data folder", data.root_text())
-                if ui.button("Open"): SDL_OpenURL(format(&line, "file:///{data.root_text()}").ptr as cstr)
+            path_row(&kit, 50, "Data folder", data.root_text())
             with kit.row(51, "GitHub token", "Optional. A token raises the request limit when checking engine releases. It is sent only to the GitHub API and hidden after saving.")
                 with ui.open(UiNode(name: "tokencontrols", flow: FlowRow, gap: 8.0, align: Vec2(0.0, 0.5)))
                     if token.saved()

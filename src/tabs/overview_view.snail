@@ -58,7 +58,7 @@ struct OverviewView
                 ui.label(format(&n, "{r.shown()}"), UiTextStyle(face: fonts.strong, size: 26.0, color: r.games == 0 ? theme.muted : theme.ink))
                 if r.provisional(): ui.label("?", UiTextStyle(face: fonts.strong, size: 20.0, color: theme.muted))
                 ui.spacer()
-                if peaks[s] > 0: ui.label(format(&line, "Peak {peaks[s]}"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted), UiNode(padding: Vec4(0.0, 0.0, 0.0, 4.0)))
+                if peaks[s] > 0: ui.label(format(&line, "Peak {peaks[s]}"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted), UiNode(padding: Vec4(0.0, 0.0, 0.0, 4.0), clip: true))
             trend_line(ui, theme, fonts, s, w - 28.0)
             wdl_bar(ui, theme, r.wins, r.draws, r.losses, 5.0)
             ui.label(r.games == 0 ? format(&line, "No games yet") : format(&line, "{r.games} games  ·  {r.wins}W {r.draws}D {r.losses}L"), UiTextStyle(face: fonts.text, size: 11.5, color: theme.muted))

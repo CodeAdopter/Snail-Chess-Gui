@@ -113,7 +113,7 @@ struct AddFromFile
         with ui.modal("addengine", ref showing, 480.0)
             match step
                 AddChoosing
-                    ui.label(format(&line, "Add {name}"), title)
+                    ui.paragraph(format(&line, "Add {name}"), title)
                     ui.paragraph(exe_text(), note)
                     ui.radio("Use original location", ref copy_in, 0)
                     ui.radio("Copy to library", ref copy_in, 1)
@@ -129,13 +129,13 @@ struct AddFromFile
                         if ui.button("Cancel"): showing = false
                         if ui.button("Add", true): begin(ui, lib)
                 AddProbing
-                    ui.label(format(&line, "Detecting engine: {name}"), title)
+                    ui.paragraph(format(&line, "Detecting engine: {name}"), title)
                     ui.paragraph("Checking UCI support and engine readiness. Each check has a 10-second timeout.", note)
                     with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
                         ui.spacer()
                         if ui.button("Cancel"): showing = false
                 AddFailed
-                    ui.label(format(&line, "{name} could not be added"), title)
+                    ui.paragraph(format(&line, "{name} could not be added"), title)
                     ui.paragraph(probe.engine.failure_text(), body)
                     let out = probe.output_text()
                     if out.len == 0: ui.paragraph("The engine produced no output.", note)
