@@ -104,6 +104,8 @@ struct SettingsPage
     theme_group: int
     theme_pick: ColourPicker
     accent_pick: ColourPicker
+    preview_scroll: f32
+    preview_frame: u32
     finish_group: int
     shelf_ids: [4]u32
     preview: BoardView
@@ -309,27 +311,42 @@ struct SettingsPage
         let ui = &app.ui
         let g = settings_group(section)
         let wide = w >= ArrowsWide
-        let size = floor((wide ? clamp(w * 0.34, 300.0, 480.0) : clamp(min(w - side * 2.0, h * 0.4), 200.0, 400.0)) / 8.0) * 8.0
-        let bx = wide ? x + w - side - size : x + side
-        let by = top + SettingsTop + (wide ? 8.0 : SettingsHeader + 8.0)
-        var changed = false
-        if not wide
-            with ui.open(UiNode(name: "arrowstitle", floating: true, offset: Vec2(x + side, top + SettingsTop), width: UiSize.fixed(w - side * 2.0), height: UiSize.fixed(SettingsHeader), clip: true))
-                kit.title(SettingsGroups[g], SettingsSections[section], SettingsAbout[section])
-        let cx = x
-        let cy = wide ? top : by + size + LegendTall + 8.0
+        let size = floor((wide ? min(clamp(w * 0.34, 300.0, 480.0), max(h - LegendTall - SettingsTop * 2.0, 200.0)) : clamp(min(w - side * 2.0, h * 0.4), 200.0, 400.0)) / 8.0) * 8.0
         let cw = wide ? w - size - side - 24.0 : w
         kit.width = min(max(cw - side * 2.0, 1.0), KitColumn)
-        with ui.open(UiNode(name: "profilebody", floating: true, offset: Vec2(cx, cy), width: UiSize.fixed(cw), height: UiSize.fixed(max(top + h - cy, 1.0)), clip: true))
-            with ui.scroll_area("profilescroll", node: UiNode(key: section, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(side, wide ? SettingsTop : 8.0, side, 40.0)))
+        var bx = x + side
+        var by = top + SettingsTop + SettingsHeader + 12.0
+        var changed = false
+        with ui.open(UiNode(name: "profilebody", floating: true, offset: Vec2(x, top), width: UiSize.fixed(cw), height: UiSize.fixed(h), clip: true))
+            with area = ui.scroll_area("profilescroll", node: UiNode(key: section, width: UiSize.grow(), height: UiSize.grow(), padding: Vec4(side, SettingsTop, side, 40.0)))
+                let scrolled = ui.memory(area.id).scroll.y
                 with ui.open(UiNode(name: "profilecolumn", width: UiSize.fixed(kit.width), gap: 8.0))
-                    if wide: kit.title(SettingsGroups[g], SettingsSections[section], SettingsAbout[section])
+                    kit.title(SettingsGroups[g], SettingsSections[section], SettingsAbout[section])
+                    if not wide
+                        with ui.open(UiNode(name: "arrowspreview", gap: 12.0, padding: Vec4(0.0, 4.0, 0.0, 8.0)))
+                            let spot = ui.open(UiNode(name: "arrowsboard", width: UiSize.fixed(size), height: UiSize.fixed(size)))
+                            ui.close()
+                            let r = ui.last_rect(spot.id)
+                            if r.z > 0.0 and preview_frame + 1 == ui.frame_number
+                                bx = r.x
+                                by = r.y + preview_scroll - scrolled
+                            else
+                                by -= scrolled
+                                ui.wake_in(0.0)
+                            preview_frame = ui.frame_number
+                            arrow_key(s, look, UiNode(name: "arrowkey", width: UiSize.fixed(size), gap: 8.0))
                     changed = arrow_choices(s, look)
+                preview_scroll = scrolled
+        if wide
+            bx = floor(x + side + kit.width + (w - side - kit.width - size) * 0.5)
+            by = floor(top + max((h - size - LegendTall) * 0.5, SettingsTop))
+            arrow_key(s, look, UiNode(name: "arrowkey", floating: true, offset: Vec2(bx, by + size + 12.0), width: UiSize.fixed(size), gap: 8.0))
+        ui.clip_to(x, top, w, h)
         preview_arrows(app, s, look, bx, by, size)
+        ui.unclip()
         return changed
 
     fn preview_arrows(app: *DesktopApp, s: *Settings, look: *BoardLook, x: f32, y: f32, size: f32)
-        let ui = &app.ui
         var b: Board
         b.load_fen(StartFen)
         var shown = *look
@@ -343,16 +360,19 @@ struct SettingsPage
             for k in 0..ArrowKinds: preview.arrow(froms[k], tos[k], shown.arrow_colors[k], s.engine_arrows.width)
         if s.note_arrows.on: preview.arrow(Square.at(1, 0), Square.at(2, 2), look.note_arrow, look.note_width)
         preview.draw(app, &shown, &b, NoMove, board_place(x, y, size, app.scale), false, false)
+
+    fn arrow_key(s: *Settings, look: *BoardLook, node: UiNode)
+        let ui = kit.ui
         let theme = look.theme
         let note = muted_style(look)
-        with ui.open(UiNode(name: "arrowkey", floating: true, offset: Vec2(x, y + size + 12.0), width: UiSize.fixed(size), gap: 8.0))
+        with ui.open(node)
             for r in 0..3
                 with ui.open(UiNode(key: r as int, flow: FlowRow, width: UiSize.grow()))
                     for c in 0..2
                         let k = r * 2 + c
                         let on = k < ArrowKinds ? s.engine_arrows.on : s.note_arrows.on
                         with ui.open(UiNode(key: c as int, flow: FlowRow, width: UiSize.grow(), gap: 8.0, align: Vec2(0.0, 0.5)))
-                            let paint = k < ArrowKinds ? shown.arrow_colors[k] : look.note_arrow
+                            let paint = k < ArrowKinds ? look.arrow_colors[k] : look.note_arrow
                             ui.leaf(UiNode(width: UiSize.fixed(22.0), height: UiSize.fixed(6.0), box: UiBox(fill: UiFill.solid(on ? paint : theme.line), radius: Vec4.splat(3.0))))
                             ui.label(k < ArrowKinds ? ArrowKindLabels[k] : "Your arrow", note)
 
