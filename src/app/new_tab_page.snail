@@ -201,7 +201,7 @@ fn opponent(ui: *UiCanvas, theme: *GuiTheme, fonts: *GuiFonts, record: *PlayerRe
                 asks.changed = true
         with ui.open(UiNode(flow: FlowRow, width: UiSize.grow(), height: UiSize.fixed(32.0), gap: 12.0, align: Vec2(0.0, 0.5)))
             let pace = not record.natural ? "The engine uses a fixed response time." : record.infinite ? "Without a clock, the engine uses a longer thinking time." : "The engine manages its thinking time based on the clock."
-            if not record.chosen: ui.label(format(&line, "Match with an opponent near your rating, with a random playing style. {pace}"), note)
+            if not record.chosen: ui.label(format(&line, "Match with a snail opponent near your rating that has a random playing style."), note)
             else
                 var v = record.chosen_elo as f32
                 with ui.open(UiNode(width: UiSize.grow(), align: Vec2(0.0, 0.5)))
