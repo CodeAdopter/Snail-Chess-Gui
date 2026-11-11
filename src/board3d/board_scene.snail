@@ -217,8 +217,8 @@ struct BoardScene
     parts_now: SceneParts
     parts_keep: bool
     cutting: bool
-    cut: Vec4
-    shade_cut: Vec4
+    cuts: PartCuts
+    shade_cuts: PartCuts
     placed_rect: [MaxMen]Vec4
     placed_light: [MaxMen]Vec4
     mesh_known: [SceneMeshes]bool
@@ -1102,10 +1102,10 @@ struct BoardScene
         if not reuse
             props.print(&app.gpu, &app.ui, &renderer, &frame, &desk, s.fonts, s.accent, s.accent_ink, style.card)
             frame.lap("props")
-        let cut_at = cutting ? cut : Vec4(0.0, 0.0, 0.0, 0.0)
         if big.handle
             render_view(&frame, big, reuse, keep)
-            shrink.run(&app.gpu, &frame, big, into, cut_at)
+            if cutting: shrink.run_cuts(&app.gpu, &frame, big, into, cuts.rects[0..cuts.count])
+            else: shrink.run(&app.gpu, &frame, big, into)
             frame.lap("shrink")
         else: render_view(&frame, into, reuse, keep)
         cutting = false
@@ -1116,22 +1116,25 @@ struct BoardScene
     fn render_view(frame: *Frame, into: *Texture, reuse: bool, keep: bool)
         if cutting
             let shade = &renderer.shadows[0]
-            if shade_cut.x >= shade_cut.z or shade_cut.y >= shade_cut.w: shade.every_frame = false
-            else
-                shade.parting = true
-                shade.part = [shade_cut.x as int, shade_cut.y as int, (shade_cut.z - shade_cut.x) as int, (shade_cut.w - shade_cut.y) as int]
-            renderer.again_part_into(frame, &camera, into, cut.x as int, cut.y as int, (cut.z - cut.x) as int, (cut.w - cut.y) as int)
+            if shade_cuts.count == 0: shade.every_frame = false
+            for k in 0..shade_cuts.count
+                let c = shade_cuts.rects[k]
+                shade.parts[k] = [c.x as int, c.y as int, (c.z - c.x) as int, (c.w - c.y) as int]
+            shade.part_count = shade_cuts.count
+            renderer.render_parts_into(frame, &camera, into, cuts.rects[0..cuts.count])
             parts.take(&parts_now)
-        elif reuse: renderer.again_into(frame, &camera, into)
-        elif (keep or parts_keep) and renderer.render_kept_into(frame, &camera, into)
-            kept_key = keep ? layer_key : 0
+            return
+        if reuse
+            renderer.again_into(frame, &camera, into)
+            return
+        if keep and renderer.render_kept_into(frame, &camera, into)
+            kept_key = layer_key
             kept_ns = now_ns()
-            if parts_keep: parts.take(&parts_now)
-            else: parts.base = 0
         else
             kept_key = 0
-            parts.base = 0
             renderer.render_into(frame, &camera, into)
+        if parts_keep: parts.take(&parts_now)
+        else: parts.base = 0
 
     fn draw_den(app: *DesktopApp, s: *BoardShow, into: *Texture, big: *Texture)
         kept_key = 0
@@ -1179,43 +1182,38 @@ struct BoardScene
             h = hash_word(h, a.from as u64 | (a.to as u64) << 8 | (pack_color(a.color) as u64) << 16 | ((a.width * 1000.0) as i64 as u64) << 48)
         return h
 
-    # Whether this frame draws whole, draws again only the cut where parts changed since the last
+    # Whether this frame draws whole, draws again only the cuts where parts changed since the last
     # one kept, or has nothing new to draw. Only the plain room with solid pieces is drawn in parts,
     # as the rooms blur and mirrors and glass show what lies far off.
     fn plan_part(s: *BoardShow, drawn: *Texture) -> int
         cutting = false
         parts_keep = false
         if style.room != NoRoom or see_through(style.set) or board_mirrors(style.board) or s.fx.on: return PartWhole
-        if quality.samples < 2 or renderer.set_in_use != 0 or has_arg("--no-parts"): return PartWhole
+        if renderer.set_in_use != 0 or not renderer.parts_drawable() or has_arg("--no-parts"): return PartWhole
         let w = drawn.width as f32
         let h = drawn.height as f32
         parts_now.clear(parts_base(s, drawn))
         list_parts(s, w, h)
         parts_keep = not parts_now.full
         if not parts_keep or parts.base != parts_now.base: return PartWhole
-        let (r, light) = changed_rects(&parts, &parts_now)
-        if r.x >= r.z or r.y >= r.w: return PartNone
         let map = quality.shadow as f32
-        shade_cut = Vec4(max(floor(light.x), 0.0), max(floor(light.y), 0.0), min(ceil(light.z), map), min(ceil(light.w), map))
-        let x0 = max(floor(r.x), 0.0)
-        let y0 = max(floor(r.y), 0.0)
-        let x1 = min(ceil(r.z), w)
-        let y1 = min(ceil(r.w), h)
-        if x0 >= x1 or y0 >= y1: return PartNone
-        if (x1 - x0) * (y1 - y0) > w * h * 0.6: return PartWhole
-        cut = Vec4(x0, y0, x1, y1)
+        changed_parts(&parts, &parts_now, &cuts, &shade_cuts, w, h, map)
+        if cuts.count == 0: return PartNone
+        cuts.merge(w * h * CutCost, MaxCuts)
+        if cuts.area() > w * h * 0.6: return PartWhole
+        shade_cuts.merge(map * map * CutCost, MaxShadowParts)
         cutting = true
         return PartSome
 
     # Everything drawn that is not a part of its own, so a frame drawn in parts looks as one drawn
     # whole.
     fn parts_base(s: *BoardShow, drawn: *Texture) -> u64
-        var h = hash_word(style.key(), (drawn.width | drawn.height << 16) as u64 | (quality.samples as u64) << 32 | (quality.shadow as u64) << 40)
+        var h = mix_word(style.key(), (drawn.width | drawn.height << 16) as u64 | (quality.samples as u64) << 32 | (quality.shadow as u64) << 40)
         h = hash_floats(hash_floats(h, camera.position.x, camera.position.y), camera.position.z, camera.fov_y)
         h = hash_floats(hash_floats(h, camera.rotation.x, camera.rotation.y), camera.rotation.z, camera.rotation.w)
         h = hash_color(hash_color(hash_color(h, s.page), s.accent), s.accent_ink)
-        h = hash_word(h, ((s.flat_arrows ? 1 : 0) as u64) | ((clock_stands ? 1 : 0) as u64) << 1 | ((s.free ? 1 : 0) as u64) << 2)
-        return hash_word(h, s.fonts as u64)
+        h = mix_word(h, ((s.flat_arrows ? 1 : 0) as u64) | ((clock_stands ? 1 : 0) as u64) << 1 | ((s.free ? 1 : 0) as u64) << 2)
+        return mix_word(h, s.fonts as u64)
 
     # Each piece, mark, arrow, card and the clock, with the pixels it and its shadow can touch.
     fn list_parts(s: *BoardShow, w: f32, h: f32)
@@ -1236,7 +1234,7 @@ struct BoardScene
             let foot = foot_width(k as Kind) * 3.4
             r = rect_union(r, seen_rect(&camera, Vec3(p.at.x - foot, -0.02, p.at.z - foot), Vec3(p.at.x + foot, 0.02, p.at.z + foot), w, h, none, 0.0, false))
             placed_rect[i] = r
-            var key = hash_word(0x91ECE, p.kind as u64 | ((p.fx + 1) as u64) << 8 | ((p.ghost ? 1 : 0) as u64) << 20 | (p.level as u64) << 24)
+            var key = mix_word(0x91ECE, p.kind as u64 | ((p.fx + 1) as u64) << 8 | ((p.ghost ? 1 : 0) as u64) << 20 | (p.level as u64) << 24)
             key = hash_floats(hash_floats(key, p.at.x, p.at.y), p.at.z, p.angle)
             key = hash_floats(hash_floats(hash_color(key, p.tint), p.squash, p.lean.x), p.lean.y, 0.0)
             parts_now.add(key, r, placed_light[i])
@@ -1253,13 +1251,15 @@ struct BoardScene
             if marks == 0: continue
             let c = square_centre(at)
             let tint = marks & 60 != 0 ? hash_color(0, s.target) : 0
-            parts_now.add(hash_word(sq as u64 | marks << 8, tint), seen_rect(&camera, c - Vec3(0.56, 0.02, 0.56), c + Vec3(0.56, 0.05, 0.56), w, h, none, 0.0, false))
+            parts_now.add(mix_word(sq as u64 | marks << 8, tint), seen_rect(&camera, c - Vec3(0.56, 0.02, 0.56), c + Vec3(0.56, 0.05, 0.56), w, h, none, 0.0, false))
+        settle_bends(s)
         for i in 0..s.arrow_count
             let a = &s.arrows[i]
             let from = square_centre(a.from)
             let to = square_centre(a.to)
             let taken = s.board.squares[a.to]
-            var key = hash_word(a.from as u64 | (a.to as u64) << 8 | (taken as u64) << 16, (s.flat_arrows ? 1 : 0) as u64)
+            let bend = s.flat_arrows ? bends.bend[i] : Square.none
+            var key = mix_word(a.from as u64 | (a.to as u64) << 8 | (taken as u64) << 16 | (bend as u64) << 24, (s.flat_arrows ? 1 : 0) as u64)
             key = hash_floats(hash_color(key, a.color), a.width, 0.0)
             let lo = Vec3(min(from.x, to.x), -0.02, min(from.z, to.z))
             let hi = Vec3(max(from.x, to.x), 0.05, max(from.z, to.z))
@@ -1280,12 +1280,15 @@ struct BoardScene
             let hi = at + Vec3(ClockDeep * 0.5 + 0.1, ClockTall + ButtonUp + ButtonTall + 0.1, ClockLong * 0.5 + 0.1)
             parts_now.add(desk.clock.key(), seen_rect(&camera, lo, hi, w, h, none, 0.0, false))
             parts_now.add(hash_floats(0xC10C, rocker, 0.0), seen_rect(&camera, lo, hi, w, h, sun, floor, true), map_rect(to_map, lo, hi, map, map))
+        # both cards are printed together, and printing again can change the one that did not, as
+        # letters a print lacked come in, so each is drawn again when either changes
+        let printed = mix_word(desk.cards[0].key(), desk.cards[1].key())
         for k in 0..2
             if not desk.cards[k].shown: continue
             let spot = Vec3(CardsX * x, -depth(), k == 0 ? CardsApart : -CardsApart)
             let lo = spot - Vec3(1.5, 0.02, 0.8)
             let hi = spot + Vec3(1.5, 1.6, 0.8)
-            parts_now.add(hash_word(desk.cards[k].key(), k as u64), seen_rect(&camera, lo, hi, w, h, sun, floor, true), map_rect(to_map, lo, hi, map, map))
+            parts_now.add(mix_word(printed, k as u64), seen_rect(&camera, lo, hi, w, h, sun, floor, true), map_rect(to_map, lo, hi, map, map))
 
     fn place_pieces(s: *BoardShow, t: f32)
         looks.field.clear()
@@ -1424,7 +1427,7 @@ struct BoardScene
         if layered: r.behind_layers = glass_layers() as u8
         for i in 0..placed_count
             let p = &placed[i]
-            if cutting and not rects_meet(placed_rect[i], cut) and not rects_meet(placed_light[i], shade_cut): continue
+            if cutting and not cuts.meets(placed_rect[i]) and not shade_cuts.meets(placed_light[i]): continue
             r.draw_layered(pieces, piece_mesh(p), piece_matrix(p, false), p.tint, layered ? glass_layer[i] : 0)
         if style.set == GooSet: draw_drops(r)
         let (felt, felt_twin) = looks.felt(r)
@@ -1433,10 +1436,7 @@ struct BoardScene
         if near: backdrop.draw(r, scene_lens())
         let board = s.board
         draw_marks(s)
-        bends.clear()
-        if s.flat_arrows
-            for i in 0..s.arrow_count: bends.add(s.arrows[i].from, s.arrows[i].to)
-            bends.settle()
+        settle_bends(s)
         for i in 0..s.arrow_count
             let a = &s.arrows[i]
             if a.from == a.to: renderer.draw_with(marks, meshes[RingMesh], Mat4.trs(square_centre(a.from) + Vec3(0.0, 0.008, 0.0), Quat.identity(), Vec3(0.44, 0.3, 0.44)), a.color)
@@ -1556,7 +1556,7 @@ struct BoardScene
         let tint = Color.hex(FeltColors[style.felt as int])
         for i in 0..placed_count
             let p = &placed[i]
-            if cutting and not rects_meet(placed_rect[i], cut) and not rects_meet(placed_light[i], shade_cut): continue
+            if cutting and not cuts.meets(placed_rect[i]) and not shade_cuts.meets(placed_light[i]): continue
             let wide = foot_scale(p.kind)
             let y = p.at.y - FeltThick
             renderer.draw_with(material, meshes[FeltMesh], Mat4.trs(Vec3(p.at.x, flipped ? -y : y, p.at.z), Quat.axis_angle(Vec3.up(), p.angle), Vec3(wide, flipped ? -1.0 : 1.0, wide)), tint)
@@ -1610,6 +1610,13 @@ struct BoardScene
         let tip = end - prev
         if tip.length > 0.0001
             renderer.draw_with(glow, meshes[HeadMesh], Mat4.trs((prev + end) * 0.5, Quat.between(Vec3.up(), tip.normalized), Vec3(thick * 3.0, tip.length, thick * 3.0)), c)
+
+    # Where each flat arrow of a knight's move turns, which steers clear of the other arrows
+    fn settle_bends(s: *BoardShow)
+        bends.clear()
+        if not s.flat_arrows: return
+        for i in 0..s.arrow_count: bends.add(s.arrows[i].from, s.arrows[i].to)
+        bends.settle()
 
     fn draw_flat(a: *ArcArrow, bend: Square)
         let lift = Vec3(0.0, 0.008, 0.0)

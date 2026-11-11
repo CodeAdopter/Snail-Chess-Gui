@@ -6,37 +6,53 @@ struct SceneShrink
     pipeline: *Pipeline
     sampler: *SDL_GPUSampler
 
-    # Big brought down into small, or only the part of small that the cut of big, x0 y0 x1 y1, reaches
-    # through the filter when one is given, the rest of small kept.
-    fn run(gpu: *Gpu, frame: *Frame, big: *Texture, small: *Texture, cut: Vec4 = Vec4(0.0, 0.0, 0.0, 0.0))
-        if pipeline == null
-            var desc: PipelineDesc
-            desc.vertex = shader("engine/shaders/post.hlsl", vertex: "fullscreen_vs")
-            desc.fragment = shader("shaders/shrink3d.hlsl", fragment: "shrink_ps")
-            desc.color_format = CaptureFormat
-            pipeline = gpu.pipeline(&desc)
-            sampler = gpu.sampler(false, false)
-        let sizes = Vec4(big.width as f32, big.height as f32, big.width as f32 / small.width as f32, big.height as f32 / small.height as f32)
-        var pass: Pass
-        if cut.z > cut.x
-            let x0 = max(floor(cut.x / sizes.z) as int - 3, 0)
-            let y0 = max(floor(cut.y / sizes.w) as int - 3, 0)
-            let x1 = min(ceil(cut.z / sizes.z) as int + 3, small.width)
-            let y1 = min(ceil(cut.w / sizes.w) as int + 3, small.height)
-            pass = frame.pass_over(small)
-            pass.scissor(x0, y0, x1 - x0, y1 - y0)
-        else: pass = frame.pass_to(small, Color.rgb(0.0, 0.0, 0.0), null)
+    # Big brought down into small.
+    fn run(gpu: *Gpu, frame: *Frame, big: *Texture, small: *Texture)
+        make(gpu)
+        let sizes = shrink_sizes(big, small)
+        var pass = frame.pass_to(small, Color.rgb(0.0, 0.0, 0.0), null)
         pass.bind(pipeline)
         pass.fragment_texture(0, big, sampler)
         pass.fragment_uniforms(0, &sizes, sizeof(Vec4))
         pass.draw(3)
         pass.end()
 
+    # Only the parts of small that cuts of big, each x0 y0 x1 y1, reach through the filter brought
+    # down, the rest of small kept.
+    fn run_cuts(gpu: *Gpu, frame: *Frame, big: *Texture, small: *Texture, cuts: []Vec4)
+        make(gpu)
+        let sizes = shrink_sizes(big, small)
+        var pass = frame.pass_over(small)
+        pass.bind(pipeline)
+        pass.fragment_texture(0, big, sampler)
+        pass.fragment_uniforms(0, &sizes, sizeof(Vec4))
+        for i in 0..cuts.len
+            let cut = cuts[i]
+            let x0 = max(floor(cut.x / sizes.z) as int - 3, 0)
+            let y0 = max(floor(cut.y / sizes.w) as int - 3, 0)
+            let x1 = min(ceil(cut.z / sizes.z) as int + 3, small.width)
+            let y1 = min(ceil(cut.w / sizes.w) as int + 3, small.height)
+            pass.scissor(x0, y0, x1 - x0, y1 - y0)
+            pass.draw(3)
+        pass.end()
+
+    fn make(gpu: *Gpu)
+        if pipeline: return
+        var desc: PipelineDesc
+        desc.vertex = shader("engine/shaders/post.hlsl", vertex: "fullscreen_vs")
+        desc.fragment = shader("shaders/shrink3d.hlsl", fragment: "shrink_ps")
+        desc.color_format = CaptureFormat
+        pipeline = gpu.pipeline(&desc)
+        sampler = gpu.sampler(false, false)
+
     fn release(gpu: *Gpu)
         if pipeline: gpu.release_pipeline(pipeline)
         if sampler: gpu.release_sampler(sampler)
         pipeline = null
         sampler = null
+
+fn shrink_sizes(big: *Texture, small: *Texture) -> Vec4
+    return Vec4(big.width as f32, big.height as f32, big.width as f32 / small.width as f32, big.height as f32 / small.height as f32)
 
 fn fit_target(gpu: *Gpu, t: *Texture, w: int, h: int) -> bool
     if t.handle and t.width == w and t.height == h: return false

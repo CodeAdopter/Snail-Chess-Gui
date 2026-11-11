@@ -2,6 +2,12 @@ use engine/scene/camera
 use engine/ui/text_cache
 
 const MaxSceneParts = 160
+const MaxPartCuts = 320
+
+# The most rects of the picture a frame is drawn again in, and what drawing one more costs, as a
+# share of the picture's pixels drawn, little as each is only wiped and finished on its own
+const MaxCuts = 8
+const CutCost: f32 = 0.002
 
 const PartWhole = 0
 const PartSome = 1
@@ -45,13 +51,53 @@ struct SceneParts
             rects[i] = from.rects[i]
             lights[i] = from.lights[i]
 
-# The pixels and the shadow map texels where was and now differ, the rects of the parts one holds
-# and the other does not, with x0 past x1 when they hold the same.
-fn changed_rects(was: *SceneParts, now: *SceneParts) -> (Vec4, Vec4)
+# Rects of pixels or shadow map texels, each x0 y0 x1 y1, that a frame drawn in parts draws again.
+struct PartCuts
+    rects: [MaxPartCuts]Vec4
+    count: int
+
+    # r on whole pixels within w by h, kept unless nothing of it is left
+    fn add(r: Vec4, w: f32, h: f32)
+        let c = Vec4(max(floor(r.x), 0.0), max(floor(r.y), 0.0), min(ceil(r.z), w), min(ceil(r.w), h))
+        if c.x >= c.z or c.y >= c.w or count == MaxPartCuts: return
+        rects[count] = c
+        count += 1
+
+    # Two rects at a time made one while drawing them as one draws no more than cost pixels beyond
+    # drawing them apart, or while more than most are left, the pair that grows least first.
+    fn merge(cost: f32, most: int)
+        while count > 1
+            var least: f32 = 1.0e30
+            var a = 0
+            var b = 1
+            for i in 0..count
+                for j in i + 1..count
+                    let grows = rect_area(rect_union(rects[i], rects[j])) - rect_area(rects[i]) - rect_area(rects[j])
+                    if grows >= least: continue
+                    least = grows
+                    a = i
+                    b = j
+            if least > cost and count <= most: return
+            rects[a] = rect_union(rects[a], rects[b])
+            count -= 1
+            rects[b] = rects[count]
+
+    fn area() -> f32
+        var sum: f32 = 0.0
+        for i in 0..count: sum += rect_area(rects[i])
+        return sum
+
+    fn meets(r: Vec4) -> bool
+        for i in 0..count
+            if rects_meet(r, rects[i]): return true
+        return false
+
+# The parts one of was and now holds and the other does not, their pixels of a w by h picture into
+# seen and their texels of a map by map shadow map into lit.
+fn changed_parts(was: *SceneParts, now: *SceneParts, seen: *PartCuts, lit: *PartCuts, w: f32, h: f32, map: f32)
+    seen.count = 0
+    lit.count = 0
     var taken: [MaxSceneParts]bool
-    for j in 0..was.count: taken[j] = false
-    var r = NoRect
-    var light = NoRect
     for i in 0..now.count
         var found = false
         for j in 0..was.count
@@ -60,18 +106,27 @@ fn changed_rects(was: *SceneParts, now: *SceneParts) -> (Vec4, Vec4)
             found = true
             break
         if found: continue
-        r = rect_union(r, now.rects[i])
-        light = rect_union(light, now.lights[i])
+        seen.add(now.rects[i], w, h)
+        lit.add(now.lights[i], map, map)
     for j in 0..was.count
         if taken[j]: continue
-        r = rect_union(r, was.rects[j])
-        light = rect_union(light, was.lights[j])
-    return r, light
+        seen.add(was.rects[j], w, h)
+        lit.add(was.lights[j], map, map)
+
+# h with w mixed in so that every bit of w stirs every bit of the result. hash_word's multiply
+# alone carries a change only toward the high bits, where two changes can cancel: a piece moved to
+# the square mirrored through the board's middle flips the sign bits of both x and z, and kept its
+# key.
+fn mix_word(h: u64, w: u64) -> u64
+    var x = (h ^ w) * 0x9E3779B97F4A7C15
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EB
+    return x ^ (x >> 31)
 
 # h with two floats hashed in by their exact bits, so a part that moves by the least amount is
 # drawn again, as even that shifts its shading
 fn hash_floats(h: u64, a: f32, b: f32) -> u64
-    return hash_word(h, (f32_bits(a) as u64) << 32 | f32_bits(b) as u64)
+    return mix_word(h, (f32_bits(a) as u64) << 32 | f32_bits(b) as u64)
 
 fn hash_color(h: u64, c: Color) -> u64
     return hash_floats(hash_floats(h, c.r, c.g), c.b, c.a)
@@ -81,6 +136,9 @@ fn rect_union(a: Vec4, b: Vec4) -> Vec4
 
 fn rects_meet(a: Vec4, b: Vec4) -> bool
     return a.x < b.z and a.z > b.x and a.y < b.w and a.w > b.y
+
+fn rect_area(r: Vec4) -> f32
+    return (r.z - r.x) * (r.w - r.y)
 
 # The pixels of a w by h picture seen by camera that a box from lo to hi covers, and when it casts,
 # the shadow it throws along sun down to floor as well. The whole picture when a corner lies behind
